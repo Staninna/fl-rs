@@ -8,6 +8,7 @@
 //! [`curve`] is the one FL-specific part: the envelope curve that both the
 //! engine and the plugins draw.
 
+pub mod additive;
 pub mod biquad;
 pub mod curve;
 pub mod resample;

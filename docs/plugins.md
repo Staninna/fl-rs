@@ -16,7 +16,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | Fruity Soft Clipper | 3631 | yes | 23 | implemented in crates/plugins, docs/plugins/fruity-soft-clipper.md |
 | Generator | Sytrus | 6122 | yes | 22 | implemented in crates/plugins, approximate (state versions 8..25 exact; operators, FM/RM matrix, articulators and three filters play; no unison sub-voices, plucked mode, waveshaper, effects or automation; versions 5..7 refused), docs/plugins/sytrus.md |
 | Effect | Fruity PanOMatic | 3671 | yes | 21 | implemented in crates/plugins (approximated when the LFO runs at a rate other than 44100), docs/plugins/fruity-panomatic.md |
-| Generator | Harmless | 4664 | yes | 21 | mapped (state high; image build, sine bank kernels and effect setters open), docs/plugins/harmless.md |
+| Generator | Harmless | 4664 | yes | 21 | implemented in crates/plugins, approximate (state versions 4..12, timbre colours and EQ, mask, filter/resonance/phaser curves, pluck, harmonizer, protection, sine bank, envelopes, LFO and unison exact; compression is the Maximus of Data/Compression/N.fst read at runtime; chorus, delay and reverb are stand-ins with FL's settings tables, tremolo smoothing, mono/legato/portamento, slide notes, phaser type 9 and resonance type 8 approximated), docs/plugins/harmless.md |
 | Generator | FPC | 5925 | yes | 20 | |
 | Effect | Fruity Flangus | 3600 | yes | 19 | implemented in crates/plugins (exact; the truncating x87 voice renderer, the only one the DLL selects), docs/plugins/fruity-flangus.md |
 | Generator | Harmor | 6326 | yes | 19 | |

@@ -49,6 +49,7 @@ pub mod filter;
 pub mod flangus;
 pub mod fruit_kick;
 mod generator;
+pub mod harmless;
 pub mod limiter;
 pub mod love_philter;
 pub mod maximus;

@@ -164,6 +164,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
     }),
+    (crate::harmless::NAME, || {
+        Box::new(crate::harmless::Harmless::default())
+    }),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),
