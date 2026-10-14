@@ -25,7 +25,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Generator | Slicex | 6135 | yes | 18 | |
 | Effect | Control Surface | 5556 |  | 17 | |
 | Effect | Fruity Fast Dist | 3616 | yes | 17 | implemented in crates/plugins, docs/plugins/fruity-fast-dist.md |
-| Effect | Pitcher | 436 | yes | 17 | |
+| Effect | Pitcher | 436 | yes | 17 | implemented in crates/plugins (detector, scale correction, delay-line and formant shifters, harmony voices exact up to the last bit of powf, log2f and cos, read from Pitcher_x64.dll itself; MIDI mode and MIDI-driven harmony approximated: no host sends the notes of a MIDI Out channel yet, 2 of 65 corpus states), docs/plugins/pitcher.md |
 | Effect | Fruity Delay 2 | 3644 | yes | 16 | implemented in crates/plugins, docs/plugins/fruity-delay-2.md |
 | Effect | Gross Beat | 5713 | yes | 16 | |
 | Effect | Fruity Compressor | 3635 | yes | 15 | implemented in crates/plugins, docs/plugins/fruity-compressor.md |

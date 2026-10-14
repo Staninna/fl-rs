@@ -20,7 +20,8 @@
 //! [`maximus::Maximus`],
 //! [`multiband_compressor::MultibandCompressor`], [`panomatic::PanOMatic`],
 //! [`parametric_eq_2::ParametricEq2`],
-//! [`peak_controller::PeakController`], [`reeverb_2::Reeverb2`],
+//! [`peak_controller::PeakController`], [`pitcher::Pitcher`],
+//! [`reeverb_2::Reeverb2`],
 //! [`soft_clipper::SoftClipper`], [`soundgoodizer::Soundgoodizer`],
 //! [`spreader::Spreader`],
 //! [`stereo_enhancer::StereoEnhancer`], [`stereo_shaper::StereoShaper`],
@@ -56,6 +57,7 @@ pub mod panomatic;
 pub mod parametric_eq_2;
 mod parts;
 pub mod peak_controller;
+pub mod pitcher;
 pub mod reeverb_2;
 pub mod soft_clipper;
 pub mod soundgoodizer;
@@ -308,6 +310,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(parametric_eq_2::ParametricEq2::default()))
     } else if is(peak_controller::NAME) {
         Some(Box::new(peak_controller::PeakController::default()))
+    } else if is(pitcher::NAME) {
+        Some(Box::new(pitcher::Pitcher::default()))
     } else if is(reeverb_2::NAME) {
         Some(Box::new(reeverb_2::Reeverb2::default()))
     } else if is(soft_clipper::NAME) {
@@ -593,6 +597,8 @@ mod tests {
             ("fruity soft clipper", 8, 28),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
+            ("pitcher", 160, 61),
+            ("pitcher", 164, 1),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
         ] {
@@ -628,7 +634,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 28);
+        assert_eq!(lengths.count(), 30);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
