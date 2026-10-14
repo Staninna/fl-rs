@@ -27,7 +27,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | Fruity Fast Dist | 3616 | yes | 17 | implemented in crates/plugins, docs/plugins/fruity-fast-dist.md |
 | Effect | Pitcher | 436 | yes | 17 | implemented in crates/plugins (detector, scale correction, delay-line and formant shifters, harmony voices exact up to the last bit of powf, log2f and cos, read from Pitcher_x64.dll itself; MIDI mode and MIDI-driven harmony approximated: no host sends the notes of a MIDI Out channel yet, 2 of 65 corpus states), docs/plugins/pitcher.md |
 | Effect | Fruity Delay 2 | 3644 | yes | 16 | implemented in crates/plugins, docs/plugins/fruity-delay-2.md |
-| Effect | Gross Beat | 5713 | yes | 16 | |
+| Effect | Gross Beat | 5713 | yes | 16 | implemented in crates/plugins (state versions 1 to 9, time and volume envelopes, slot triggers and position sync from the song's tick, hold, link, one-shot, scratch, the sinc reader with its anti-aliasing, click reduction, DC removal and the 15-frame latency exact; the sinc's reciprocal and the tension's 11-bit IPP exp approximated; MIDI, keyboard and GUI slot triggers have no source; a song loop counts as a move, inferred), docs/plugins/gross-beat.md |
 | Effect | Fruity Compressor | 3635 | yes | 15 | implemented in crates/plugins, docs/plugins/fruity-compressor.md |
 | Effect | Transient Processor | 3878 | yes | 15 | implemented in crates/plugins (a shell around engine_x64.dll, read in full, exact), docs/plugins/transient-processor.md |
 | Generator | FLEX | 7929 | yes | 15 | mapped (shell state high; patches live in obfuscated .flexpack archives and the engine DLLs, not read), docs/plugins/flex.md |

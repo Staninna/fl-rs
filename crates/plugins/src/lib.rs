@@ -49,6 +49,7 @@ pub mod filter;
 pub mod flangus;
 pub mod fruit_kick;
 mod generator;
+pub mod gross_beat;
 pub mod harmless;
 pub mod limiter;
 pub mod love_philter;
@@ -114,12 +115,20 @@ pub trait Effect: Send {
     /// place in the song and `tempo` the song's tempo there, in BPM.
     ///
     /// A host calls this for a plugin that has
-    /// [`Effect::controller_outputs`], once for every tick and in order
-    /// while the song plays on, and cuts its blocks so that the tick's first
-    /// frame is the first of the next [`Effect::process`]. A tick that does
-    /// not follow the one before it says the song was started or moved. A
-    /// plugin that does not say takes no notice. This allocates nothing.
+    /// [`Effect::controller_outputs`] or [`Effect::follows_song`], once for
+    /// every tick and in order while the song plays on, and cuts its blocks
+    /// so that the tick's first frame is the first of the next
+    /// [`Effect::process`]. A tick that does not follow the one before it
+    /// says the song was started or moved. A plugin that does not say takes
+    /// no notice. This allocates nothing.
     fn tick(&mut self, _ppq_tick: u64, _tempo: f64) {}
+
+    /// Whether the plugin keeps in step with the song's place and so wants
+    /// every [`Effect::tick`], as Gross Beat does. A plugin that does not
+    /// say does not.
+    fn follows_song(&self) -> bool {
+        false
+    }
 
     /// What the plugin puts out beside sound, for a plugin that is an
     /// internal controller: one value from 0 to 1 for every output it has,
@@ -298,6 +307,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(filter::Filter::default()))
     } else if is(flangus::NAME) {
         Some(Box::new(flangus::Flangus::default()))
+    } else if is(gross_beat::NAME) {
+        Some(Box::new(gross_beat::GrossBeat::default()))
     } else if is(limiter::NAME) {
         Some(Box::new(limiter::Limiter::default()))
     } else if is(love_philter::NAME) {
@@ -633,6 +644,7 @@ mod tests {
             "fruity fast dist",
             "fruity love philter",
             "fruity waveshaper",
+            "gross beat",
             "maximus",
             "soundgoodizer",
         ];

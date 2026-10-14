@@ -170,8 +170,9 @@ struct Hosted {
     side: Option<usize>,
     /// Where the plugin's second output goes, when it has one.
     aux: Option<Aux>,
-    /// Whether the plugin is a controller: it has outputs beside its
-    /// sound, and hears of every tick of the song.
+    /// Whether the plugin hears of every tick of the song: a controller,
+    /// which has outputs beside its sound, or a plugin that follows the
+    /// song's place.
     ticks: bool,
 }
 
@@ -182,7 +183,7 @@ impl Hosted {
         Hosted {
             slot,
             latency: effect.latency(),
-            ticks: !effect.controller_outputs().is_empty(),
+            ticks: !effect.controller_outputs().is_empty() || effect.follows_song(),
             effect,
             enabled: true,
             mix: 1.0,
