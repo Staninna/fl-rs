@@ -161,6 +161,22 @@ pub fn prepare(project: &Project, sample_root: &Path) -> Result<PreparedSamples,
             samples.failed.push((usize::from(channel.index), error));
         }
     }
+    // The files a generator's state names, such as FPC's pads.
+    for channel in &project.channels {
+        let state = channel.plugin_state.as_deref();
+        let name = channel.plugin_name.as_deref();
+        let Some((state, name)) = state.zip(name) else {
+            continue;
+        };
+        let Some(mut generator) = plugins::generator_by_name(name) else {
+            continue;
+        };
+        if generator.set_state(state).is_ok() {
+            for path in generator.sample_paths() {
+                let _ = samples.load(&path, sample_root);
+            }
+        }
+    }
     Ok(samples)
 }
 
