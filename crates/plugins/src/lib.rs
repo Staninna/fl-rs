@@ -59,6 +59,7 @@ pub mod harmor;
 mod harmor_art;
 mod harmor_fx;
 mod harmor_state;
+pub mod hyper_chorus;
 pub mod limiter;
 pub mod love_philter;
 pub mod luxeverb;
@@ -332,6 +333,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(flangus::Flangus::default()))
     } else if is(gross_beat::NAME) {
         Some(Box::new(gross_beat::GrossBeat::default()))
+    } else if is(hyper_chorus::NAME) {
+        Some(Box::new(hyper_chorus::HyperChorus::default()))
     } else if is(limiter::NAME) {
         Some(Box::new(limiter::Limiter::default()))
     } else if is(love_philter::NAME) {
@@ -650,6 +653,7 @@ mod tests {
             ("fruity soft clipper", 8, 28),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
+            ("hyper chorus", 52, 20),
             ("luxeverb", 165, 13),
             ("luxeverb", 169, 11),
             ("pitcher", 160, 61),
@@ -691,7 +695,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 34);
+        assert_eq!(lengths.count(), 35);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
