@@ -161,7 +161,9 @@ pub fn prepare(project: &Project, sample_root: &Path) -> Result<PreparedSamples,
             samples.failed.push((usize::from(channel.index), error));
         }
     }
-    // The files a generator's state names, such as FPC's pads.
+    // The files a generator's state names, such as FPC's pads, or that it
+    // finds in its own directory, such as FL Keys's wavetables.
+    let plugin_dir = samples.plugin_dir().map(Path::to_path_buf);
     for channel in &project.channels {
         let state = channel.plugin_state.as_deref();
         let name = channel.plugin_name.as_deref();
@@ -171,6 +173,9 @@ pub fn prepare(project: &Project, sample_root: &Path) -> Result<PreparedSamples,
         let Some(mut generator) = plugins::generator_by_name(name) else {
             continue;
         };
+        if let Some(dir) = &plugin_dir {
+            generator.set_resource_dir(dir);
+        }
         if generator.set_state(state).is_ok() {
             for path in generator.sample_paths() {
                 let _ = samples.load(&path, sample_root);
@@ -471,6 +476,22 @@ mod tests {
         let mut kept = named;
         kept.extend(found);
         assert_eq!(kept.plugin_dir(), Some(Path::new("/other")));
+    }
+
+    #[test]
+    fn a_generator_is_told_its_directory_before_it_names_its_files() {
+        // FL Keys's Grand Piano finds its 30 files in FL Keys/Wavtables,
+        // so it can only name them once it knows where that is.
+        let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
+            eprintln!("FL_RS_CORPUS unset, FL Keys's files skipped");
+            return;
+        };
+        let bytes = std::fs::read(root.join("System/Render tests/FL Keys.flp")).unwrap();
+        let project = model::from_flp(&flp::Project::parse(&bytes).unwrap());
+        let samples = prepare(&project, &root).unwrap();
+        let piano = samples.loaded.keys().filter(|p| p.contains("Grand Piano"));
+        let decoded = piano.filter(|p| samples.get(p).is_some()).count();
+        assert_eq!(decoded, 30);
     }
 
     /// A directory under the system's temp directory, removed on drop.
