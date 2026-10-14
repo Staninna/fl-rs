@@ -21,7 +21,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | Fruity Flangus | 3600 | yes | 19 | implemented in crates/plugins (exact; the truncating x87 voice renderer, the only one the DLL selects), docs/plugins/fruity-flangus.md |
 | Generator | Harmor | 6326 | yes | 19 | mapped (state complete for versions 11..19; voice, articulators, spectral units, tone bank and FX chain with maths; open: resynthesis link codes, auto-gain energy measure), docs/plugins/harmor.md |
 | Effect | Fruity Love Philter | 5856 | yes | 18 | implemented in crates/plugins (all twelve filters, oversampling, articulators, follower and waveshaper exact; looped sustain and arpeggiator points approximated, none in the corpus), docs/plugins/fruity-love-philter.md |
-| Generator | DirectWave | 1094 | yes | 18 | |
+| Generator | DirectWave | 1094 | yes | 18 | implemented in crates/plugins (state, zones, groups, the 32.32 linear reader, loop modes, ADSR envelopes, LFOs, the modulation matrix, cookbook filters, limiter, gains and shapers exact; the program's three send effects (one a reverb), program LFOs, zone effects, filter types 6 and 7, stretching and HQ interpolation left out and said; FL's `rand` stream and block sizes not FL's), docs/plugins/directwave.md |
 | Generator | Slicex | 6135 | yes | 18 | |
 | Effect | Control Surface | 5556 |  | 17 | |
 | Effect | Fruity Fast Dist | 3616 | yes | 17 | implemented in crates/plugins, docs/plugins/fruity-fast-dist.md |
