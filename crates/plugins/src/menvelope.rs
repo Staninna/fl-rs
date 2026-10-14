@@ -40,7 +40,9 @@
 //! stays on the loop end, and without either it stays on the last point.
 //!
 //! An [`Lfo`] is such an envelope, which is its level, times an oscillator
-//! whose phase is 32 bits to the cycle.
+//! whose phase is 32 bits to the cycle. The level counts from 0.5: a point
+//! at 1 swings the LFO by ±0.5, one at 0.5 stills it and one under 0.5
+//! turns it upside down.
 //!
 //! What is left out, and [`MEnvelope::plain`] says when a stream asks for
 //! it:
@@ -625,6 +627,13 @@ impl Oscillator {
     }
 }
 
+/// What an LFO's level is counted from. `TMLFO`'s constructor sets its
+/// centre (+0x18) to 0.5 before the base constructor runs (Love Philter
+/// `0x788410`, Sytrus `0x789fa0`, Harmor `0x7a2dd0`), and no articulator's
+/// mode setter touches it: they set the centre of the envelope and the
+/// maps only (Love Philter `0x8544d0`, `0x789cc0`; Sytrus `0x861300`).
+const LEVEL_CENTRE: f64 = 0.5;
+
 /// An LFO made ready to run: its level, which is an envelope, and its
 /// oscillator.
 #[derive(Debug, Clone, PartialEq)]
@@ -645,7 +654,7 @@ pub(crate) struct Lfo {
 pub(crate) struct LfoRun {
     level: Run,
     phase: u32,
-    /// The LFO's value now: its level times its oscillator.
+    /// The LFO's value now: its level less 0.5, times its oscillator.
     pub(crate) out: f32,
 }
 
@@ -655,7 +664,7 @@ impl Lfo {
         let whole = envelope.flags & WHOLE != 0;
         let oscillator = Oscillator::new([tension, skew, width], whole);
         Lfo {
-            level: Track::new(envelope, 0.0),
+            level: Track::new(envelope, LEVEL_CENTRE),
             phase: envelope.phase as u32,
             start: oscillator.start().wrapping_add(envelope.phase as u32),
             oscillator,
@@ -1075,14 +1084,47 @@ pub(crate) mod tests {
             lfo.advance(&mut run, 1.0, rate);
             heard.push(run.out);
         }
+        // A level of 1 is 0.5 over the centre, so the swing is ±0.5.
         let peak = heard.iter().fold(0f32, |max, v| max.max(*v));
         let low = heard.iter().fold(0f32, |min, v| min.min(*v));
-        assert!((peak - 1.0).abs() < 0.07 && (low + 1.0).abs() < 0.07);
+        assert!((peak - 0.5).abs() < 0.035 && (low + 0.5).abs() < 0.035);
         // Up for a quarter, down for a half, up for a quarter.
         assert!(heard[..14].windows(2).all(|w| w[1] > w[0]));
         assert!(heard[17..46].windows(2).all(|w| w[1] < w[0]));
         assert!(heard[49..].windows(2).all(|w| w[1] > w[0]));
-        assert!(heard[63].abs() < 0.07, "{}", heard[63]);
+        assert!(heard[63].abs() < 0.035, "{}", heard[63]);
+    }
+
+    /// The LFO at the top of its triangle, with its level at `level`: a
+    /// quarter of a cycle on from its start once it has moved a 1024th.
+    fn top_of(level: f64) -> f32 {
+        let tail = [26_259, 0, 0, 0, (1 << 30) - (1 << 22)];
+        let points = [point(0.0, level, 0)];
+        let bytes = stream(2, 3, &points, [1, -1, -1, -1, -1], &tail);
+        let lfo = Lfo::new(&read(&bytes, Class::Lfo).unwrap());
+        let rate = CYCLE / 1024.0 / lfo.pace(1.0);
+        let mut run = lfo.start(rate);
+        lfo.advance(&mut run, 1.0, rate);
+        run.out
+    }
+
+    #[test]
+    fn an_lfo_s_level_counts_from_0_5() {
+        // FL's articulator: an adding one does `v += l * amount`, a
+        // multiplying one `v *= l * amount * 2 + 1`. At amount 1 and a
+        // level of 1, the first swings by ±0.5 and the second between 0
+        // and 2, never below 0.
+        let full = top_of(1.0);
+        assert!((full - 0.5).abs() < 1e-3, "{full}");
+        let amount = 1.0;
+        let (high, low) = (full * amount * 2.0 + 1.0, -full * amount * 2.0 + 1.0);
+        assert!(
+            (high - 2.0).abs() < 2e-3 && low.abs() < 2e-3,
+            "{high} {low}"
+        );
+        // A level of 0.5 stills it, and one of 0 turns it upside down.
+        assert!(top_of(0.5).abs() < 1e-6);
+        assert!((top_of(0.0) + 0.5).abs() < 1e-3);
     }
 
     #[test]
@@ -1102,7 +1144,7 @@ pub(crate) mod tests {
         let rate = CYCLE / 64.0 / lfo.pace(1.0);
         let mut run = lfo.start_before(rate);
         lfo.advance(&mut run, 1.0, rate);
-        assert!((run.out + 1.0 / 16.0).abs() < 1e-3, "{}", run.out);
+        assert!((run.out + 1.0 / 32.0).abs() < 1e-3, "{}", run.out);
         lfo.advance(&mut run, 1.0, rate);
         assert!(run.out.abs() < 1e-3, "{}", run.out);
         // The knobs can be moved under it.
@@ -1117,7 +1159,7 @@ pub(crate) mod tests {
         let rate = CYCLE / 1024.0 / top.pace(1.0);
         let mut run = top.start(rate);
         top.advance(&mut run, 1.0, rate);
-        assert!(run.out > 0.98, "{}", run.out);
+        assert!(run.out > 0.49, "{}", run.out);
 
         // A tension bends the triangle and keeps its ends.
         let bent = Oscillator::new([64, 0, 0], false);

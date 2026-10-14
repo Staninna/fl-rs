@@ -640,7 +640,7 @@ Evaluation per tick (`FUN_00897d90`, then `FUN_00898120` on the first tick):
 ```
 acc = s[0] (base)
 envelope: e = run.out - centre;  mode 1: acc += e·s[0x46]   else acc *= e·s[0x46]      (s[0x46] = 2 for mode 2)
-LFO:      l = run.level·osc(phase);  mode 1: acc += l·lfoAmt   else acc *= 2 l lfoAmt + 1
+LFO:      l = (run.level - 0.5)·osc(phase);  mode 1: acc += l·lfoAmt   else acc *= 2 l lfoAmt + 1
 map k:    acc ⊕= map(in[k])
 s[1] = acc + (s[1] - acc)·art+0xa8          (output smoothing)
 inputs: key = (Final.Pitch + part+0x38 + glide + 6000)/12000; vel = voice+8 + glide; X = sX + (Final.FCut + glide)/2;
@@ -665,10 +665,17 @@ points, plays on when there is no loop end), the arpeggiator (stage 5, rank
 and count from `FUN_007a24b0`), decay scale <= 0 freezing the loop, mode 10
 neighbours across the loop wrap, live scale changes, shared envelope runs
 (flag 2, `FUN_007a2cc0`), global LFO phase (`this+0x2cf0`), song-position
-resync (`0x897390`), negative seek (predelay) and the attack jump. The LFO
-level run has centre 0.5 where `Lfo::new` in `menvelope.rs` uses 0, so with
-the Rust code an LFO is twice as deep and inverts below 0.5; the Love
-Philter and Sytrus ports likely carry the same error.
+resync (`0x897390`), negative seek (predelay) and the attack jump.
+
+The LFO level run has centre 0.5, checked in all three DLLs: `TMLFO`'s
+constructor stores 0.5 at +0x18 before the base constructor runs (Harmor
+`0x7a2dd0`, Love Philter `0x788410`, Sytrus `0x789fa0`), the stream reader
+leaves +0x18 alone, and the articulators' mode setters re-centre only the
+envelope and the maps (Love Philter `0x8544d0` and `0x789cc0`, Sytrus
+`0x861300`). The tick hands on `(level - 0.5)·osc`. `Lfo::new` in
+`menvelope.rs` used 0, which made every LFO twice as deep and turned it
+over below 0.5; it now uses 0.5, which fixes Love Philter, Sytrus and
+Harmor together.
 
 Envelope parts the volume path uses: the volume articulator (a = 1) is
 `art[1]^2·part+0x18` on the partial levels (section 3.7). With its envelope
