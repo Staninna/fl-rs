@@ -149,9 +149,8 @@ const TEMPO: u32 = 1;
 const WHOLE: u32 = 4;
 /// An LFO stands still. Only `TMLFO`'s update reads this bit of the
 /// stream's flags (+0x44): with it set the phase step +0xa0 is 0 (Love
-/// Philter `0x7887d5`, Sytrus `0x78a365`, Harmor `0x7a3070`). The reader's
-/// "keep the decay marker" test at `0x780453` is on the class's own mask
-/// at +0x20, which `TMLFO`'s constructor clears (`0x7884e0`).
+/// Philter `0x7887d5`, Sytrus `0x78a365`, Harmor `0x7a3070`). It is not
+/// the bit that drops an LFO's decay marker: see [`MEnvelope::read`].
 const FROZEN: u32 = 8;
 
 /// One envelope as a stream has it.
@@ -222,7 +221,16 @@ impl MEnvelope {
         }
         let flags = reader.u32()?;
         let active = reader.i32()? != 0;
-        let (decay, loop_start, loop_end) = (reader.i32()?, reader.i32()?, reader.i32()?);
+        let (mut decay, loop_start, loop_end) = (reader.i32()?, reader.i32()?, reader.i32()?);
+        // FL's reader (Sytrus `0x781be0`, the test at `0x781f53`) sets the
+        // decay marker to -1 when bit 8 of the class's own mask (+0x20) is
+        // clear, whatever the version or the stream's flags. The base
+        // constructor sets the mask to 0x3f (`0x781a20`) and only `TMLFO`'s
+        // clears that bit (`0x789fa0`; Love Philter `0x7884e0`), so an LFO
+        // never keeps one.
+        if class == Class::Lfo {
+            decay = -1;
+        }
         let mut knobs = ENVELOPE_KNOBS;
         let mut phase = 0;
         if class != Class::Map {
@@ -837,6 +845,28 @@ pub(crate) mod tests {
             assert_eq!(read_lfo.phase, if version == 3 { 1 << 30 } else { 0 });
             // Read as the wrong class, it does not end where it should.
             assert!(read(&lfo, Class::Map).is_err());
+        }
+    }
+
+    #[test]
+    fn an_lfo_drops_its_decay_marker_and_the_other_classes_keep_it() {
+        let points = [point(0.0, 0.0, 0), point(1.0, 1.0, 0), point(1.0, 0.5, 0)];
+        for version in 0..=3 {
+            // Flags 0 and 8, so the frozen bit is not what drops it.
+            for flags in [0, FROZEN as i32] {
+                let block = [flags, 1, 1, 0, 2];
+                let tail: &[i32] = if version == 3 {
+                    &[40_000, 0, 0, 0, 0]
+                } else {
+                    &[40_000, 0, 0, 0]
+                };
+                let lfo = read(&stream(2, version, &points, block, tail), Class::Lfo).unwrap();
+                assert_eq!((lfo.decay, lfo.loop_start, lfo.loop_end), (-1, 0, 2));
+                let adsr = stream(1, version, &points, block, &ENVELOPE_KNOBS);
+                assert_eq!(read(&adsr, Class::Envelope).unwrap().decay, 1);
+                let map = stream(3, version, &points, block, &[]);
+                assert_eq!(read(&map, Class::Map).unwrap().decay, 1);
+            }
         }
     }
 
