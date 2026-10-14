@@ -161,6 +161,7 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::boobass::NAME, || {
         Box::new(crate::boobass::BooBass::default())
     }),
+    (crate::fpc::NAME, || Box::new(crate::fpc::Fpc::default())),
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
     }),
