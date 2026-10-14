@@ -42,6 +42,7 @@ pub mod convolver;
 pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
+pub mod directwave;
 pub mod effector;
 pub mod fast_dist;
 pub mod fast_lp;
