@@ -43,7 +43,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | Fruity Chorus | 3656 | yes | 9 | implemented in crates/plugins (exact; LFO phases from Delphi's Random from seed 0; its render test sits inside a Fruity Wrapper, so unit tests only), docs/plugins/fruity-chorus.md |
 | Effect | Fruity Convolver | 6012 | yes | 9 | implemented in crates/plugins (convolution, levels, separation, normalise and pre-delay exact at the impulse's rate; resampled impulses, drawn layers, self-convolution and EQ curves approximated), docs/plugins/fruity-convolver.md |
 | Effect | Fruity Stereo Enhancer | 3641 | yes | 9 | implemented in crates/plugins, docs/plugins/fruity-stereo-enhancer.md |
-| Effect | Luxeverb | 4239 |  | 9 | |
+| Effect | Luxeverb | 4239 |  | 9 | implemented in crates/plugins (a shell around the shimmer reverb in Shared/ildsp_x64.dll, read in full: control curves, 16-line network, damping shelves, LFO, matrix, predelay, diffusers, envelope, limiter, peak filter, feedback and feedforward pitch shifters; all 126 corpus and preset states, versions 7 and 8; FL's round-toward-zero arithmetic and the shifters' seed shared across instances are not reproduced; no render test, unit tests only), docs/plugins/luxeverb.md |
 | Effect | Spreader | 3821 | yes | 9 | implemented in crates/plugins (exact; the DSP is a Faust processor in Shared/ildsp_x64.dll, transcribed), docs/plugins/spreader.md |
 | Effect | ZGameEditor Visualizer | 807 |  | 9 | |
 | Generator | Autogun | 6144 | yes | 9 | |
