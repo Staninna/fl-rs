@@ -677,6 +677,17 @@ envelope and the maps (Love Philter `0x8544d0` and `0x789cc0`, Sytrus
 over below 0.5; it now uses 0.5, which fixes Love Philter, Sytrus and
 Harmor together.
 
+An LFO never keeps a decay marker. The base constructor sets a class mask
+at +0x20 to 0x3f (Sytrus `0x781a20`), and `TMLFO`'s constructor clears bit
+8 of it (Sytrus `0x789fa0`, Love Philter `0x7884e0`). After the 20-byte
+block the stream reader (Sytrus `0x781be0`) sets the decay marker (+0x4c)
+to -1 when that bit is clear (the test at `0x781f53`), for every stream
+version and whatever the stream's own flags say. No other class touches
+the mask, so envelopes and maps keep their marker. `MEnvelope::read` does
+the same for `Class::Lfo`. Two more bits of the mask sit in the same
+reader: with 0x10 clear it zeroes each point's arpeggiator byte, and with
+0x4 clear it calls `0x7849a0`. Every class leaves both set.
+
 Envelope parts the volume path uses: the volume articulator (a = 1) is
 `art[1]^2·part+0x18` on the partial levels (section 3.7). With its envelope
 off the voice is a gate: full level while held, and it ends at release.
