@@ -248,6 +248,19 @@ impl Graph {
             plugin_dir,
         };
         let mut mixer = Mixer::new(project, &played, &sends, &controllers, told, curves)?;
+        // The files a generator's state names come from where a channel's
+        // sample does. One that does not decode counts as missing.
+        for hosted in &mut rack.hosted {
+            for path in hosted.generator.sample_paths() {
+                let file = sample(&path).ok().flatten();
+                let file = file.as_deref().map(|file| plugins::SampleFile {
+                    left: &file.left,
+                    right: file.right.as_deref(),
+                    rate: file.rate,
+                });
+                hosted.generator.set_sample(&path, file);
+            }
+        }
         let cues = rack.cues();
         let approximated_generators = rack.approximated();
         mixer.host(rack.hosted);
