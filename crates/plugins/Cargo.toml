@@ -1,0 +1,21 @@
+[package]
+name = "plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "FL Studio's stock effects for the fl-rs engine, rebuilt from the maths in docs/plugins"
+
+[dependencies]
+dsp = { path = "../dsp" }
+# Love Philter saves its state as a zlib stream.
+miniz_oxide = "0.9"
+# Convolver's impulses are WavPack files.
+wavicle = "0.1"
+
+[features]
+# TestSine, a generator FL does not have. The engine's tests play it.
+test-generators = []
+
+[lints]
+workspace = true
