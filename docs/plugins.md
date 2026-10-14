@@ -8,7 +8,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | Fruity Limiter | 3777 | yes | 52 | implemented in crates/plugins, docs/plugins/fruity-limiter.md |
 | Effect | Maximus | 5766 | yes | 40 | implemented in crates/plugins (IIR and FIR crossovers, curves, detectors, saturators and low cut exact; 2x oversampling and the linear-phase crossover approximated), docs/plugins/maximus.md |
 | Generator | 3x Osc | 4247 | yes | 39 | implemented in crates/plugins (HQ tables approximated), docs/plugins/3x-osc.md |
-| Effect | Fruity Reeverb 2 | 3742 | yes | 38 | implemented in crates/plugins, docs/plugins/fruity-reeverb-2.md |
+| Effect | Fruity Reeverb 2 | 3742 | yes | 38 | implemented in crates/plugins (network, taps, predelay and modulation follow the engine's listing sample for sample; coefficients follow the Delphi update in f64 and are not checked bit for bit), docs/plugins/fruity-reeverb-2.md |
 | Effect | Fruity Delay 3 | 3847 |  | 31 | implemented in crates/plugins, docs/plugins/fruity-delay-3.md |
 | Effect | Fruity WaveShaper | 5608 | yes | 29 | implemented in crates/plugins (oversampling approximated), docs/plugins/fruity-waveshaper.md |
 | Effect | Fruity Stereo Shaper | 3711 | yes | 27 | implemented in crates/plugins, docs/plugins/fruity-stereo-shaper.md |

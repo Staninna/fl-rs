@@ -29,9 +29,10 @@
 //!
 //! The two sides of the input are added up, or taken off each other for a
 //! mid/side input. That one signal goes through the high cut, the low cut
-//! and four allpass diffusers. From there it feeds a line the early
-//! reflections are tapped off, eight a side, and through the predelay the
-//! tank: two halves in a figure of eight, each a shelf, a damping low
+//! and four allpass diffusers. What the first diffuser gives also feeds a
+//! line the early reflections are tapped off, eight a side. What the
+//! fourth gives goes through the predelay, at least one sample long, into
+//! the tank: two halves in a figure of eight, each a shelf, a damping low
 //! pass, a delay an LFO moves, an allpass, a delay, an allpass and a delay.
 //! Seven taps a side into the tank's lines are the wet sound. The output is
 //! the input at the dry level, plus the reflections and the wet sound each
@@ -227,7 +228,9 @@ impl Tune {
             p(2) * rate / 384.0
         };
 
-        let speed = p(13) / 2048.0;
+        // The engine works the modulation out in f32 (`0x18000335e`).
+        let speed = (p(13) / 2048.0) as f32;
+        let hz = rate as f32;
         let feedback = feedback as f32;
         Tune {
             low_cut,
@@ -246,9 +249,9 @@ impl Tune {
             early_left: std::array::from_fn(|k| early(k, &EARLY_LEFT, 0.5)),
             early_right: std::array::from_fn(|k| early(k, &EARLY_RIGHT, 0.36)),
             predelay: predelay.round_ties_even() as usize,
-            lfo_step: ((speed.powi(3) * 9.9 + 0.1) / rate) as f32,
-            depth: (p(14) / 2048.0 * DEPTH * rate) as f32,
-            depth_keep: 0.01f64.powf(1.0 / (0.1 * rate)) as f32,
+            lfo_step: (speed * speed * speed * 9.9 + 0.1) / hz,
+            depth: (p(14) / 2048.0) as f32 * DEPTH as f32 * hz,
+            depth_keep: 0.01f32.powf((1.0 / (f64::from(hz) * 0.1)) as f32),
         }
     }
 }
@@ -280,11 +283,12 @@ impl Ring {
     }
 
     /// What was written `back` samples before the last one, on a straight
-    /// line between the two samples around it.
+    /// line between the two samples around it (`FUN_180001180`).
     fn read_between(&self, back: f32) -> f32 {
         let whole = back as usize;
         let (near, far) = (self.read(whole), self.read(whole + 1));
-        near + (far - near) * (back - whole as f32)
+        let part = back - whole as f32;
+        (1.0 - part) * near + part * far
     }
 }
 
@@ -345,6 +349,7 @@ impl Default for Reeverb2 {
             depth: 0.0,
         };
         plugin.make_room();
+        plugin.predelay.start(1);
         plugin.aim();
         plugin.settle();
         plugin
@@ -405,14 +410,14 @@ impl Reeverb2 {
         let tune = Tune::new(&params, self.tempo_based, self.rate, self.tempo);
         let (room, predelay) = (
             tune.lens != self.tune.lens,
-            tune.predelay != self.predelay.samples.len(),
+            tune.predelay.max(1) != self.predelay.samples.len(),
         );
         self.tune = tune;
         if room {
             self.lines_anew();
         }
         if predelay {
-            self.predelay.start(tune.predelay);
+            self.predelay.start(tune.predelay.max(1));
             self.clear();
         }
         self.aim();
@@ -440,11 +445,20 @@ impl Reeverb2 {
     fn frame(&mut self, input: f32, reflections: bool) -> ([f32; 2], [f32; 2]) {
         let tune = &self.tune;
 
-        self.phase += tune.lfo_step;
-        self.phase -= self.phase.floor();
-        self.depth += (tune.depth - self.depth) * (1.0 - tune.depth_keep);
-        let turn = f64::from(self.phase) * std::f64::consts::TAU;
-        let swing = self.depth * (turn.sin() as f32 + 1.0) * 0.5;
+        // The sine is of the phase before this frame's step, and the depth
+        // jumps to its target once it is within 0.01 of it
+        // (`0x180003420..0x1800034b4`).
+        let before = self.phase;
+        let phase = before + tune.lfo_step;
+        self.phase = phase - phase.trunc();
+        let gap = tune.depth - self.depth;
+        self.depth = if gap.abs() < 0.01 {
+            tune.depth
+        } else {
+            gap * (1.0 - tune.depth_keep) + self.depth + 1e-30
+        };
+        let wave = (f64::from(before) * std::f64::consts::TAU).sin() as f32;
+        let swing = self.depth * ((wave + 1.0) * 0.5);
 
         // The high cut, then the low cut: half of what its allpass and
         // its input differ by.
@@ -453,27 +467,37 @@ impl Reeverb2 {
         let turned = (self.high - self.low[0]) * tune.low_cut + self.low[1];
         self.low = [turned, self.high];
         let mut x = if tune.low_cut != 0.0 {
-            (self.high - turned) * 0.5
+            (self.high - turned) * 0.5 + 1e-30
         } else {
             self.high
         };
 
+        // Every line steps right after its access, as FL's do. The first
+        // diffuser feeds the reflections' line (`0x1800037f7`).
         let (diffusers, tank) = self.lines.split_at_mut(4);
-        for line in diffusers.iter_mut() {
+        for (k, line) in diffusers.iter_mut().enumerate() {
             x = line.allpass(x, tune.diffuser);
+            line.step();
+            if k == 0 {
+                self.early.write(x);
+            }
         }
-        self.early.write(x);
-        let mut fed = x;
-        if !self.predelay.samples.is_empty() {
-            fed = self.predelay.delay(x);
-            self.predelay.step();
-        }
-        fed += 1e-20;
+        // A predelay of 0 is a line of one sample.
+        let fed = self.predelay.delay(x) + 1e-20;
+        self.predelay.step();
 
-        // Each half starts from what the other half's last delay gives.
-        let ends = [tank[7].tap(0), tank[3].tap(0)];
-        for (half, lines) in tank.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let c = ends[half] * tune.feedback;
+        // Each half starts from the other half's last delay: the first
+        // reads line 11 before the second writes it, the second reads line
+        // 7 after the first has written it and stepped, one sample newer
+        // (`0x180003a2c..0x180003a6a`).
+        for half in 0..2 {
+            let (first, second) = tank.split_at_mut(4);
+            let (lines, other) = if half == 0 {
+                (first, &second[3])
+            } else {
+                (second, &first[3])
+            };
+            let c = other.samples[other.at] * tune.feedback;
             let shelf = &mut self.shelf[half];
             let turned = (c - shelf[0]) * tune.crossover + shelf[1];
             *shelf = [turned, c];
@@ -483,13 +507,19 @@ impl Reeverb2 {
             self.swung[half].write(y);
             let y = self.swung[half].read_between(swing);
             let v = lines[0].allpass(y, tune.tank_first);
+            lines[0].step();
             let v = lines[1].delay(v) * tune.feedback;
+            lines[1].step();
             let v = lines[2].allpass(v, tune.tank_second);
+            lines[2].step();
             lines[3].delay(v);
+            lines[3].step();
         }
 
-        // The taps: lines 5, 6 and 7 are the tank's 1, 2 and 3 here, and
-        // 9, 10 and 11 its 5, 6 and 7.
+        // The taps, read once every line has stepped, so a tap of `k` is
+        // the sample written `k - 1` frames ago. Lines 5, 6 and 7 are the
+        // tank's 1, 2 and 3 here, and 9, 10 and 11 its 5, 6 and 7. On the
+        // right `w1` weighs the second tap (`0x180003cb8..0x180003d31`).
         let [w1, w2, w3, w4, w5] = tune.weights;
         let (l, r) = (&tune.taps_left, &tune.taps_right);
         let wet = [
@@ -500,16 +530,13 @@ impl Reeverb2 {
                 + w2 * tank[1].tap(l[4])
                 + tank[2].tap(l[5])
                 + w5 * tank[3].tap(l[6]),
-            w1 * tank[1].tap(r[0]) + tank[1].tap(r[1])
+            w1 * tank[1].tap(r[1]) + tank[1].tap(r[0])
                 - w3 * tank[2].tap(r[2])
                 - w4 * tank[3].tap(r[3])
                 - w2 * tank[5].tap(r[4])
                 + tank[6].tap(r[5])
                 + w5 * tank[7].tap(r[6]),
         ];
-        for line in &mut self.lines {
-            line.step();
-        }
 
         let mut early = [0.0; 2];
         if reflections {
@@ -581,7 +608,7 @@ impl Effect for Reeverb2 {
             self.rate = f64::from(hz).round();
             self.tune = Tune::new(&self.params, self.tempo_based, self.rate, self.tempo);
             self.make_room();
-            self.predelay.start(self.tune.predelay);
+            self.predelay.start(self.tune.predelay.max(1));
             self.reset();
         }
     }
@@ -906,19 +933,19 @@ mod tests {
         let diffuser = f64::from(plugin.tune.diffuser);
         let (left, right) = impulse(&mut plugin, 12_000);
         // A diffuser lets its input through at once, at its gain upside
-        // down, so four of them give the impulse at the gain's fourth
-        // power, and the first reflection is that at the tap's delay.
+        // down. The reflections are tapped after the first, so the first
+        // reflection is the impulse at -g, at the tap's delay.
         assert_eq!((onset(&left), onset(&right)), (left_at, right_at));
-        let first = diffuser.powi(4) * level;
+        let first = -diffuser * level;
         let nearer = right_at as f64 / left_at as f64;
         assert!((f64::from(left[left_at]) - first * 0.5 * nearer).abs() < 1e-6);
         assert!((f64::from(right[right_at]) - first * 0.36).abs() < 1e-6);
 
         // With no diffusion the diffusers are delays, and the impulse
         // comes out as the taps and nothing else: seven on the left and
-        // eight on the right, each behind the four lines.
+        // eight on the right, each behind the first line.
         let mut plugin = with(moved_from(bare(128, 0), 4, 0));
-        let lines: usize = plugin.tune.lens[..4].iter().sum();
+        let lines = plugin.tune.lens[0];
         let (left, right) = impulse(&mut plugin, 12_000);
         let taps = |numbers: [f64; 8], signs: [f32; 8], gain: f64| -> Vec<(usize, f32)> {
             let all = (0..8).filter(|k| signs[*k] != 0.0);
@@ -946,6 +973,68 @@ mod tests {
         }
         // The last tap is at 162 ms at 44.1 kHz, as the doc has it.
         assert!((9263.0f64 * 44_100.0 * 53.0 * 3.302e-7 / 44.1 - 162.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_wet_taps_hear_the_tank_as_fl_s_engine_reads_it() {
+        // With no diffusion every allpass is a plain delay, and with the
+        // cuts, the damping and the modulation off and a flat bass an
+        // impulse goes round the tank as single hits. `FUN_180003270`
+        // steps every line right after its access and reads the taps after
+        // that, so a tap of `k` hears what was written `k - 1` frames
+        // before, and a predelay of 0 is one frame.
+        let mut plugin = with(moved_from(bare(0, 128), 4, 0));
+        let t = plugin.tune;
+        let (len, g) = (t.lens, f64::from(t.feedback));
+        let [w1, w2, w3, w4, w5] = t.weights.map(f64::from);
+        let level = (11f64.sqrt() - 1.0) / 10.0;
+        // The frame each tank line is first written: the four diffusers
+        // and the predelay's one, then the half's own lines.
+        let into = len[..4].iter().sum::<usize>() + 1;
+        let (l5, l9) = (into + len[4], into + len[8]);
+        let (l6, l10) = (l5 + len[5], l9 + len[9]);
+        let (l7, l11) = (l6 + len[6], l10 + len[10]);
+        // Lines 5 and 9 hold the impulse, 6, 7, 10 and 11 it times g.
+        let (l, r) = (t.taps_left, t.taps_right);
+        let want_left = [
+            (l9 + l[0], 1.0),
+            (l9 + l[1], -w1),
+            (l10 + l[2], -w3 * g),
+            (l11 + l[3], -w4 * g),
+            (l5 + l[4], w2),
+            (l6 + l[5], g),
+            (l7 + l[6], w5 * g),
+        ];
+        // On the right w1 weighs the second tap (`0x180003cb8..0x180003d31`).
+        let want_right = [
+            (l5 + r[0], 1.0),
+            (l5 + r[1], w1),
+            (l6 + r[2], -w3 * g),
+            (l7 + r[3], -w4 * g),
+            (l9 + r[4], -w2),
+            (l10 + r[5], g),
+            (l11 + r[6], w5 * g),
+        ];
+        // The second half reads line 7 after the first has written it and
+        // stepped, so the impulse comes round into line 9 a frame sooner
+        // than its length says. The first half reads line 11 before the
+        // second writes it, a whole length later.
+        let (round9, round5) = (l7 + len[7] - 1 + len[8], l11 + len[11] + len[4]);
+        let (left, right) = impulse(&mut plugin, round9.max(round5) + 4000);
+        let first_pass = |side: &[f32]| hits(&side[..round9.min(round5)]);
+        for (side, want) in [(&left, want_left), (&right, want_right)] {
+            let mut want = want.map(|(at, value)| (at - 1, value * level));
+            want.sort_by_key(|(at, _)| *at);
+            let got = first_pass(side);
+            assert_eq!(got.len(), 7);
+            for ((at, value), (want_at, want_value)) in got.into_iter().zip(want) {
+                assert_eq!(at, want_at);
+                assert!((f64::from(value) - want_value).abs() < 1e-6, "{at}");
+            }
+        }
+        let again = g * g * level;
+        assert!((f64::from(left[round9 + l[0] - 1]) - again).abs() < 1e-6);
+        assert!((f64::from(right[round5 + r[0] - 1]) - again).abs() < 1e-6);
     }
 
     #[test]
@@ -982,8 +1071,10 @@ mod tests {
             }
             falls.push(fall(&left, 9600, 105_600));
         }
-        // Twice the decay time is half the fall.
-        assert!((falls[0] / falls[1] - 2.0).abs() < 0.1, "{falls:?}");
+        // Twice the decay time is about half the fall. The ratio comes out
+        // at 1.90, since the longer tail has more of what the allpasses
+        // hold longest in the window.
+        assert!((falls[0] / falls[1] - 1.9).abs() < 0.05, "{falls:?}");
     }
 
     #[test]
@@ -1026,7 +1117,12 @@ mod tests {
 
     #[test]
     fn the_predelay_moves_the_wet_sound_s_start_by_its_frames() {
-        let plain = impulse(&mut with(bare(0, 128)), 30_000).0;
+        // A predelay of 0 is a line of one sample (`FUN_006d1d00`), so the
+        // plain sound is already a frame late, and one of `n` frames moves
+        // it `n - 1` more.
+        let mut plain = with(bare(0, 128));
+        assert_eq!((plain.tune.predelay, plain.predelay.samples.len()), (0, 1));
+        let plain = impulse(&mut plain, 30_000).0;
         let start = onset(&plain);
         for (wheel, tempo) in [
             (27, None),
@@ -1047,10 +1143,10 @@ mod tests {
             plugin.set_state(&state).unwrap();
             assert_eq!(plugin.tune.predelay, want, "predelay {wheel}");
             let late = impulse(&mut plugin, 30_000 + want).0;
-            assert_eq!(onset(&late), start + want, "predelay {wheel}");
+            assert_eq!(onset(&late), start + want - 1, "predelay {wheel}");
             // And all of it is the same sound, that much later.
-            assert!(late[..want].iter().all(|v| v.abs() < 1e-9));
-            for (late, plain) in late[want..].iter().zip(&plain) {
+            assert!(late[..want - 1].iter().all(|v| v.abs() < 1e-9));
+            for (late, plain) in late[want - 1..].iter().zip(&plain) {
                 assert!((late - plain).abs() < 1e-9, "predelay {wheel}");
             }
         }
