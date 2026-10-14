@@ -253,7 +253,7 @@ for each control tick of 0x16a0 samples (64; 8 with HQ envelopes):
         v = a.base (+0x20: 1.0, or 0 in additive mode +8 == 1)
         for k in X, Y, IEF with a table: m = table_k[idx_k] (times a.amount for IEF); mode 0: v *= m; mode 1: v += m; else v *= 2 m
         a.eval (FUN_008543d0): if the current pattern envelope is active: e = env(t); mode 1: v += e * amount else v = v * e * amount
-                               if the LFO is active: l = lfo(t); mode 1: v += l * lfoScale else v *= l * lfoScale * 2 + 1
+                               if the LFO is active: l = (level(t) - 0.5) * osc(t); mode 1: v += l * lfoScale else v *= l * lfoScale * 2 + 1
         a.value (+0x170) = v
     if IEF source == 1: FUN_0085a990(in')                     // follower on the input
     for each enabled unit U in order (0x1768):
@@ -422,3 +422,4 @@ Found while implementing `crates/plugins/src/love_philter.rs` from the DLL and t
 12. The follower hears `max(|L|, |R|)`, not a mono sum.
 13. The waveshaper kernels run fully wet; the mix is a separate ramped crossfade. Two more kernels interpolate (HQ).
 14. Presets: 47 in the plugin's preset directory and 5 elsewhere, not 49 + 3.
+15. The LFO's level envelope counts from 0.5, whatever the articulator's mode: `TMLFO`'s constructor (`0x788410`) sets its centre (+0x18) to 0.5, and the mode setter (`0x8544d0`) re-centres only the ten patterns and three maps. The value the tick (`0x788b70`) hands on is `(level - 0.5) * osc`, so a level of 1 swings ±0.5 and a multiplying articulator at full LFO amount goes from 0 to 2.

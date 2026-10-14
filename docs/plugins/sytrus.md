@@ -387,6 +387,7 @@ floats: the section 1 order stands, `loader`.
 ```
 static  = key(pitch / 120) ⊕ velocity(v) ⊕ random(r) ⊕ unison(u)        // ⊕ by the mode; FUN_0078bbc0, _DAT_0078bc58 = 1/120
 moving  = base + env.out * amount, then LFO: mode 1 += lfo * lfo amount, else *= (lfo * lfo amount * 2 + 1)
+lfo     = (level - 0.5) * osc                                            // TMLFO's centre is 0.5 (ctor 0x789fa0); the mode setter 0x861300 leaves it
 value   = env or LFO on ? moving ⊕ static : static
 value   = value ⊕ modX table[voice.0x78] ⊕ modY table[voice.0x7c]       // every tick
 ```
