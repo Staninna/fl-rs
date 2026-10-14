@@ -84,6 +84,7 @@ pub mod test_sine;
 mod testing;
 pub mod three_osc;
 pub mod transient_processor;
+pub mod vocodex;
 pub mod waveshaper;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
@@ -231,6 +232,15 @@ pub trait Effect: Send {
         0
     }
 
+    /// Every sidechain input the plugin's state chose, for a plugin that
+    /// listens to two, numbered as [`Effect::sidechain_input`] numbers
+    /// them, 0 for none. A host hands each one it has to
+    /// [`Effect::set_sidechain`]. A plugin that does not say listens to
+    /// its [`Effect::sidechain_input`] alone.
+    fn sidechain_inputs(&self) -> [usize; 2] {
+        [self.sidechain_input(), 0]
+    }
+
     /// Take one block of sidechain input `index` for the next
     /// [`Effect::process`], whose block is as long. A host that has the
     /// input [`Effect::sidechain_input`] names calls this ahead of every
@@ -353,6 +363,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(stereo_shaper::StereoShaper::default()))
     } else if is(transient_processor::NAME) {
         Some(Box::new(transient_processor::TransientProcessor::default()))
+    } else if is(vocodex::NAME) {
+        Some(Box::new(vocodex::Vocodex::default()))
     } else if is(waveshaper::NAME) {
         Some(Box::new(waveshaper::WaveShaper::default()))
     } else {
@@ -670,6 +682,7 @@ mod tests {
             "gross beat",
             "maximus",
             "soundgoodizer",
+            "vocodex",
         ];
         let lengths = loaded
             .keys()
