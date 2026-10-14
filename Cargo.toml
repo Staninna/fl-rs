@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+
+[workspace.dependencies]
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "666c358065261a2816b376fa3bb10538dbf53040" }
+egui = { version = "0.36", default-features = false, features = ["default_fonts"] }
+engine = { path = "crates/engine" }
+flp = { path = "crates/flp" }
+model = { path = "crates/model" }
+thiserror = "2"
+ui = { path = "crates/ui" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+# An unoptimised symphonia takes five seconds to decode the samples of a
+# demo song, and an optimised one takes one.
+[profile.dev.package."*"]
+opt-level = 2
