@@ -56,6 +56,7 @@ pub mod gross_beat;
 pub mod harmless;
 pub mod limiter;
 pub mod love_philter;
+pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
 pub mod multiband_compressor;
@@ -318,6 +319,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(limiter::Limiter::default()))
     } else if is(love_philter::NAME) {
         Some(Box::new(love_philter::LovePhilter::default()))
+    } else if is(luxeverb::NAME) {
+        Some(Box::new(luxeverb::Luxeverb::default()))
     } else if is(maximus::NAME) {
         Some(Box::new(maximus::Maximus::default()))
     } else if is(multiband_compressor::NAME) {
@@ -490,7 +493,16 @@ mod tests {
         let preset = &soundgoodizer::PRESETS[0].params;
         let mut goodizer: Vec<f32> = preset.iter().map(|v| *v as f32).collect();
         goodizer[5] = 600.0;
-        let plugins: [(&str, &[f32]); 19] = [
+        let luxeverb: Vec<f32> = [
+            721, 12991, 20, 1, 11625, 326, 192, 253, 40, 20, 47, 20, 403, 0, 1, 0, 120, 2988, 192,
+            0, 1719, 720, 1000, 0, -4000, 50, 400, 0, 0, 0, 301, 10, 746, 746, 1570, 315, 865, 120,
+            1, 0, 0, 24, 20, 1719, 20, 1000, 192, 1000, 192,
+        ]
+        .iter()
+        .map(|v| *v as f32)
+        .collect();
+        let plugins: [(&str, &[f32]); 20] = [
+            ("Luxeverb", &luxeverb),
             (
                 "Fruity Flangus",
                 &[4.0, 512.0, 768.0, 8.0, 128.0, -32.0, 96.0, 96.0],
@@ -618,6 +630,8 @@ mod tests {
             ("fruity soft clipper", 8, 28),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
+            ("luxeverb", 165, 13),
+            ("luxeverb", 169, 11),
             ("pitcher", 160, 61),
             ("pitcher", 164, 1),
             ("spreader", 30, 33),
@@ -656,7 +670,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 31);
+        assert_eq!(lengths.count(), 33);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
