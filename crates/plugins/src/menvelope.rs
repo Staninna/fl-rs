@@ -147,7 +147,11 @@ pub(crate) const LFO_KNOBS: [i32; 4] = [40_000, 0, 0, 0];
 const TEMPO: u32 = 1;
 /// An LFO's tension bends its whole swing as one curve.
 const WHOLE: u32 = 4;
-/// An LFO stands still.
+/// An LFO stands still. Only `TMLFO`'s update reads this bit of the
+/// stream's flags (+0x44): with it set the phase step +0xa0 is 0 (Love
+/// Philter `0x7887d5`, Sytrus `0x78a365`, Harmor `0x7a3070`). The reader's
+/// "keep the decay marker" test at `0x780453` is on the class's own mask
+/// at +0x20, which `TMLFO`'s constructor clears (`0x7884e0`).
 const FROZEN: u32 = 8;
 
 /// One envelope as a stream has it.
