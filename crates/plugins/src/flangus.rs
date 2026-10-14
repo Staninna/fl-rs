@@ -37,6 +37,7 @@
 //! x87 one, which cuts the delay down to a whole sample. The other rounds
 //! it, and nothing in the DLL was found to choose it.
 
+use crate::fl_fx::{FlangerSettings, StereoFlanger};
 use crate::parts::glide;
 use crate::{Effect, StateError, knob_gain, knob_value, read_state};
 
@@ -56,26 +57,6 @@ const RANGES: [(i32, i32); 8] = [
 ];
 const DEFAULTS: [i32; 8] = [4, 512, 768, 8, 128, -32, 96, 96];
 
-/// Two voices for every step of the order wheel.
-const MOST_VOICES: usize = 18;
-
-/// What the spread tells the voices apart by: voice `i` has entry
-/// `i mod 20`, squared.
-const TABLE: [f32; 20] = [
-    0.967, 1.039, 1.021, 0.1013, 0.977, 1.033, 0.997, 0.971, 1.061, 0.947, 1.031, 0.1009, 1.063,
-    0.953, 0.991, 1.049, 0.983, 1.051, 1.019, 1.069,
-];
-
-/// The LFO depth in samples at 44.1 kHz for a depth wheel at its end, and
-/// the delay for a delay wheel at its end: 100 ms.
-const DEPTH: f32 = 1092.5;
-const DELAY: f32 = 4410.0;
-
-/// What every voice has under its depth, and the shortest delay, both in
-/// samples.
-const FLOOR_DEPTH: f32 = 10.0;
-const SHORTEST: f32 = 8.0;
-
 /// The gain of a level wheel: the knob curve with the wheel's sign, and 1
 /// at 128 without working it out, as in FL.
 pub fn level(value: i32) -> f32 {
@@ -87,132 +68,13 @@ pub fn level(value: i32) -> f32 {
     size * value.signum() as f32
 }
 
-/// `(11^x - 1) * scale / 10`, the curve of the depth and the delay wheel.
-fn curve(x: f32, scale: f32) -> f32 {
-    ((f64::from(x) * 11f64.ln()).exp() - 1.0) as f32 * (scale / 10.0)
-}
-
-/// One tap.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Voice {
-    /// How far the delay swings to either side of the centre, in samples.
-    depth: f32,
-    /// The gain into the left and into the right output.
-    gains: [f32; 2],
-    /// The middle of the swing, in samples.
-    centre: f32,
-    /// Where the LFO is. The whole range of an i32 is one cycle, and 0 is
-    /// the shortest delay.
-    phase: i32,
-    /// Where a flush puts the LFO.
-    start: i32,
-    /// What a sample adds to the phase.
-    step: i32,
-    /// Whether it reads the right side.
-    right: bool,
-    /// `T = sqrt(4 * depth)`, the size of the triangle the curve is made
-    /// from, with `T / 2^31` and `T / 2`.
-    top: f32,
-    slope: f32,
-    half: f32,
-}
-
-impl Voice {
-    /// The delay at the LFO's phase, in samples, and the phase moved on.
-    fn delay(&mut self) -> f64 {
-        let phase = self.phase;
-        self.phase = phase.wrapping_add(self.step);
-        let x = (f64::from(phase) * f64::from(self.slope)).abs() - f64::from(self.half);
-        (f64::from(self.top) - x.abs()) * x + f64::from(self.centre)
-    }
-}
-
-/// The voices for these parameters at this rate, and the longest delay any
-/// of them reaches plus 8, in samples. The phases are left alone.
-fn build(params: &[i32; 8], hz: f64, voices: &mut [Voice; MOST_VOICES]) -> (usize, i32) {
-    let order = params[0].max(1);
-    let count = 2 * order as usize;
-    let depth = curve(params[1] as f32 / 1024.0, DEPTH);
-    let speed = params[2] as f32 / 1024.0;
-    let cycle = ((f64::from(1.0 - speed) * 101f64.ln()).exp() - 1.0) as f32;
-    let pace = 2_147_483_648.0 / (f64::from(cycle) * 75_000.0 + 50_000.0) * 500.0;
-    let delay = curve(params[3] as f32 / 128.0, DELAY);
-    let spread = params[4] as f32 / 128.0;
-    let apart = ((f64::from(spread) * 1001f64.ln()).exp() - 1.0) as f32 / 1000.0;
-    let cross = params[5] as f32 / 128.0;
-    // `a` with the spread all the way up, `b` with none.
-    let mix = |a: f64, b: f64| a * f64::from(apart) + b * f64::from(1.0 - apart);
-    let rate = (44_100.0 / hz) as f32;
-
-    let (mut total, mut longest) = (0f32, 0f32);
-    for (i, voice) in voices[..count].iter_mut().enumerate() {
-        let right = i >= order as usize;
-        let k = if right { count - 1 - i } else { i };
-        let share = 1.0 - k as f32 / order as f32;
-        let own = TABLE[i % TABLE.len()];
-        let own = mix(f64::from(own * own), 1.0) as f32;
-        let gains = [1.0, cross * share];
-        voice.gains = if right { [gains[1], gains[0]] } else { gains };
-        let [into_left, into_right] = voice.gains.map(|gain| f64::from(gain.abs()));
-        total = (f64::from(total) + into_left + into_right) as f32;
-
-        let swing = depth * share + FLOOR_DEPTH;
-        let step = mix(
-            pace * f64::from(own) / f64::from(swing),
-            pace / f64::from(depth + FLOOR_DEPTH),
-        );
-        let centre = mix(f64::from(delay * share * own), f64::from(delay)) as f32;
-        let offset = f64::from(share * apart * 2_147_483_648.0 / 256.0).round_ties_even();
-        let start = if right { i32::MIN } else { 0 };
-        voice.start = start.wrapping_add((offset as i64 as i32).wrapping_shl(8));
-        voice.right = right;
-        voice.step = (step * f64::from(rate)).round_ties_even() as i64 as i32;
-        voice.depth = swing / rate;
-        let centre = centre / rate;
-        // Written as FL has it, so that a NaN would be the floor.
-        voice.centre = voice.depth + if centre > SHORTEST { centre } else { SHORTEST };
-        longest = longest.max(voice.centre + voice.depth);
-        let top = f64::from(voice.depth * 4.0).sqrt();
-        voice.slope = (top / 2_147_483_648.0) as f32;
-        voice.top = top as f32;
-        voice.half = (top / 2.0) as f32;
-    }
-
-    let over = ((f64::from(1.0 - 1.0 / total) * 1001f64.ln()).exp() - 1.0) as f32;
-    let norm = 1.0 - over / 1000.0;
-    for voice in &mut voices[..count] {
-        voice.gains = voice.gains.map(|gain| gain * norm);
-    }
-    (
-        count,
-        f64::from(longest).round_ties_even() as i32 + SHORTEST as i32,
-    )
-}
-
-/// How long a ring holds the longest delay the wheels can ask for at this
-/// rate, with the sample after it: a power of two.
-fn room(hz: f64) -> usize {
-    // Twice the deepest swing and the longest centre with the largest of
-    // the table's numbers, 1.069 squared.
-    let worst = f64::from(2.0 * (DEPTH + FLOOR_DEPTH) + DELAY * 1.143);
-    ((worst * hz / 44_100.0).ceil() as usize + 16).next_power_of_two()
-}
-
 /// Fruity Flangus. A new one has FL's defaults.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flangus {
     params: [i32; 8],
     hz: f64,
-    voices: [Voice; MOST_VOICES],
-    /// How many of the voices play: twice the order.
-    count: usize,
-    /// The longest delay the voices were last cleared for, and the spread
-    /// wheel they were cleared for. A change to either clears them again.
-    longest: i32,
-    spread: i32,
-    /// What came in, one ring a side, and where the next frame goes.
-    ring: [Vec<f32>; 2],
-    at: usize,
+    /// The delay lines and their voices, FL's `TStereoFlanger`.
+    flanger: StereoFlanger,
     /// The dry gain and the wet gain of each side, as the last block left
     /// them.
     dry: f32,
@@ -224,16 +86,11 @@ impl Default for Flangus {
         let mut plugin = Flangus {
             params: DEFAULTS,
             hz: 44_100.0,
-            voices: [Voice::default(); MOST_VOICES],
-            count: 0,
-            longest: -1,
-            spread: -1,
-            ring: [Vec::new(), Vec::new()],
-            at: 0,
+            flanger: StereoFlanger::default(),
             dry: 0.0,
             wet: [0.0; 2],
         };
-        plugin.make_room();
+        plugin.flanger.make_room(plugin.hz);
         plugin.set(DEFAULTS);
         plugin.settle();
         plugin
@@ -241,18 +98,6 @@ impl Default for Flangus {
 }
 
 impl Flangus {
-    /// Have the rings for this rate.
-    fn make_room(&mut self) {
-        let len = room(self.hz);
-        if self.ring[0].len() != len {
-            for ring in &mut self.ring {
-                ring.clear();
-                ring.resize(len, 0.0);
-            }
-            self.at = 0;
-        }
-    }
-
     /// Take parameters that are inside their ranges, or a new rate.
     ///
     /// FL's delay line is as long as its longest delay, and it starts over
@@ -260,29 +105,11 @@ impl Flangus {
     /// where it starts. So does this. Moving the spread always does that,
     /// and the speed and the cross never do.
     fn set(&mut self, params: [i32; 8]) {
-        let was = self.count;
-        let (count, longest) = build(&params, self.hz, &mut self.voices);
-        // A voice the order adds starts at 0, as FL's new memory does.
-        for voice in self.voices.iter_mut().take(count).skip(was) {
-            voice.phase = 0;
-        }
-        self.count = count;
+        let wheels = [0, 1, 2, 3, 4, 5].map(|i| params[i]);
+        // The class's own output gain is 1: the plugin has its wheels.
+        let settings = FlangerSettings::from_wheels(wheels, 1.0);
+        self.flanger.set(&settings, self.hz);
         self.params = params;
-        if longest != self.longest || params[4] != self.spread {
-            self.longest = longest;
-            self.spread = params[4];
-            self.flush();
-        }
-    }
-
-    /// Forget what came in and put every LFO where it starts.
-    fn flush(&mut self) {
-        for ring in &mut self.ring {
-            ring.fill(0.0);
-        }
-        for voice in &mut self.voices {
-            voice.phase = voice.start;
-        }
     }
 
     /// Put the dry and the wet gain where the wheels have them, with no
@@ -306,7 +133,7 @@ impl Effect for Flangus {
     fn set_sample_rate(&mut self, hz: f32) {
         if hz.is_finite() && hz > 0.0 && f64::from(hz) != self.hz {
             self.hz = f64::from(hz);
-            self.make_room();
+            self.flanger.make_room(self.hz);
             self.set(self.params);
         }
     }
@@ -328,27 +155,9 @@ impl Effect for Flangus {
         // FL adds no wet signal at a wet level of 0 that is not moving.
         let heard = [wet_l, wet_l_step, wet_r, wet_r_step] != [0.0; 4];
 
-        let mask = self.ring[0].len() - 1;
         let frames = left[..len].iter_mut().zip(&mut right[..len]);
         for (l, r) in frames {
-            let at = self.at;
-            self.ring[0][at] = *l;
-            self.ring[1][at] = *r;
-            self.at = (at + 1) & mask;
-
-            let (mut sum_l, mut sum_r) = (0f32, 0f32);
-            for voice in &mut self.voices[..self.count] {
-                let delay = voice.delay();
-                let whole = delay as i64;
-                let part = delay - whole as f64;
-                let ring = &self.ring[usize::from(voice.right)];
-                let back = at.wrapping_sub(whole as usize);
-                let near = f64::from(ring[back & mask]);
-                let far = f64::from(ring[back.wrapping_sub(1) & mask]);
-                let tap = near + (far - near) * part;
-                sum_l = (tap * f64::from(voice.gains[0]) + f64::from(sum_l)) as f32;
-                sum_r = (tap * f64::from(voice.gains[1]) + f64::from(sum_r)) as f32;
-            }
+            let (sum_l, sum_r) = self.flanger.frame(*l, *r);
             (*l, *r) = (*l * dry, *r * dry);
             if heard {
                 *l += sum_l * wet_l;
@@ -381,8 +190,7 @@ impl Effect for Flangus {
     /// Forgets what came in, puts every LFO where it starts and ends a
     /// ramp, as FL's flush does.
     fn reset(&mut self) {
-        self.flush();
-        self.at = 0;
+        self.flanger.reset();
         self.settle();
     }
 }
@@ -390,6 +198,7 @@ impl Effect for Flangus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fl_fx::{FlangerVoice as Voice, flanger_room as room};
     use crate::testing::{bits, every_preset, presets, sine, state};
 
     fn with(params: [i32; 8]) -> Flangus {
@@ -400,7 +209,7 @@ mod tests {
 
     /// The voices of a plugin that play.
     fn voices(plugin: &Flangus) -> &[Voice] {
-        &plugin.voices[..plugin.count]
+        &plugin.flanger.voices[..plugin.flanger.count]
     }
 
     /// The shortest and the longest delay of a voice, in samples.
@@ -480,7 +289,7 @@ mod tests {
     fn the_default_voices_are_the_doc_s() {
         let plugin = Flangus::default();
         let voices = voices(&plugin);
-        assert_eq!((voices.len(), plugin.longest), (8, 601));
+        assert_eq!((voices.len(), plugin.flanger.longest), (8, 601));
         // Four on the left, then four on the right from the smallest share
         // up, each at 1 into its own side and a quarter of its share upside
         // down into the other, all times 0.5267.
@@ -530,13 +339,16 @@ mod tests {
         // Two voices come to 0.969, the two with all the cross to 0.823,
         // and 18 with all the cross to 0.219.
         let two = with([1, 136, 312, 0, 0, 0, 0, 128]);
-        assert!((two.voices[0].gains[0] - 0.9694).abs() < 1e-4);
+        assert!((two.flanger.voices[0].gains[0] - 0.9694).abs() < 1e-4);
         let crossed = with([1, 136, 312, 0, 0, 128, 0, 128]);
-        assert_eq!(crossed.voices[0].gains, crossed.voices[1].gains);
-        assert!((crossed.voices[0].gains[0] - 0.823).abs() < 1e-4);
+        assert_eq!(
+            crossed.flanger.voices[0].gains,
+            crossed.flanger.voices[1].gains
+        );
+        assert!((crossed.flanger.voices[0].gains[0] - 0.823).abs() < 1e-4);
         let many = with([9, 1024, 1024, 128, 128, 128, 0, 128]);
-        assert!((many.voices[0].gains[0] - 0.2189).abs() < 1e-4);
-        assert_eq!((many.count, many.longest), (18, 7084));
+        assert!((many.flanger.voices[0].gains[0] - 0.2189).abs() < 1e-4);
+        assert_eq!((many.flanger.count, many.flanger.longest), (18, 7084));
     }
 
     #[test]
@@ -544,7 +356,7 @@ mod tests {
         // One voice a side and the wet alone. A ramp comes out of a tap as
         // the ramp at the delayed time, so the delay can be read off it.
         let mut plugin = with([1, 136, 1024, 0, 0, 0, 0, 128]);
-        let voice = plugin.voices[0];
+        let voice = plugin.flanger.voices[0];
         let (short, long) = swing(&voice);
         let cycle = 4_294_967_296.0 / f64::from(voice.step);
         assert!(
@@ -581,9 +393,9 @@ mod tests {
         // One voice a side that hardly moves. After 16,880 samples of
         // nothing its delay is about 8 samples and a half.
         let mut plugin = with([1, 0, 0, 0, 0, 0, 0, 128]);
-        assert!(turns(&plugin.voices[0], 44_100.0) < 0.2);
+        assert!(turns(&plugin.flanger.voices[0], 44_100.0) < 0.2);
         plugin.process(&mut vec![0.0; 16_880], &mut vec![0.0; 16_880]);
-        let mut voice = plugin.voices[0];
+        let mut voice = plugin.flanger.voices[0];
         let delays: Vec<f64> = (0..10).map(|_| voice.delay()).collect();
         assert!((delays[8] - 8.5).abs() < 0.05, "{}", delays[8]);
 
@@ -606,7 +418,7 @@ mod tests {
             let mut plugin = with([2, 86, 632, 0, 0, cross, 0, 128]);
             let (mut l, mut r) = (vec![0.25; 600], vec![0.0; 600]);
             plugin.process(&mut l, &mut r);
-            (l[599], r[599], plugin.voices[0].gains[0])
+            (l[599], r[599], plugin.flanger.voices[0].gains[0])
         };
         // With none, the right stays silent.
         let (left, right, norm) = run(0);
@@ -623,15 +435,15 @@ mod tests {
     #[test]
     fn the_delays_scale_with_the_rate_and_the_lfos_keep_their_time() {
         let mut plugin = Flangus::default();
-        let at_44 = plugin.voices;
+        let at_44 = plugin.flanger.voices;
         plugin.set_sample_rate(88_200.0);
-        assert_eq!(plugin.ring[0].len(), 2 * room(44_100.0));
-        for (slow, fast) in at_44.iter().zip(&plugin.voices).take(8) {
+        assert_eq!(plugin.flanger.ring[0].len(), 2 * room(44_100.0));
+        for (slow, fast) in at_44.iter().zip(&plugin.flanger.voices).take(8) {
             assert!((fast.depth - 2.0 * slow.depth).abs() < 1e-3);
             assert!((turns(fast, 88_200.0) - turns(slow, 44_100.0)).abs() < 1e-4);
         }
         // The shortest delay is 8 samples at any rate.
-        assert!(near(swing(&plugin.voices[3]).0, 8.0));
+        assert!(near(swing(&plugin.flanger.voices[3]).0, 8.0));
         // A rate that is not one leaves the plugin as it is.
         let before = plugin.clone();
         plugin.set_sample_rate(f32::NAN);
@@ -651,7 +463,7 @@ mod tests {
             let voices = voices(plugin).iter();
             voices.map(|voice| voice.start).collect()
         };
-        let held = |plugin: &Flangus| plugin.ring[0].iter().any(|v| *v != 0.0);
+        let held = |plugin: &Flangus| plugin.flanger.ring[0].iter().any(|v| *v != 0.0);
         assert!(held(&plugin) && phases(&plugin) != starts(&plugin));
 
         // The speed, the cross and the levels leave them be.
@@ -677,7 +489,12 @@ mod tests {
     #[test]
     fn a_moved_level_ramps_and_a_moved_wheel_asks_for_no_memory() {
         let mut plugin = with([4, 512, 768, 8, 128, -32, 128, 0]);
-        let memory = |plugin: &Flangus| (plugin.ring[0].as_ptr(), plugin.ring[1].as_ptr());
+        let memory = |plugin: &Flangus| {
+            (
+                plugin.flanger.ring[0].as_ptr(),
+                plugin.flanger.ring[1].as_ptr(),
+            )
+        };
         let before = memory(&plugin);
         // The cap is 0.001 a sample at 44.1 kHz, so 100 samples take the
         // dry level a tenth of the way down.
@@ -754,10 +571,10 @@ mod tests {
         );
         assert_eq!(named("For drums").params[6..], [-128, 128]);
         let thick = named("Thick");
-        let (short, long) = swing(&thick.voices[0]);
+        let (short, long) = swing(&thick.flanger.voices[0]);
         assert!(near(short, 8.0) && near(long, 2213.0), "{short} {long}");
         let stereoized = named("Stereoized");
-        assert_eq!(stereoized.count, 4);
-        assert!((turns(&stereoized.voices[0], 44_100.0) - 0.775).abs() < 1e-3);
+        assert_eq!(stereoized.flanger.count, 4);
+        assert!((turns(&stereoized.flanger.voices[0], 44_100.0) - 0.775).abs() < 1e-3);
     }
 }

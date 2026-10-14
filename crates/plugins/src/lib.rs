@@ -47,6 +47,7 @@ pub mod effector;
 pub mod fast_dist;
 pub mod fast_lp;
 pub mod filter;
+pub mod fl_fx;
 pub mod flangus;
 pub mod fpc;
 pub mod fruit_kick;

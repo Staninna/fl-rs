@@ -55,7 +55,7 @@ Plugin object fields the state and render touch:
 | offset | type | meaning |
 |---|---|---|
 | 0x128 | i32[100] | the parameters, REC index = (offset - 0x128) / 4 = DFM Tag |
-| 0x1bc / 0x1d8 | i32 | mono mode / portamento (voice allocation in TriggerVoice) |
+| 0x1bc / 0x1d4 / 0x1d8 | i32 | param 37 `VelToVol`, param 43 `PortaBox`, param 44 `MonoBox` (TriggerVoice reads all three; 0x1d8 is the legato flag, section 3) |
 | 0x21c | i32 | param 61 (`FResCutOfs`), rescaled on load of v < 6 |
 | 0x280 | i32 | param 86 (`LFOShapeSelect`): values > 9 shift by one when loading v < 5 |
 | 0x2b4 | i32 | param 99 (`VelToFatPitchBox`), added in v9 |
@@ -78,7 +78,9 @@ Plugin object fields the state and render touch:
 | 0x790 | f32[12] | harmonic mask levels sign(p) level(|p|/1000) |
 | 0x798 | u8 | v12 flag byte (saved); 0 on load triggers a form update and host message 2 |
 | 0x79c / 0x7a4 | f32 | tremolo depth p25/1000 / rate |
-| 0x7c0 | ptr | chorus (param 90 makes it; `FUN_0074b0f0` reads its output, `+0x60` kernel); the phaser is a curve in the voice (section 6) |
+| 0x7b8 / 0x7bc | i32 | effect sleep countdown and what voices reset it to (section 8) |
+| 0x7c0 | ptr | chorus, a `TStereoFlanger` (param 90 makes it; `FUN_0074b0f0` copies the block into its ring, `+0x60` kernel); not a phaser, which is a curve in the voice (section 6) |
+| 0x7c8 | f32 | the chorus's dry gain |
 | 0x7d0 | ptr | delay (`TDelay_32FS`, two `FUN_00747510` taps with offsets 0x7dc / 0x7e0, type 0x7d8) |
 | 0x7f0 | ptr | reverb (`TFruityReverb`, `FUN_0074a540`), wet 0x7f8 |
 | 0x800 | ptr | embedded effect list (`+0x128` list, each item `+0x10` a plugin with Eff_Render at vtable+0x38): the compression Maximus |
@@ -194,7 +196,7 @@ implementation starts from `Default.fst`.
 | 40 | `TGrittinessWheel` | -1000..1000 | 0 | `0x5ac = sign(v) (e^(|v|/1000 ln C_140) - 1) * C_148`; FUN_00783c50 | loader, dfm |
 | 41 | `VibratoWheel` | 0..1000 | 0 | `0x31c = v * C_070` | loader, dfm |
 | 42 | `PitchLFOAmtWheel` | -1000..1000 | 0 | `0x2e0 = sign(v) (e^(|v|/1000 ln C_c8) - 1) * C_138` | loader, dfm |
-| 43, 44 | `PortaBox`, `MonoBox` | 0, 1 | 0 | 43 > 0: `FUN_00788030` (portamento setup); the voice allocator reads 0x1d8 / 0x1bc | loader, dfm |
+| 43, 44 | `PortaBox`, `MonoBox` | 0, 1 | 0 | 43 > 0: `FUN_00788030` (portamento setup); TriggerVoice reads them at 0x1d4 and 0x1d8; 44 is the legato flag | loader, dfm |
 | 45 | `PortaTimeWheel` | -1000..1000 | 0 | `0x548 = sign(v) SR (e^(|v|/1000 ln C_f8) - 1) / (0x2c8 * C_100)` | loader, dfm |
 | 46 | `VelToPortaTimeBox` | 0, 1 | 0 | | dfm |
 | 47 | `FEnvAltBox` adaptive filter envelope | 0, 1 | 0 | `0x648 = v > 0`; re-sends params 52 and 58 | loader, dfm |
@@ -239,7 +241,7 @@ implementation starts from `Default.fst`.
 | 93..95 | `DelVolWheel`, `DelFBWheel`, `DelTimeWheel` | 0..1000, 0..900, 0..384 | 500, 300, 144 | time in 192nds of a beat (`FUN_00789080`: 144 is 3/4 beat) | dfm |
 | 96 | `RevTypeSelect` | 0..6 | 0 | | dfm, corpus |
 | 97 | `RevWetWheel` | 0..1000 | 500 | 0x7f8 | dfm |
-| 98 | `CompVolWheel` compression level | 0..1000 | 500 | input gain into the embedded Maximus | dfm |
+| 98 | `CompVolWheel` compression mix | 0..1000 | 500 | Maximus parameter 5, its LMH mix: `ProcessParam(5, v)` | loader, dfm |
 | 99 | `VelToFatPitchBox` | 0, 1 | 0 | (v9+) | loader, dfm |
 
 Cases 0x36..0x62 of `ProcessParam` (read in `run4refs/FUN_0077f630`):
@@ -287,8 +289,8 @@ legato: last voice 0x338 -> 0x6dc pitch target
 voices: single-threaded: for each voice FUN_00784a10(voice) then FUN_00788620 (sum)
         threaded (0x2f8 != 0, >= 2 voices): a worker pool renders voices in parallel, then the sum
 voice cleanup: finished voices (state +0x11c == 10, refcount +0xa8 == 0) -> Host.Voice_Kill
-chorus  0x7c0: FUN_0074b0f0 then kernel +0x60; dry 0x7c8 when != 1.0
-delay   0x7d0: two taps (FUN_00747510) with per-channel offsets 0x7dc / 0x7e0, feedback kernel +0x40 or +0x60 by type 0x7d8, gain 0x7e4
+chorus  0x7c0: 0x7b8 < 1: FUN_0074b0b0 (LFOs on); else FUN_0074b0f0 then kernel +0x60 into scratch; sum *= dry 0x7c8 when != 1.0; sum += scratch
+delay   0x7d0: 0x7b8 > 0: scratch = sum * 0x7e4, added into the ring per side at offsets 0x7dc / 0x7e0 (FUN_00747510); always kernel +0x40 or +0x60 by 0x7d8 into scratch; sum += scratch
 reverb  0x7f0: FUN_0074a540 (TFruityReverb) into scratch 2, added with wet 0x7f8
 embedded effects list 0x800+0x128: each plugin's Eff_Render(out, out, n)   // the compression Maximus loaded from Data/Compression/<CompType>.fst
 global LFO phase 0x750 / 0x558, pitch glide 0x310 advance; host msg 0x128 pre/post; copy to Dest
@@ -310,10 +312,13 @@ output:    envelope segments (attack, decay, release by state +0x11c: 0..2 attac
            FUN_005f5f60 ramps; mix into set[0]+0x20 with the voice gain, then FUN_005b82c0 stereo spread
 ```
 
-The `TriggerVoice` (`FUN_00782940`) handles the FL "slide" and "porta" note
-kinds (`local_74 == 0xf` slide, `0xd` porta), mono mode (`0x1d8`, param 44)
-and portamento (`0x1d4`, param 43; voice table at `0x340 + 0x20 k`).
-`0x1bc` is param 37 `VelToVol`: when it is off the voice asks the host
+The `TriggerVoice` (`FUN_00782940`) handles the FL note kinds
+(`local_74 == 0xf` slide, `0xd` legato, `0xe` porta), legato (`0x1d8`,
+param 44 `MonoBox`) and portamento (`0x1d4`, param 43; voice table at
+`0x340 + 0x20 k`). `MonoBox` is a legato flag, not a voice limit: with it
+on, or for a legato note with it off, a new note while one is held glides
+that voice to the new pitch (`FUN_00787ef0`) and starts no voice of its
+own. `0x1bc` is param 37 `VelToVol`: when it is off the voice asks the host
 (`GetVoiceParam(voice, 6)`) not to put the velocity on its volume.
 
 
@@ -601,30 +606,53 @@ then on the sum the chorus, the delay, the reverb and the compression.
 - Tremolo: `ippsTone_Direct_32fc` at `0x7a4 = 2.5 / SR` with magnitude 1.25,
   `|.| - 1`, smoothed by `FUN_00604a90` with the depth `Trem/1000`, `+ 1`:
   the left follows `|cos|`, the right `|sin|`.
-- Chorus (`TFruityChorus`-like object `FUN_0074a790`, setup `FUN_0074a9b0`,
-  kernel `FUN_0074b2f0` / `FUN_0074b7e0`): table `DAT_007ee73c + 0x20 t`
-  gives taps a side and five settings (depths /1024, rates /128): 1 `(4,
-  512, 768, 8, 128, -32)`, 2 `(5, 1024, 856, 0, 128, 68)`, 3 `(7, 512, 512,
-  128, 128, 54)`, 4 `(6, 561, 854, 0, 0, 38)`, 5 `(1, 136, 312, 0, 0,
-  128)`, 6 `(2, 86, 632, 0, 0, 0)`, 7 `(1, 42, 944, 0, 0, -22)`, 8 `(9, 81,
-  170, 0, 0, -66)`. Mix m = `ChMix/1000`: dry `0x7c8 = 1 - (5^m - 1)/4`, wet
-  `1 - (5^(1-m) - 1)/4`. It sleeps `0x7bc = 0.004 SR` plus its length after
-  the last voice.
-- Delay (`TDelay_32FS`, `FUN_007471d0`, `FUN_00747070`, taps
-  `FUN_00747510`): time `DelTime * SR * 0.3125 / tempo` samples (192 steps
-  a beat; 144 is 3/4 beat), feedback `DelFB/1000`, input gain
-  `level(DelVol/1000)`; table `DAT_007ee67c + 8 t` (offset ms, kernel): 1 `(0,
-  0)` straight echo (`+0x40`), 2 `(1, 2)` and 3 `(-20, 2)` across
-  (`+0x60`), the offset added to the right side when positive and the left
-  when negative. The delayed signal is added to the sum.
-- Reverb (`TFruityReverb`, `FUN_0074a360`, process `FUN_0074a540` /
-  `FUN_00749b60`): the sum is made mono (`FUN_006119f0`), reverberated to
-  stereo and added at `0x7f8 = level(RevWet/1000) / 2`. Table `DAT_007ee67c
-  + 0x20 t`, eight ints into the reverb's `+0x38..0x54`: 1 `(75, 40, 0, 40,
-  100, 15, 40, 2)`, 2 `(0, 115, 18, 40, 100, 22, 50, 2)`, 3 `(34, 21, 27, 90,
-  100, 45, 31, 3)`, 4 `(400, 60, 31, 60, 65, 23, 37, 1)`, 5 `(100, 36, 0, 35,
-  100, 6, 36, 2)`, 6 `(100, 60, 0, 17, 100, 5, 30, 2)`; the third is
-  scaled `* SR / 384` (predelay), the sixth `* SR / 10` (decay).
+The three effects are FL's shared classes, the same code Harmor links in;
+`docs/plugins/fl-fx.md` maps them and `crates/plugins/src/fl_fx.rs` is
+their port. What Harmless adds is the front end below. The setters run on
+their parameters, the block size (Dispatcher 3, this+0x2d4) and the rate;
+the tempo event (`ProcessEvent` `FUN_0077f5e0`, this+0x2cc) re-runs the
+delay's, so a new tempo that moves the delay time empties its ring.
+A type of 0 frees the object; the next type above 0 makes a new one.
+
+- Sleep: while there are voices, `Gen_Render` sets 0x7b8 to 0x7bc; with
+  none it takes the block length off it. 0x7bc is `round(0.004 SR)`, plus
+  the chorus ring (block + longest delay + 8 frames) when there is a
+  chorus. Under 1 the chorus only turns its LFOs (`FUN_0074b0b0`) and the
+  delay takes no input but keeps sounding its feedback; the reverb never
+  sleeps.
+- Chorus (`TStereoFlanger`, constructor `FUN_0074a790`, setter
+  `FUN_00789570`, voices `FUN_0074a9b0`, x87 kernel `FUN_0074b2f0` with
+  voices `FUN_0074b180` / `FUN_0074b230` under a truncating control word,
+  `FUN_005a43a0`): table `DAT_007ee73c + 0x20 t` holds Flangus's six
+  wheels (order, depth /1024, speed /1024, delay /128, spread /128, cross
+  /128): 1 `(4, 512, 768, 8, 128, -32)`, 2 `(5, 1024, 856, 0, 128, 68)`, 3
+  `(7, 512, 512, 128, 128, 54)`, 4 `(6, 561, 854, 0, 0, 38)`, 5 `(1, 136,
+  312, 0, 0, 128)`, 6 `(2, 86, 632, 0, 0, 0)`, 7 `(1, 42, 944, 0, 0, -22)`,
+  8 `(9, 81, 170, 0, 0, -66)`. Mix m = `ChMix * 0.001f`: dry `0x7c8 = 1 -
+  (5^m - 1)/4`, wet `+0x50 = 1 - (5^(1-m) - 1)/4`, which the class folds
+  into its voice gains. No ramp on either.
+- Delay (`TDelay_32FS`, constructor `FUN_007471d0`, setter `FUN_00789080`,
+  ring size `FUN_00747070`, input `FUN_00747510`, kernels `FUN_007475a0`
+  straight and `FUN_007477f0` ping-pong): time `T = round(DelTime * SR *
+  0.3125 / tempo)` samples (192 steps a beat; 144 is 3/4 beat), at least 1;
+  feedback `DelFB * 0.001f` into +0x30, ramped by the host cap; input gain
+  `0x7e4 = level(DelVol/1000)`. Table `DAT_007ee67c + 8 t` (offset ms,
+  kernel): 1 `(0, 0)` straight echo (`+0x40`), 2 `(1, 2)` and 3 `(-20, 2)`
+  ping-pong (`+0x60`). The offset, `round(|ms| * 0.001 * SR)` frames, goes on
+  the right side when positive and the left when not, and the ring is
+  block + offset + T frames.
+- Reverb (`TFruityReverb`, constructor `FUN_0074a360`, setter
+  `FUN_00789280`, update `FUN_00749b60`, process `FUN_0074a540` into
+  `Reverb_x64.dll`'s unmodulated `FUN_180002980`): the sum is made mono as
+  L + R (`FUN_006119f0`), reverberated to stereo and added at `0x7f8 =
+  level(RevWet/1000) / 2`. Table `DAT_007ee67c + 0x20 t`, eight ints for
+  the class's low cut (Hz), high cut (100 Hz), predelay (`round(v SR /
+  384)` samples), room size, diffusion, decay (`v SR / 10` samples),
+  damping (100 Hz) and bass colour (index into 0.2, 0.6, 1, 1.5, 3): 1
+  `(75, 40, 0, 40, 100, 15, 40, 2)`, 2 `(0, 115, 18, 40, 100, 22, 50, 2)`,
+  3 `(34, 21, 27, 90, 100, 45, 31, 3)`, 4 `(400, 60, 31, 60, 65, 23, 37,
+  1)`, 5 `(100, 36, 0, 35, 100, 6, 36, 2)`, 6 `(100, 60, 0, 17, 100, 5, 30,
+  2)`. The crossover is fixed at 500 Hz.
 - Compression: the Maximus of `Data/Compression/<CompType>.fst` (a Maximus
   state of 1246 to 1342 bytes each), with `ProcessParam(5, CompVol)` its LMH mix, run in
   place on the sum.
@@ -641,11 +669,14 @@ sine bank and its 10 ms level glide, the LFO shapes, the vibrato and pitch
 LFO, the unison spreads, the attack, decay and release with their
 declick, and the compression through `maximus.rs`.
 
-Approximated: the chorus, delay and reverb (their tables and levels are
-FL's, the lines are a stand-in: modulated taps, a straight or crossed
-feedback line, and four combs and two allpasses a side); the tremolo's
-smoothing; mono, legato and portamento (mono releases the voices before,
-portamento glides in a straight line); slide notes; phaser type 9 and
-resonance type 8 (played as plain curves); the host's volume and pan
-ramps; the plugin's sample counter for the phase spread; the threaded
-voice render.
+The chorus, delay and reverb are FL's classes from `fl_fx.rs` behind the
+front end of section 8, told a block of 256 frames (the chunk the plugin
+renders in): that sets their sleep and ring sizes, which FL takes from the
+host. The delay has room for its longest time down to 20 BPM, and is only
+made when the state has it on.
+
+Approximated: the tremolo's smoothing; mono, legato and portamento (mono
+releases the voices before, portamento glides in a straight line); slide
+notes; phaser type 9 and resonance type 8 (played as plain curves); the
+host's volume and pan ramps; the plugin's sample counter for the phase
+spread; the threaded voice render.
