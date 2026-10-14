@@ -3580,7 +3580,7 @@ fn a_clip_on_a_generator_s_parameter_and_on_its_channel_s_volume_moves_them() {
     let out = render(&none, &dir);
     assert_eq!((out.automation_clips, out.unsupported_targets), (0, 1));
     let mut unhosted = sine_song(&[sine_note(0, BAR, 69)]);
-    unhosted.channels[1].plugin_name = Some("Harmor".to_owned());
+    unhosted.channels[1].plugin_name = Some("FLEX".to_owned());
     for target in [1 << 16, (1 << 16) + PARAM] {
         let clip = add_automation(&mut unhosted, &steps, FULL);
         bind(&mut unhosted, clip, target);
@@ -3645,15 +3645,15 @@ fn a_generator_the_engine_does_not_host_is_silent_and_counted() {
     let mut song = sine_song(&notes);
     // No plugin of this name is hosted, so the channel is passed over for
     // its name and not for a state its plugin turns down.
-    assert!(plugins::generator_by_name("Harmor").is_none());
-    song.channels[1].plugin_name = Some("Harmor".to_owned());
+    assert!(plugins::generator_by_name("FLEX").is_none());
+    song.channels[1].plugin_name = Some("FLEX".to_owned());
     let out = render(&song, &dir);
     assert_impulses(&out.left, &[0]);
     assert_eq!((out.notes, out.voices, out.skipped), (3, 1, 1));
     assert_eq!(out.hosted_generators, 0);
     // The channel is counted once, however many notes it has.
     let unhosted: Vec<_> = out.unhosted_generators.iter().collect();
-    assert_eq!(unhosted, [(&"Harmor".to_owned(), &1)]);
+    assert_eq!(unhosted, [(&"FLEX".to_owned(), &1)]);
 
     // A hosted generator that turns the channel's state down is counted
     // with the others: TestSine's level stops at 100, and its state is 4
@@ -3676,7 +3676,7 @@ fn a_generator_the_engine_does_not_host_is_silent_and_counted() {
         item: Item::Field(Id::IsEnabled),
     });
     let mut idle = sine_song(&[note(0)]);
-    idle.channels[1].plugin_name = Some("Harmor".to_owned());
+    idle.channels[1].plugin_name = Some("FLEX".to_owned());
     for song in [off, idle] {
         let out = render(&song, &dir);
         assert_impulses(&out.left, &[0]);
