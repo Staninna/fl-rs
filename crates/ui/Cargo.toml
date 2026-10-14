@@ -1,0 +1,20 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.95"
+description = "The fl-rs windows as egui panels: they draw a project and emit commands"
+
+[dependencies]
+craft-ui = { workspace = true }
+egui = { workspace = true }
+engine = { workspace = true }
+flp = { workspace = true }
+model = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+
+[lints]
+workspace = true
