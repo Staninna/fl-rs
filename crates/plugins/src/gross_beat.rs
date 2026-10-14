@@ -47,10 +47,6 @@
 //! - Slots chosen from MIDI notes or the keyboard, the key-held slots'
 //!   return on a key's release and the GUI's slot buttons: nothing here
 //!   sends them. A slot changes when its parameter does.
-//! - FL's ring of past audio is long enough for three bars at 10 BPM; this
-//!   one is three bars at the slowest tempo it has been told and a little
-//!   more. The two differ only in what a tap past the newest frame reads,
-//!   which is weighted next to nothing.
 //! - The sinc's arithmetic is FL's, in f32 and in its order, with an exact
 //!   reciprocal where FL's SSE code takes `rcpps` and one Newton step.
 //! - The tension curve takes `exp` in full where FL calls IPP's 11-bit
@@ -101,6 +97,9 @@ const LATENCY: usize = 15;
 
 /// The largest block worked through in one go. A longer one is cut up.
 const CHUNK: usize = 512;
+
+/// The slowest tempo FL has, in BPM, which sizes the ring.
+const SLOWEST: usize = 10;
 
 /// A trigger or a hold that is not due, and one that is due at once.
 const NEVER: i32 = i32::MAX;
@@ -690,34 +689,29 @@ impl GrossBeat {
         self.speed.same = true;
         self.fade = ((rate * 0.001).round_ties_even() as usize).max(1);
         self.dc_k = (44_100.0 / rate * DC_RATE) as f32;
+        self.size_ring();
     }
 
-    /// The ring long enough for three bars at this tempo and a block.
+    /// The ring FL sizes once (`FUN_00841a20`): three bars at 10 BPM, the
+    /// slowest tempo FL has, plus 16 frames, a block and 64 guard frames.
     fn room(&self) -> usize {
-        (3.0 * self.bar).ceil() as usize + 2 * 16 + CHUNK + 64
+        let rate = self.rate as usize;
+        rate * 240 / SLOWEST * 3 + 16 + CHUNK + 64
     }
 
-    /// Make the ring longer, keeping what is in it where the reader looks
-    /// for it.
-    fn grow(&mut self, len: usize) {
-        let old = std::mem::take(&mut self.ring);
-        let mut ring = vec![[0.0; 2]; len];
-        let old_len = old.len();
-        if old_len > 0 {
-            for back in 1..=old_len {
-                ring[(self.write + len - back % len) % len] =
-                    old[(self.write + old_len - back) % old_len];
-            }
+    /// Size the ring for the rate. Only the rate sizes it, so a tempo
+    /// change never asks for memory. A ring of a new length starts empty.
+    fn size_ring(&mut self) {
+        let room = self.room();
+        if self.ring.len() != room {
+            self.ring = vec![[0.0; 2]; room];
+            self.write = 0;
+            self.base = 0;
+            self.fade_base = 0;
+            self.fading = 0;
+            self.hold_saved = 0;
+            self.hold_base = 0;
         }
-        let place =
-            |at: usize| (self.write + len - (self.write + old_len - at) % old_len.max(1)) % len;
-        let (base, fade_base) = (place(self.base), place(self.fade_base));
-        let (saved, held) = (place(self.hold_saved), place(self.hold_base));
-        self.ring = ring;
-        self.base = base;
-        self.fade_base = fade_base;
-        self.hold_saved = saved;
-        self.hold_base = held;
     }
 
     /// What the tempo, the rate and the PPQ set (`FUN_00841ac0`): the
@@ -731,10 +725,7 @@ impl GrossBeat {
         self.bar = f64::from(whole / self.tempo as f32);
         self.span = self.bar * 2.0;
         self.beat_step = 4.0 / self.bar;
-        let room = self.room();
-        if self.ring.len() < room {
-            self.grow(room);
-        }
+        // Below 10 BPM the reader stops at the ring's oldest frames.
         let len = self.ring.len() as i64;
         let behind = ((self.span + 0.5).round_ties_even() as i64 + LATENCY as i64)
             .clamp(LATENCY as i64, len - LATENCY as i64);
@@ -1681,6 +1672,23 @@ mod tests {
         plugin.process(&mut left, &mut right);
         assert_eq!((left, right), (vec![0.5; 64], vec![-0.5; 64]));
         assert!(plugin.follows_song());
+    }
+
+    #[test]
+    fn the_rate_sizes_the_ring_once_and_a_tempo_change_keeps_it() {
+        let mut plugin = GrossBeat::default();
+        plugin.set_sample_rate(48_000.0);
+        // Three bars at 10 BPM, 16 frames, a block and 64 guard frames.
+        let room = 48_000 * 72 + 16 + CHUNK + 64;
+        assert_eq!(plugin.ring.len(), room);
+        let ring = plugin.ring.as_ptr();
+        for bpm in [10.0, 300.0, 5.0, 60.0] {
+            plugin.set_tempo(bpm);
+            assert_eq!((plugin.ring.as_ptr(), plugin.ring.len()), (ring, room));
+            assert!(plugin.base < room);
+        }
+        plugin.set_sample_rate(96_000.0);
+        assert_eq!(plugin.ring.len(), 96_000 * 72 + 16 + CHUNK + 64);
     }
 
     #[test]

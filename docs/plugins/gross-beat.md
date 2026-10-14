@@ -291,10 +291,16 @@ p, p + 2, p - 1), with `rcpps` and one Newton step for `1 / (x pi)`
   `FPD_SetPlaying(1)`; a tick that does not follow the one before is
   `FPD_SongPosChanged`; `Effect::reset` is `FPD_SetPlaying(0)` and a flush.
   The rounded mixing time is the last tick plus the frames since it.
-- The ring is three bars at the slowest tempo the plugin has been told,
-  plus 608 frames, and grows when the tempo drops. FL's is three bars
-  at 10 BPM. A tap past the newest frame reads older audio here than in FL,
-  where it reads silence early in a song; such taps weigh next to nothing.
+- The ring is FL's: three bars at 10 BPM plus 16 frames, the 512-frame
+  block and 64 guard frames, sized when the sample rate is set and never
+  after. A tempo change only moves the reader, so `set_tempo` asks for no
+  memory on the audio thread, and every tap reads what FL's reads. This
+  costs 72 seconds of stereo f32 a plugin (about 28 MB at 48 kHz), as in
+  FL. Sizing from the slowest tempo the host could promise in a cold path
+  would save memory, but needs a promise the `Effect` API does not make
+  and would leave the taps past the newest frame reading other audio than
+  FL's. Below 10 BPM, which FL does not reach, the reader stops at the
+  ring's oldest frames.
 - The kernel follows FL's f32 recurrences and order with an exact
   reciprocal in place of `rcpps` and Newton's step.
 - `exp` in the tension curve is full precision; FL's `ippsExp_32f_A11` is
