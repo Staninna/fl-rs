@@ -164,6 +164,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::directwave::NAME, || {
         Box::new(crate::directwave::DirectWave::default())
     }),
+    (crate::fl_keys::NAME, || {
+        Box::new(crate::fl_keys::FlKeys::default())
+    }),
     (crate::fpc::NAME, || Box::new(crate::fpc::Fpc::default())),
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
