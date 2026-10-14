@@ -40,13 +40,14 @@
 //! After the voices: stereo tremolo, chorus, delay, reverb and the
 //! compression, which is a Maximus loaded from
 //! `Harmless/Data/Compression/<n>.fst` under the directory
-//! [`Generator::set_resource_dir`] is handed.
+//! [`Generator::set_resource_dir`] is handed. The chorus, delay and reverb
+//! are FL's own classes from [`crate::fl_fx`], set from Harmless's tables.
 //!
 //! # What is not FL's
 //!
-//! - The chorus, the delay and the reverb are stand-ins with FL's
-//!   settings tables and levels, not FL's own lines: the doc has their
-//!   setters and tables but not their kernels.
+//! - The effects are told a host block of 256 frames, which sets when
+//!   they sleep after the last voice. The delay keeps its time down to 20
+//!   BPM and is only made when the state loads with it on.
 //! - The stereo tremolo's shape is read from its setter, its smoothing is
 //!   not.
 //! - Mono mode cuts the voices before it and portamento glides in a
@@ -55,6 +56,9 @@
 //!   (8) are played as the types before them.
 //! - The host's per-voice volume and pan ramps are a straight ramp a block.
 
+use crate::fl_fx::{
+    Delay32, DelayKernel, FlangerSettings, FruityReverb, ReverbSettings, StereoFlanger,
+};
 use crate::three_osc::pan_law;
 use crate::{Effect, Fidelity, Generator, NoteOn, StateError, knob_value, maximus::Maximus};
 use dsp::additive::{ShapeTable, SineBank};
@@ -86,6 +90,14 @@ const END_LEVEL: f32 = 1e-4;
 
 /// The most samples worked on at once.
 const CHUNK: usize = 256;
+
+/// The host block the post chain's classes are told of (FL's
+/// `FPD_SetBlockSize`, this+0x2d4): the chunk the plugin renders in.
+const BLOCK: usize = CHUNK;
+
+/// The slowest tempo the delay keeps its time at; slower ones cut it to
+/// what the ring holds.
+const SLOWEST_TEMPO: f64 = 20.0;
 
 /// The highest frequency a harmonic is given at the first quality, in Hz.
 const LIMIT_HZ: f64 = 17_000.0;
@@ -317,6 +329,23 @@ fn level(x: f64) -> f64 {
     } else {
         ((x * 11f64.ln()).exp() - 1.0) * 0.1
     }
+}
+
+/// The level curve as the effect setters work it, in f32: `v == 1` is 1,
+/// else `(11^v - 1)` times 0.1 as an f32.
+fn fl_level(v: f32) -> f32 {
+    if v == 1.0 {
+        1.0
+    } else {
+        let e = f64::from(v * 11f64.ln() as f32).exp();
+        ((e - 1.0) * f64::from(0.1f32)) as f32
+    }
+}
+
+/// A reverb at a rate with room for the longest predelay of the table,
+/// 31 / 384 s.
+fn reverb_for(hz: i32) -> FruityReverb {
+    FruityReverb::new(hz, (31.0 * f64::from(hz) / 384.0) as usize + 1)
 }
 
 /// The volume curve of the main, timbre EQ and compression wheels:
@@ -1157,45 +1186,32 @@ impl Voice {
     }
 }
 
-/// The stand-in chorus: modulated delay taps on each side.
+/// The post chain's three FL classes and what Harmless's setters
+/// (`FUN_00789570`, `FUN_00789080`, `FUN_00789280`) make of the state for
+/// them. A class that is off is FL's freed object: turning it on again
+/// starts it fresh.
 #[derive(Debug, Clone, PartialEq)]
-struct Chorus {
-    kind: usize,
-    lines: [Vec<f32>; 2],
-    at: usize,
-    phase: f64,
-    dry: f32,
-    wet: f32,
-}
-
-/// The stand-in delay: a line a side with feedback, straight or across.
-#[derive(Debug, Clone, PartialEq)]
-struct Delay {
-    on: bool,
-    lines: [Vec<f32>; 2],
-    at: usize,
-    time: [usize; 2],
-    feedback: f32,
-    gain: f32,
-    cross: bool,
-}
-
-/// The stand-in reverb: a predelay, four combs a side and two allpasses,
-/// with FL's decay time and wet level.
-#[derive(Debug, Clone, PartialEq)]
-struct Reverb {
-    on: bool,
-    predelay: Vec<f32>,
-    pre_at: usize,
-    pre_len: usize,
-    combs: [[Vec<f32>; 4]; 2],
-    comb_at: [[usize; 4]; 2],
-    comb_fb: [[f32; 4]; 2],
-    comb_lp: [[f32; 4]; 2],
-    damp: f32,
-    allpass: [[Vec<f32>; 2]; 2],
-    ap_at: [[usize; 2]; 2],
-    wet: f32,
+struct Effects {
+    /// The sleep countdown (0x7b8) and what voices set it to (0x7bc):
+    /// 4 ms plus the chorus's ring. The chorus only turns its LFOs and the
+    /// delay takes no input while it is under 1.
+    sleep: i32,
+    hold: i32,
+    chorus_on: bool,
+    chorus: StereoFlanger,
+    /// The dry gain (0x7c8); the wet is in the flanger's voices.
+    chorus_dry: f32,
+    delay_on: bool,
+    delay: Delay32,
+    kernel: DelayKernel,
+    /// The stereo offset of each side in frames (0x7dc, 0x7e0), and the
+    /// input gain (0x7e4).
+    delay_offsets: [usize; 2],
+    delay_gain: f32,
+    reverb_on: bool,
+    reverb: FruityReverb,
+    /// The wet gain (0x7f8).
+    reverb_wet: f32,
 }
 
 /// Harmless.
@@ -1217,12 +1233,12 @@ pub struct Harmless {
     compression: Option<Box<Maximus>>,
     compression_states: [Option<Vec<u8>>; 4],
     missing_compression: bool,
-    chorus: Chorus,
-    delay: Delay,
-    reverb: Reverb,
+    fx: Box<Effects>,
     left: [f32; CHUNK],
     right: [f32; CHUNK],
     mono_in: [f32; CHUNK],
+    wet_left: [f32; CHUNK],
+    wet_right: [f32; CHUNK],
 }
 
 impl Default for Harmless {
@@ -1245,40 +1261,26 @@ impl Default for Harmless {
             compression: None,
             compression_states: [None, None, None, None],
             missing_compression: false,
-            chorus: Chorus {
-                kind: 0,
-                lines: [Vec::new(), Vec::new()],
-                at: 0,
-                phase: 0.0,
-                dry: 1.0,
-                wet: 0.0,
-            },
-            delay: Delay {
-                on: false,
-                lines: [Vec::new(), Vec::new()],
-                at: 0,
-                time: [1, 1],
-                feedback: 0.0,
-                gain: 0.0,
-                cross: false,
-            },
-            reverb: Reverb {
-                on: false,
-                predelay: Vec::new(),
-                pre_at: 0,
-                pre_len: 1,
-                combs: Default::default(),
-                comb_at: [[0; 4]; 2],
-                comb_fb: [[0.0; 4]; 2],
-                comb_lp: [[0.0; 4]; 2],
-                damp: 0.2,
-                allpass: Default::default(),
-                ap_at: [[0; 2]; 2],
-                wet: 0.0,
-            },
+            fx: Box::new(Effects {
+                sleep: 0,
+                hold: 0,
+                chorus_on: false,
+                chorus: StereoFlanger::default(),
+                chorus_dry: 1.0,
+                delay_on: false,
+                delay: Delay32::default(),
+                kernel: DelayKernel::Straight,
+                delay_offsets: [0; 2],
+                delay_gain: 0.0,
+                reverb_on: false,
+                reverb: reverb_for(44_100),
+                reverb_wet: 0.0,
+            }),
             left: [0.0; CHUNK],
             right: [0.0; CHUNK],
             mono_in: [0.0; CHUNK],
+            wet_left: [0.0; CHUNK],
+            wet_right: [0.0; CHUNK],
         };
         plugin.load();
         plugin
@@ -1487,96 +1489,111 @@ impl Harmless {
         d.pluck_start = 1 - round(sr * 0.002 / d.tick as f64) as i64;
         d.tremolo_rate = 2.5 / sr;
 
-        // The effects' levels.
-        let mix = k(p[91]) as f32;
-        let law = |x: f32| 1.0 - ((f64::from(x) * 5f64.ln()).exp() - 1.0) as f32 * 0.25;
-        self.chorus.dry = law(mix);
-        self.chorus.wet = law(1.0 - mix);
-        let tempo = d.tempo;
-        let rate = sr;
-        self.delay.feedback = k(p[94]) as f32;
-        self.delay.gain = level(k(p[93])) as f32;
-        let time = round(f64::from(p[95]) * rate * 0.3125 / tempo).max(1.0) as usize;
-        let kind = p[92].clamp(0, 3) as usize;
-        let offset = round(f64::from(DELAY[kind][0].abs()) * 0.001 * rate) as usize;
-        let (l, r) = if DELAY[kind][0] > 0 {
-            (0, offset)
-        } else {
-            (offset, 0)
-        };
-        let longest = self.delay.lines[0].len().saturating_sub(1).max(1);
-        self.delay.time = [(time + l).min(longest), (time + r).min(longest)];
-        self.delay.cross = DELAY[kind][1] != 0;
-        self.reverb.wet = (level(k(p[97])) * 0.5) as f32;
+        self.set_effects();
     }
 
-    /// The delay lines, combs and allpasses for the effects the state
-    /// switches on, at the rate. This allocates.
-    fn build_effects(&mut self) {
+    /// The setters of the chorus (`FUN_00789570`), the delay
+    /// (`FUN_00789080`) and the reverb (`FUN_00789280`), on the classes
+    /// [`Harmless::build_effects`] made. Allocates nothing.
+    fn set_effects(&mut self) {
         let p = self.state.params;
-        let sr = self.d.rate;
-        // Chorus.
-        self.chorus.kind = p[90].clamp(0, 8) as usize;
-        let chorus_len = if self.chorus.kind > 0 {
-            (sr * 0.06) as usize + 4
-        } else {
-            0
+        let rate = self.d.rate;
+        let hz = rate.round() as i32;
+        let fx = &mut *self.fx;
+
+        // The chorus: a table of the six flanger wheels, the mix as a dry
+        // and a wet of 1 - (5^x - 1) / 4 crossing at the middle.
+        fx.hold = round(f64::from(hz) * 0.004) as i32;
+        let kind = p[90].clamp(0, 8) as usize;
+        fx.chorus_on = kind > 0 && {
+            if !fx.chorus_on {
+                fx.chorus.fresh();
+            }
+            let mix = p[91] as f32 * 0.001;
+            let law = |x: f32| 1.0 - ((f64::from(x) * 5f64.ln()).exp() - 1.0) as f32 * 0.25;
+            fx.chorus_dry = law(mix);
+            let settings = FlangerSettings::from_wheels(CHORUS[kind], law(1.0 - mix));
+            fx.chorus.set(&settings, f64::from(hz));
+            fx.hold += BLOCK as i32 + fx.chorus.length();
+            true
         };
-        self.chorus.lines = [vec![0.0; chorus_len], vec![0.0; chorus_len]];
-        self.chorus.at = 0;
-        // Delay: the longest time is 384 steps at 40 BPM, plus 20 ms.
-        self.delay.on = p[92] > 0;
-        let delay_len = if self.delay.on {
-            (sr * 3.0 + sr * 0.02) as usize + 2
-        } else {
-            0
+
+        // The delay: 192 steps a beat, the input on the level curve, and a
+        // stereo offset on one side.
+        let kind = p[92].clamp(0, 3) as usize;
+        fx.delay_on = kind > 0 && fx.delay.capacity() > 0 && {
+            if !fx.delay_on {
+                fx.delay.fresh();
+            }
+            let [offset_ms, kernel] = DELAY[kind];
+            fx.kernel = if kernel == 0 {
+                DelayKernel::Straight
+            } else {
+                DelayKernel::PingPong
+            };
+            let offset = round(f64::from(offset_ms.abs()) * 0.001 * f64::from(hz)) as usize;
+            let tempo = f64::from(self.d.tempo as f32);
+            let time = round(f64::from(p[95] * hz) * 0.3125 / tempo) as usize;
+            fx.delay.set_length(BLOCK + offset, time);
+            fx.delay_offsets = if offset_ms > 0 {
+                [0, offset]
+            } else {
+                [offset, 0]
+            };
+            fx.delay.set_feedback(p[94] as f32 * 0.001);
+            fx.delay_gain = fl_level(p[93] as f32 * 0.001);
+            true
         };
-        self.delay.lines = [vec![0.0; delay_len], vec![0.0; delay_len]];
-        self.delay.at = 0;
-        // Reverb.
+
+        // The reverb: a table of the class's eight settings, the wet on
+        // the level curve, halved.
         let kind = p[96].clamp(0, 6) as usize;
-        self.reverb.on = kind > 0;
-        let settings = REVERB[kind];
-        let scale = sr / 44_100.0;
-        let pre = if self.reverb.on {
-            (f64::from(settings[2]) * sr / 384.0) as usize + 1
-        } else {
-            1
+        fx.reverb_on = kind > 0 && {
+            if !fx.reverb_on {
+                fx.reverb.fresh();
+            }
+            let t = REVERB[kind];
+            fx.reverb.set(ReverbSettings {
+                low_cut: t[0] as f32,
+                high_cut: t[1] as f32,
+                predelay: round(f64::from(t[2] * hz) / 384.0) as i32,
+                room: t[3],
+                diffusion: t[4],
+                decay: (f64::from(t[5] * hz) / 10.0) as f32,
+                damping: t[6] as f32,
+                colour: t[7],
+            });
+            fx.reverb_wet = (f64::from(fl_level(p[97] as f32 * 0.001)) * 0.5) as f32;
+            true
         };
-        self.reverb.predelay = vec![0.0; pre];
-        self.reverb.pre_len = pre;
-        self.reverb.pre_at = 0;
-        let decay = f64::from(settings[5]) / 10.0;
-        const COMBS: [usize; 4] = [1116, 1188, 1277, 1356];
-        const ALLPASS: [usize; 2] = [556, 441];
-        for side in 0..2 {
-            for (c, base) in COMBS.iter().enumerate() {
-                let len = if self.reverb.on {
-                    ((base + 23 * side) as f64 * scale) as usize
-                } else {
-                    1
-                };
-                self.reverb.combs[side][c] = vec![0.0; len.max(1)];
-                self.reverb.comb_at[side][c] = 0;
-                self.reverb.comb_lp[side][c] = 0.0;
-                // Each comb falls 60 dB in the decay time.
-                self.reverb.comb_fb[side][c] = if decay > 0.0 {
-                    (0.001f64.powf(len as f64 / (decay * sr))) as f32
-                } else {
-                    0.0
-                };
-            }
-            for (a, base) in ALLPASS.iter().enumerate() {
-                let len = if self.reverb.on {
-                    ((base + 23 * side) as f64 * scale) as usize
-                } else {
-                    1
-                };
-                self.reverb.allpass[side][a] = vec![0.0; len.max(1)];
-                self.reverb.ap_at[side][a] = 0;
-            }
+    }
+
+    /// The memory of the three classes at the rate. The delay has room
+    /// for its longest time at 20 BPM and is only made when the state has
+    /// it on. This allocates, and starts every class fresh.
+    fn build_effects(&mut self) {
+        let hz = self.d.rate.round() as i32;
+        let fx = &mut *self.fx;
+        fx.chorus.make_room(f64::from(hz));
+        fx.chorus.fresh();
+        fx.chorus_on = false;
+        let delay = if self.state.params[92] > 0 {
+            let longest = 384.0 * 0.3125 / SLOWEST_TEMPO * f64::from(hz);
+            BLOCK + (0.02 * f64::from(hz)) as usize + 1 + longest as usize + 1
+        } else {
+            0
+        };
+        if fx.delay.capacity() != delay {
+            fx.delay = Delay32::with_capacity(delay);
         }
-        self.reverb.damp = (f64::from(settings[3]) / 200.0).clamp(0.05, 0.6) as f32;
+        fx.delay.fresh();
+        fx.delay_on = false;
+        if fx.reverb.rate() != hz {
+            fx.reverb = reverb_for(hz);
+        }
+        fx.reverb.fresh();
+        fx.reverb_on = false;
+        fx.sleep = 0;
     }
 
     /// The compression Maximus for the state's preset, from the files read
@@ -2269,7 +2286,7 @@ impl Harmless {
     }
 
     /// The stereo tremolo, chorus, delay, reverb and compression.
-    fn effects(&mut self, left: &mut [f32], right: &mut [f32]) {
+    fn effects(&mut self, voices: usize, left: &mut [f32], right: &mut [f32]) {
         let len = left.len();
         let d = &*self.d;
         if d.tremolo > 0.0 {
@@ -2282,98 +2299,65 @@ impl Harmless {
                 right[i] *= gr;
             }
         }
-        if self.chorus.kind > 0 {
-            self.run_chorus(left, right);
-        }
-        if self.delay.on {
-            let dl = &mut self.delay;
-            let size = dl.lines[0].len();
-            for i in 0..len {
-                let wl = dl.lines[0][(dl.at + size - dl.time[0]) % size];
-                let wr = dl.lines[1][(dl.at + size - dl.time[1]) % size];
-                let (fl, fr) = if dl.cross { (wr, wl) } else { (wl, wr) };
-                dl.lines[0][dl.at] = left[i] * dl.gain + fl * dl.feedback;
-                dl.lines[1][dl.at] = right[i] * dl.gain + fr * dl.feedback;
-                left[i] += wl;
-                right[i] += wr;
-                dl.at = (dl.at + 1) % size;
+        let fx = &mut *self.fx;
+        // The voices keep the classes awake: with none left, the
+        // countdown runs out a block at a time.
+        if voices < 1 {
+            if fx.sleep > 0 {
+                fx.sleep -= len as i32;
             }
+        } else {
+            fx.sleep = fx.hold;
         }
-        if self.reverb.on {
-            for i in 0..len {
-                self.mono_in[i] = (left[i] + right[i]) * 0.5;
-            }
-            let rv = &mut self.reverb;
-            for i in 0..len {
-                let x = rv.predelay[rv.pre_at];
-                rv.predelay[rv.pre_at] = self.mono_in[i];
-                rv.pre_at = (rv.pre_at + 1) % rv.pre_len;
-                for side in 0..2 {
-                    let mut sum = 0.0;
-                    for c in 0..4 {
-                        let line = &mut rv.combs[side][c];
-                        let at = rv.comb_at[side][c];
-                        let y = line[at];
-                        let lp = &mut rv.comb_lp[side][c];
-                        *lp = y + (*lp - y) * rv.damp;
-                        line[at] = x * 0.25 + *lp * rv.comb_fb[side][c];
-                        rv.comb_at[side][c] = (at + 1) % line.len();
-                        sum += y;
-                    }
-                    for a in 0..2 {
-                        let line = &mut rv.allpass[side][a];
-                        let at = rv.ap_at[side][a];
-                        let buf = line[at];
-                        line[at] = sum + buf * 0.5;
-                        sum = buf - sum * 0.5;
-                        rv.ap_at[side][a] = (at + 1) % line.len();
-                    }
-                    if side == 0 {
-                        left[i] += sum * rv.wet;
-                    } else {
-                        right[i] += sum * rv.wet;
+        let (wet_l, wet_r) = (&mut self.wet_left[..len], &mut self.wet_right[..len]);
+        if fx.chorus_on {
+            if fx.sleep < 1 {
+                fx.chorus.skip(len);
+            } else {
+                for i in 0..len {
+                    (wet_l[i], wet_r[i]) = fx.chorus.frame(left[i], right[i]);
+                }
+                if fx.chorus_dry != 1.0 {
+                    for i in 0..len {
+                        left[i] *= fx.chorus_dry;
+                        right[i] *= fx.chorus_dry;
                     }
                 }
+                for i in 0..len {
+                    left[i] += wet_l[i];
+                    right[i] += wet_r[i];
+                }
+            }
+        }
+        if fx.delay_on {
+            if fx.sleep > 0 {
+                for i in 0..len {
+                    wet_l[i] = left[i] * fx.delay_gain;
+                    wet_r[i] = right[i] * fx.delay_gain;
+                }
+                fx.delay.add(0, wet_l, fx.delay_offsets[0]);
+                fx.delay.add(1, wet_r, fx.delay_offsets[1]);
+            }
+            let cap = (44_100.0 / d.rate * 0.001) as f32;
+            fx.delay.render(fx.kernel, wet_l, wet_r, cap);
+            for i in 0..len {
+                left[i] += wet_l[i];
+                right[i] += wet_r[i];
+            }
+        }
+        if fx.reverb_on {
+            let mono = &mut self.mono_in[..len];
+            for i in 0..len {
+                mono[i] = left[i] + right[i];
+            }
+            fx.reverb.process(mono, wet_l, wet_r);
+            for i in 0..len {
+                left[i] += wet_l[i] * fx.reverb_wet;
+                right[i] += wet_r[i] * fx.reverb_wet;
             }
         }
         if let Some(maximus) = &mut self.compression {
             maximus.process(left, right);
-        }
-    }
-
-    fn run_chorus(&mut self, left: &mut [f32], right: &mut [f32]) {
-        let ch = &mut self.chorus;
-        let [taps, depth, base, _, _, _] = CHORUS[ch.kind];
-        let size = ch.lines[0].len();
-        if size == 0 {
-            return;
-        }
-        let sr = self.d.rate;
-        let taps = taps.max(1) as usize;
-        let base = 0.005 + f64::from(base) / 1024.0 * 0.02;
-        let depth = f64::from(depth) / 1024.0 * 0.004;
-        let rate = 0.5 / sr;
-        for i in 0..left.len() {
-            ch.lines[0][ch.at] = left[i];
-            ch.lines[1][ch.at] = right[i];
-            let mut wet = [0.0f32; 2];
-            for (side, sum) in wet.iter_mut().enumerate() {
-                for t in 0..taps {
-                    let ph = ch.phase + (t * 2 + side) as f64 / (taps * 2) as f64;
-                    let delay = (base + depth * (ph * TAU).sin()) * sr;
-                    let pos = ch.at as f64 + size as f64 - delay;
-                    let i0 = pos.floor();
-                    let frac = (pos - i0) as f32;
-                    let a = ch.lines[side][(i0 as usize) % size];
-                    let b = ch.lines[side][(i0 as usize + 1) % size];
-                    *sum += a + (b - a) * frac;
-                }
-                *sum /= taps as f32;
-            }
-            left[i] = left[i] * ch.dry + wet[0] * ch.wet;
-            right[i] = right[i] * ch.dry + wet[1] * ch.wet;
-            ch.at = (ch.at + 1) % size;
-            ch.phase = frac(ch.phase + rate);
         }
     }
 }
@@ -2519,11 +2503,12 @@ impl Generator for Harmless {
             l[..len].fill(0.0);
             r[..len].fill(0.0);
             let mut voices = std::mem::take(&mut self.voices);
+            let sounding = voices.iter().filter(|v| v.active).count();
             for voice in voices.iter_mut().filter(|v| v.active) {
                 self.render_voice(voice, &mut l[..len], &mut r[..len]);
             }
             self.voices = voices;
-            self.effects(&mut l[..len], &mut r[..len]);
+            self.effects(sounding, &mut l[..len], &mut r[..len]);
             for i in 0..len {
                 left[done + i] += l[i];
                 right[done + i] += r[i];
@@ -2574,13 +2559,22 @@ impl Generator for Harmless {
         let d = &*self.d;
         // The release falls 40 dB in its time and a voice ends at -80 dB.
         let mut tail = d.release * 2.0 + d.declick;
-        if self.delay.on && self.delay.feedback > 0.0 {
-            let time = self.delay.time[0].max(self.delay.time[1]) as f64;
-            let repeats = (0.001f64.ln() / f64::from(self.delay.feedback).ln()).min(50.0);
+        let fx = &*self.fx;
+        if fx.chorus_on {
+            tail += f64::from(fx.hold);
+        }
+        if fx.delay_on {
+            let time = fx.delay.delay() as f64;
+            let feedback = f64::from(fx.delay.feedback());
+            let repeats = if feedback > 0.0 {
+                (0.001f64.ln() / feedback.ln()).min(50.0)
+            } else {
+                0.0
+            };
             tail += time * (repeats + 1.0);
         }
-        if self.reverb.on {
-            tail += d.rate * f64::from(REVERB[self.param(96) as usize][5]) / 10.0 * 1.5;
+        if fx.reverb_on {
+            tail += f64::from(fx.reverb.settings().decay) * 1.5;
         }
         tail as usize + d.tick
     }
@@ -2593,8 +2587,6 @@ impl Generator for Harmless {
         let p = &self.state.params;
         if self.missing_compression {
             Fidelity::Approximate("Harmless without its compression preset")
-        } else if p[90] > 0 || p[92] > 0 || p[96] > 0 {
-            Fidelity::Approximate("Harmless chorus, delay or reverb")
         } else if p[25] > 0 {
             Fidelity::Approximate("Harmless tremolo")
         } else if p[44] > 0 || self.uses_porta() {
@@ -2820,6 +2812,73 @@ mod tests {
         let end = &l[l.len() - 1000..];
         assert!(end.iter().all(|v| v.abs() < 1e-4));
         assert!(plugin.voices.iter().all(|v| !v.active));
+    }
+
+    /// The left side of a note of 0.1 s with these parameters, and without
+    /// the effect `off` turns off.
+    fn with_and_without(
+        params: &[(usize, i32)],
+        off: usize,
+        frames: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut sides = [Vec::new(), Vec::new()];
+        for (side, on) in sides.iter_mut().zip([true, false]) {
+            let mut moved = params.to_vec();
+            if !on {
+                moved.push((off, 0));
+            }
+            let mut plugin = Harmless::default();
+            plugin
+                .set_state(&state_of(&moved, DEFAULT_SELECTORS))
+                .unwrap();
+            plugin.note_on(note(60));
+            let (mut l, _) = render(&mut plugin, 4410);
+            plugin.note_off(1);
+            l.extend(render(&mut plugin, frames - 4410).0);
+            *side = l;
+        }
+        let [with, without] = sides;
+        (with, without)
+    }
+
+    #[test]
+    fn the_delay_echoes_in_192nds_of_a_beat() {
+        // 96 steps at 120 BPM: half a beat, 11025 samples.
+        let params = [(92, 1), (93, 1000), (94, 0), (95, 96)];
+        let (with, without) = with_and_without(&params, 92, 20_000);
+        let heard = |side: &[f32]| (0..side.len()).find(|n| side[*n].abs() > 1e-7);
+        let echo: Vec<f32> = with.iter().zip(&without).map(|(a, b)| a - b).collect();
+        assert_eq!(heard(&echo), heard(&without).map(|n| n + 11_025));
+        // At an input of 1000 and no feedback the echo is the note itself.
+        for n in 11_025..11_100 {
+            assert!((with[n] - without[n] - without[n - 11_025]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn the_chorus_mixes_on_a_5_power_law() {
+        let mut plugin = Harmless::default();
+        plugin
+            .set_state(&state_of(&[(90, 1), (91, 500)], DEFAULT_SELECTORS))
+            .unwrap();
+        // Half way the dry is 1 - (sqrt 5 - 1) / 4, and so is the wet.
+        let law = 1.0 - (5f32.sqrt() - 1.0) / 4.0;
+        assert!((plugin.fx.chorus_dry - law).abs() < 1e-6);
+        assert!(plugin.fx.chorus_on && plugin.fx.chorus.length() > 8);
+        let (with, without) = with_and_without(&[(90, 1), (91, 500)], 90, 8000);
+        assert!(with.iter().all(|v| v.is_finite()) && with != without);
+    }
+
+    #[test]
+    fn the_reverb_rings_on_after_the_voices_have_gone() {
+        let params = [(96, 4), (97, 1000), (28, 0)];
+        let (with, without) = with_and_without(&params, 96, 3 * 44_100);
+        assert!(with.iter().all(|v| v.is_finite()));
+        // The note is short; a second on, only the reverb sounds.
+        let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
+        let late = 2 * 44_100..2 * 44_100 + 4410;
+        assert!(rms(&without[late.clone()]) < 1e-6);
+        assert!(rms(&with[late]) > 1e-4);
     }
 
     #[test]

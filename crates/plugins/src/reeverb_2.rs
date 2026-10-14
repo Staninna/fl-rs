@@ -41,6 +41,7 @@
 //! table times `rate * (room + 15) / 115 / 20000`, so they grow with the
 //! rate and the room.
 
+use crate::fl_fx::{DOWN_60_DB, LINES, Line, TAP_BLEND, TAPS_LEFT, TAPS_RIGHT};
 use crate::parts::Matrix;
 use crate::{Effect, StateError, knob_gain, knob_value, read_state};
 use std::f64::consts::PI;
@@ -80,18 +81,6 @@ const OLD_SPEED: i32 = 684;
 const LOW_CUT_OFF: i32 = 19;
 const HIGH_CUT_OFF: i32 = 221;
 
-/// How long the twelve lines are at room size 100, in 1/20000 s: the four
-/// diffusers, then an allpass, a delay, an allpass and a delay for each
-/// half of the tank.
-const LINES: [u64; 12] = [
-    142, 107, 379, 277, 672, 4453, 1800, 3720, 908, 4217, 2656, 3163,
-];
-/// Where the wet sound's seven taps a side are, in the same unit.
-const TAPS_LEFT: [u64; 7] = [266, 2974, 1913, 2496, 1690, 187, 1566];
-const TAPS_RIGHT: [u64; 7] = [353, 3627, 1728, 3173, 1811, 335, 621];
-/// What the tap weights are at no feedback. They go to 1 as it grows.
-const TAP_BLEND: [f32; 5] = [0.25, 0.6, 0.7, 0.2, 0.5];
-
 /// Where the eight early reflections a side are, before the room size
 /// scales them, and which of them come upside down. The eighth of the left
 /// is not played.
@@ -103,9 +92,6 @@ const EARLY_RIGHT: [f64; 8] = [
 ];
 const EARLY_LEFT_SIGNS: [f32; 8] = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 0.0];
 const EARLY_RIGHT_SIGNS: [f32; 8] = [1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0];
-
-/// ln 0.001: a tail is over when it is 60 dB down.
-const DOWN_60_DB: f64 = -6.907_755_278_982_137;
 
 /// The deepest the modulation moves its delay, in seconds.
 const DEPTH: f64 = 200.0 / 44_100.0;
@@ -264,51 +250,6 @@ impl Tune {
             depth: (p(14) / 2048.0 * DEPTH * rate) as f32,
             depth_keep: 0.01f64.powf(1.0 / (0.1 * rate)) as f32,
         }
-    }
-}
-
-/// A delay line that is written and read at one place, which moves down
-/// through its memory.
-#[derive(Debug, Clone, PartialEq, Default)]
-struct Line {
-    samples: Vec<f32>,
-    at: usize,
-}
-
-impl Line {
-    fn make_room(&mut self, longest: usize) {
-        self.samples
-            .reserve_exact(longest.saturating_sub(self.samples.len()));
-    }
-
-    /// Start over at this length.
-    fn start(&mut self, len: usize) {
-        self.samples.clear();
-        self.samples.resize(len, 0.0);
-        self.at = 0;
-    }
-
-    /// Put a sample in, and give the one from the line's length before.
-    fn delay(&mut self, x: f32) -> f32 {
-        std::mem::replace(&mut self.samples[self.at], x)
-    }
-
-    /// One sample through the line as a Schroeder allpass with gain `g`.
-    fn allpass(&mut self, x: f32, g: f32) -> f32 {
-        let place = &mut self.samples[self.at];
-        let v = *place - g * x;
-        *place = x + g * v;
-        v
-    }
-
-    /// Once this frame's sample is in, what was put in `back` frames
-    /// before it. Until then `tap(0)` is the sample that is about to leave.
-    fn tap(&self, back: usize) -> f32 {
-        self.samples[(self.at + back) % self.samples.len()]
-    }
-
-    fn step(&mut self) {
-        self.at = self.at.checked_sub(1).unwrap_or(self.samples.len() - 1);
     }
 }
 
