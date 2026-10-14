@@ -295,6 +295,3 @@ headers. Exact as above, with these left:
 - The spare frame of a RIFF table's first sample reads before the buffer in
   FL (`end - loop` is -1); here it is 0. It is read once, by the last point
   of a voice that is about to end.
-- The engine's realtime path decodes a generator's files before it hands the
-  generator its resource directory, so there `sample_paths` is empty and
-  Grand Piano is silent; the offline render plays it.
