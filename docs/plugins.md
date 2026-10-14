@@ -48,7 +48,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | ZGameEditor Visualizer | 807 |  | 9 | |
 | Generator | Autogun | 6144 | yes | 9 | |
 | Generator | FL Keys | 4114 | yes | 8 | |
-| Effect | EQUO | 3728 | yes | 7 | |
+| Effect | EQUO | 3728 | yes | 7 | implemented in crates/plugins (state versions 3 and 4, the curve with morph, shift, mix and master, 31 band passes with the 2x bands, balance law, gain lines, add mode, per-tick smoothing, silence sleep and the 2x allpass resampler exact; the send to another insert is not routed, so send only passes the input on (no corpus state has a send); a loaded state starts settled where FL glides in from flat; ticks counted from tempo and PPQ; the HQ render flag that forces oversampling is never set), docs/plugins/equo.md |
 | Effect | Hyper Chorus | 3846 |  | 7 | |
 | Effect | Pitch Shifter | 4161 | yes | 7 | |
 | Effect | Wave Candy | 4247 |  | 7 | |
