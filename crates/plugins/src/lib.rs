@@ -65,6 +65,7 @@ pub mod peak_controller;
 pub mod pitcher;
 pub mod reeverb_2;
 mod sampler;
+pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
 pub mod spreader;

@@ -174,6 +174,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),
+    (crate::slicex::NAME, || {
+        Box::new(crate::slicex::Slicex::default())
+    }),
     (crate::sytrus::NAME, || {
         Box::new(crate::sytrus::Sytrus::default())
     }),
