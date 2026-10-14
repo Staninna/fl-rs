@@ -32,7 +32,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Effect | Transient Processor | 3878 | yes | 15 | implemented in crates/plugins (a shell around engine_x64.dll, read in full, exact), docs/plugins/transient-processor.md |
 | Generator | FLEX | 7929 | yes | 15 | mapped (shell state high; patches live in obfuscated .flexpack archives and the engine DLLs, not read), docs/plugins/flex.md |
 | Effect | Fruity Delay Bank | 3825 | yes | 13 | implemented in crates/plugins (routing, gains, delay lines, feedback modes and plain grain exact; the per-unit filters, 2x oversampler and shaped grain approximated, 30 of 41 corpus states), docs/plugins/fruity-delay-bank.md |
-| Effect | Effector | 3639 | yes | 12 | |
+| Effect | Effector | 3639 | yes | 12 | implemented in crates/plugins (a shell around engine_x64.dll; the six effects the corpus picks, distortion, lo-fi, flanger, reverb, trance gate and vowel filter, exact, all 27 project states; the LFO resyncs to a song position the plugin counts itself; effects 3, 4, 5, 7, 9 and 11 unused in the corpus and passed through), docs/plugins/effector.md |
 | Effect | Fruity Balance | 3631 | yes | 12 | implemented in crates/plugins, docs/plugins/fruity-balance.md |
 | Effect | Fruity Multiband Compressor | 525 | yes | 12 | implemented in crates/plugins (a shell around comp_eng_x64.dll; both crossover types, compressor and limiter exact; FIR type has 52 frames latency), docs/plugins/fruity-multiband-compressor.md |
 | Effect | Patcher | 6891 |  | 12 | |

@@ -42,6 +42,7 @@ pub mod convolver;
 pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
+pub mod effector;
 pub mod fast_dist;
 pub mod fast_lp;
 pub mod filter;
@@ -286,6 +287,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_3::Delay3::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
+    } else if is(effector::NAME) {
+        Some(Box::new(effector::Effector::default()))
     } else if is(fast_dist::NAME) {
         Some(Box::new(fast_dist::FastDist::default()))
     } else if is(fast_lp::NAME) {
@@ -571,6 +574,7 @@ mod tests {
         // What the docs count in the 165 projects, but for Soft Clipper,
         // where the doc has 27.
         for (plugin, len, uses) in [
+            ("effector", 316, 27),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
             ("fruity compressor", 36, 35),
@@ -634,7 +638,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 30);
+        assert_eq!(lengths.count(), 31);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
