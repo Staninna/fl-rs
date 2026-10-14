@@ -239,7 +239,7 @@ Part struct (0x4b bytes; editor handler names in parentheses):
 | 36 | +0x244 | `BMPDenoiseWheel` | default 250 | |
 | 40 | +0x570 | `PhaserTypeSelect` | 200 + item | 200 x112, 206 x6, ... |
 | 44 | +0x1b4 | `BMPViewScaleSelect` | editor only | |
-| 48 | +0x2c8 | `GlobalEQMixWheel` | stored as v/1000 float | |
+| 48 | +0x2c8 | `GlobalEQMixWheel` | the f32 v/1000 itself, not an int | 1.0 in 197 of 200 parts; 0.999, 0.796, 0.661 |
 | 52, 56 | +0x3f8, +0x4b8 | `F1TypeSelect`, `F2TypeSelect` | filter ID 0..18 | (4, 18) x67, (0, 18) x17, (0, 0) x8, (0, 3) x8, (17, 18) x7 |
 | 60, 64 | +0x430, +0x4f0 | `F1ResTypeSelect`, `F2ResTypeSelect` | 100 + item | (108, 111) x90, (100, 111) x9, (100, 100) x8 |
 | 68 | u8 +0xc | part enabled | | A on in 98, B on in 30 of 100 states |
@@ -495,7 +495,7 @@ flag that the next block applies (`FUN_00891280`).
 | 786 | 10014 `MainPitchWheel` | -2400..2400 cents | part+0x38 = v for both parts (`FUN_00873c60`) | 17 |
 | 787 | 10015 `MainLFOLevelWheel` | -1000..1000 (1000) | this+0x10dc = v/1000 | 0 |
 | 788 | 10016 `InvArpBox` | 0, 1 | this+0xd88; re-sorts held voices | 0 |
-| 789..793 | 20000..20004 distortion | | section 4.2 | |
+| 789..793 | 20000..20004 distortion: drive, asymmetry, out, mix, cutoff (ProcessParam reads this+0xd8c..0xd9c) | | section 4.2 | |
 | 794..803 | 20005..20014 reverb | | section 4.5 | enable 39 |
 | 804..810 | 20015..20021 chorus | | section 4.3 | order > 0 in 19 |
 | 811..820 | 20022..20031 delay | | section 4.4 | enable 19 |
@@ -803,6 +803,7 @@ a = b = 2;  pattern i (i = 1, 3 for REC[31], REC[33]): s < 0 -> mul 1 - s, add 0
 per iteration k: a = a·mul1 + add1, b = b·mul2 + add2
    g = min(t^3·S, 1)·mix^2·dist[k]        (t^2 when part+0xb69); S = part+0x5cc; dist = (3^(2 s16) - 1)/2 at 9 points
    start = a + REC[30], stride = b + REC[32]; L4[start + j·stride] += dry[j]·g   (skip g < 5.96e-8); Σ += g (Σ0 = 1)
+   a and b move on after the copy, so the first copy is at 2 + REC[30] with stride 2 + REC[32] (code, FUN_00885cb0)
 part+0xb69: Σ = sqrt Σ
 L4 *= 1/Σ, or with mask M (shape 23 squared): L4 = dry + (L4/Σ - dry)·M
 ```
@@ -812,7 +813,7 @@ L4 *= 1/Σ, or with mask M (shape 23 squared): L4 = dry + (L4/Σ - dry)·M
 Per-filter record at part+0x3e8 + 0xc0 f: REC base (+12 for filter 2), shape
 struct S at +0x3f0 (ID +8, centre +0x14, reach +0x18 / +0x1c, points per
 octave +0x20, identity bit +0x34), resonance struct at +0x428, env amount
-+0x464, lo / hi +0x468 / +0x46c (log2 Hz), range +0x470, key track +0x484,
++0x464, lo / hi +0x468 / +0x46c (log2 Hz), range +0x470 (the cutoff code multiplies by +0x474 instead; 2·range fits the formula, `inferred`), key track +0x484,
 cutoff base +0x488, res offset +0x48c / +0x490, width +0x494, res width
 +0x498, res scale +0x49c, adaptive byte +0x4a4.
 
@@ -1365,3 +1366,52 @@ the state turns it on (the condition in parentheses).
 Steps 1 to 8 make every corpus channel sound with its basic timbre, filter
 and unison; with steps 9 to 13 the shared FX cover most states; steps 14 to
 18 finish the common spectral units.
+
+## 8. Implementation
+
+`crates/plugins/src/harmor.rs` is the plugin, with three files beside it:
+`harmor_state.rs` (section 1), `harmor_art.rs` (section 3.3) and
+`harmor_fx.rs` (sections 4.2 to 4.5). Status by step of section 7:
+
+| step | block | status |
+|---|---|---|
+| 1 | parser | built: all 100 corpus states and 328 presets parse to the last byte, 128 enabled parts |
+| 2 | bank, tick, ramping, declicker | built. The bank keeps its recursion from block to block and resyncs on a new frequency, on waking, or every 8192 samples (FL: `round(8192 f)`); partials are summed eight at a time. Per-partial ramp coefficients, the -96 dB drop threshold at average precision, the 10 ms release fade. The attack declicker is not built (declick 0 in the whole corpus) |
+| 3 | pitch, ratios, partial count, global EQ, taper | built |
+| 4 | timbres, mix, start phases, harmonic phase | built, with the blend modes and phase randomness |
+| 5 | voice lifecycle, pan, FX / dry, part mix, volumes | built. MaxPoly is not read; a full pool of 128 voices steals the oldest, released ones first |
+| 6 | articulators | built on `menvelope.rs`'s `Lfo` (with its centre at 0.5) and a Harmor envelope runner in `harmor_art.rs`: per-voice scales, global scales, the attack jump, sustain offset and the release carried over from where the run is. Approximated: the per-point sustain weights (taken as 1 from the decay marker to the loop end), shared runs (flag 2) run per voice, arpeggiator points are not read, the LFO's speed articulator also speeds its level envelope, the global LFO phase (articulator 40) is not applied |
+| 7 | filters 1 and 2, their mix | built, with masks. Types 0..16 are Harmless's tables (`harmless::shape`); the custom types 17 and 18 skip the edge trim, so their range takes a reach of 1 on both sides |
+| 8 | unison | built; type 4 (Hz) detunes whole voices instead of each partial |
+| 9 | compressor | built: `System/Compression/<n>.fst` on the Maximus port, REC 821..824 forwarded |
+| 10 | resonance | built: tables 100..111 from section 3.6.5 and the noise type 109 (its random numbers are a hash, not `ippsRandUniform`) |
+| 11 | vibrato | built |
+| 12 | distortion | built from section 4.2, all eleven modes, the halfband chains and the DC block |
+| 13 | reverb | built on `fl_fx::FruityReverb` |
+| 14 | harmonizer | built |
+| 15 | pluck | built; pluck-to-blur's decay is not |
+| 16 | phaser | built; the motion rate takes Harmless's beat unit, since part+0x5b0 has no writer in the map |
+| 17 | phase randomness | built |
+| 18 | prism | built |
+| 19 | legato, portamento, mono | built in outline: legato takes over the closest held note and goes back to it on release, portamento glides from the last note, the mono modes kill or release. The glide limit and per-colour records are not built |
+| 20 | chorus, delay | built on `fl_fx::StereoFlanger` and `fl_fx::Delay32`; delay damping filters the input, not the loop |
+| 21 | auto-gain | built, absolute mode (relative acts as absolute without an image) |
+| 22 | protection, clipping | built |
+| 23 | precision modes | only the drop threshold; the HQ render is not used |
+| 24 | tremolo | built, its smoothing not |
+| 25 | images | not built (8 embedded, 9 resynthesised parts) |
+| 26 | blur | built: time blur and harmonic blur with mask |
+| 27 | sub-harmonics, unit order, local EQ, detuning, FX order, oct spacing | built |
+| 28 | strum, arpeggiator rank, VelToPortaTime | not built (none in the corpus) |
+| - | harmonic randomness (unit 2) | not built: shape 4 sits flat at its centre in all 128 parts, which makes the unit do nothing |
+
+Corpus (FL_RS_CORPUS render of every project, first 10 s): before Harmor,
+104 projects had sound and 18 Harmor channels with notes were silent;
+with it, 106 projects have sound and every Harmor channel is hosted. Two
+JuiceBass states have filter 1's cutoff at 0 and only sound when their
+project moves it, and one Square a Saw state opens its filter after a beat.
+
+Corrections to the sections above, from the code: the global EQ mix in the
+part struct is an f32; the distortion's five REC are drive, asymmetry, out,
+mix and cutoff in that order; the harmonizer moves its pattern after each
+copy.

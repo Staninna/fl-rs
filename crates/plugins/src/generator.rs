@@ -171,6 +171,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::harmless::NAME, || {
         Box::new(crate::harmless::Harmless::default())
     }),
+    (crate::harmor::NAME, || {
+        Box::new(crate::harmor::Harmor::default())
+    }),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),
@@ -237,7 +240,7 @@ mod tests {
                 assert!(generator.tail() > 0, "{name}");
             }
         }
-        for name in ["3xOsc", "FLEX", "Harmor", "Fruity Wrapper", ""] {
+        for name in ["3xOsc", "FLEX", "Fruity Wrapper", ""] {
             assert!(generator_by_name(name).is_none(), "{name}");
         }
         // An effect is no generator, and a generator no effect.
