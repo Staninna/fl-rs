@@ -165,9 +165,10 @@ struct Hosted {
     /// The frames left of the fade a late plugin's slot is switched by:
     /// from its input to its output or back.
     fade: usize,
-    /// The place in [`Strip::side`] of the sidechain input the plugin
-    /// listens to, when its state names one the insert has.
-    side: Option<usize>,
+    /// The places in [`Strip::side`] of the sidechain inputs the plugin
+    /// listens to, when its state names ones the insert has: the one of
+    /// [`Effect::sidechain_inputs`] each, as Vocodex has two.
+    side: [Option<usize>; 2],
     /// Where the plugin's second output goes, when it has one.
     aux: Option<Aux>,
     /// Whether the plugin hears of every tick of the song: a controller,
@@ -188,7 +189,7 @@ impl Hosted {
             enabled: true,
             mix: 1.0,
             fade: 0,
-            side: None,
+            side: [None; 2],
             aux: None,
         }
     }
@@ -213,7 +214,12 @@ impl Hosted {
         if run == 0 {
             return 0;
         }
-        if let Some(side) = self.side.and_then(|side| sides.get(side)) {
+        for side in self
+            .side
+            .iter()
+            .flatten()
+            .filter_map(|side| sides.get(*side))
+        {
             let (side_left, side_right) = (&side.left[..run], &side.right[..run]);
             self.effect
                 .set_sidechain(side.number, side_left, side_right);
@@ -763,25 +769,39 @@ impl Mixer {
         // counts to among the inserts that send to its own.
         let (mut sidechain_routes, mut sidechain_slots) = (0, 0);
         for at in 0..strips.len() {
-            let asked = |hosted: &Hosted| hosted.effect.sidechain_input();
-            let asked: Vec<usize> = strips[at].effects.iter().map(asked).collect();
-            if asked.iter().all(|number| *number == 0) {
+            let asked = |hosted: &Hosted| hosted.effect.sidechain_inputs();
+            let asked: Vec<[usize; 2]> = strips[at].effects.iter().map(asked).collect();
+            if asked.iter().flatten().all(|number| *number == 0) {
                 continue;
             }
             let sources = project.insert_mix(strips[at].index).sidechain_sources();
-            for (slot, number) in asked.into_iter().enumerate() {
+            let asked = asked.into_iter().enumerate().flat_map(|(slot, numbers)| {
+                numbers
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(which, n)| (slot, which, n))
+            });
+            // A slot counts once, whether it is fed one input or two.
+            let (mut fed, mut lacking) = (Vec::new(), Vec::new());
+            for (slot, which, number) in asked {
                 let Some(at_source) = number.checked_sub(1) else {
                     continue;
                 };
                 let Some(source) = sources.get(at_source) else {
-                    *approximated_slots.entry(NO_INPUT).or_default() += 1;
+                    if !lacking.contains(&slot) {
+                        lacking.push(slot);
+                        *approximated_slots.entry(NO_INPUT).or_default() += 1;
+                    }
                     continue;
                 };
-                sidechain_slots += 1;
+                if !fed.contains(&slot) {
+                    fed.push(slot);
+                    sidechain_slots += 1;
+                }
                 let sides = &mut strips[at].side;
                 let known = sides.iter().position(|side| side.number == number);
                 let side = known.unwrap_or(sides.len());
-                strips[at].effects[slot].side = Some(side);
+                strips[at].effects[slot].side[which] = Some(side);
                 if known.is_some() {
                     continue;
                 }

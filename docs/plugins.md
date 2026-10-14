@@ -39,7 +39,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Generator | Patcher | 6887 |  | 12 | |
 | Effect | Fruity Blood Overdrive | 3640 | yes | 11 | implemented in crates/plugins (exact), docs/plugins/fruity-blood-overdrive.md |
 | Effect | Soundgoodizer | 6257 | yes | 10 | implemented in crates/plugins (a Maximus preset A to D with the amount on LMH mix), docs/plugins/maximus.md section 5.9 |
-| Effect | Vocodex | 5818 | yes | 10 | |
+| Effect | Vocodex | 5818 | yes | 10 | implemented in crates/plugins (state, the MOD and CAR inputs with two sidechain inputs, L-R encoding, band layout and distribution map, RBJ band filters with 2x oversampling past 11050 Hz, peak and RMS followers, smoothing curves, MIN TIMES, noise gate, unison, pitch shift, pass-throughs, contour, mapping envelopes and the closing Soundgoodizer as read from the DLL; plays FL's HQ render path, draft mode not built; noise generator, curved envelope segments and saturation approximated or left out, none of the last two in the corpus; the carrier synth is this crate's Sytrus), docs/plugins/vocodex.md |
 | Effect | Fruity Chorus | 3656 | yes | 9 | implemented in crates/plugins (exact; LFO phases from Delphi's Random from seed 0; its render test sits inside a Fruity Wrapper, so unit tests only), docs/plugins/fruity-chorus.md |
 | Effect | Fruity Convolver | 6012 | yes | 9 | implemented in crates/plugins (convolution, levels, separation, normalise and pre-delay exact at the impulse's rate; resampled impulses, drawn layers, self-convolution and EQ curves approximated), docs/plugins/fruity-convolver.md |
 | Effect | Fruity Stereo Enhancer | 3641 | yes | 9 | implemented in crates/plugins, docs/plugins/fruity-stereo-enhancer.md |
