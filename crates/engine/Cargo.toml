@@ -1,0 +1,25 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Plays an fl-rs project's sampler channels and audio clips, offline to a buffer or live on an output device"
+
+[dependencies]
+cpal = "0.18"
+dsp = { path = "../dsp" }
+flp = { workspace = true }
+model = { workspace = true }
+plugins = { path = "../plugins" }
+rtrb = "0.4"
+symphonia = { version = "0.6", default-features = false, features = ["wav", "pcm", "flac", "mp3", "ogg", "vorbis"] }
+wavicle = "0.1"
+
+[dev-dependencies]
+hound = "3.5"
+plugins = { path = "../plugins", features = ["test-generators"] }
+wavicle = { version = "0.1", features = ["encode"] }
+
+[lints]
+workspace = true
