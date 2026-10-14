@@ -155,17 +155,13 @@ w = (1 - g) K + g with K = 0.25, 0.6, 0.7, 0.2, 0.5 (0x18006036c, 374, 378, 368,
 The taps read after every index has stepped, so a tap of `k` is the sample
 written `k - 1` frames before this one. `code`, `asm` for the tap order.
 
-## What this means for `reeverb_2.rs`
+## Reeverb 2
 
-Reading the engine again for this port showed four places where
-`reeverb_2.rs`'s network differs from `FUN_180003270`, which has the same
-structure as `FUN_180002980`: the second half reads line 7 before the first
-half writes it (FL reads it after, one sample newer); the fourteen output
-taps are read before the lines step (one sample older than FL's); on the
-right the weight `w1` sits on tap 0 where FL puts it on tap 1 (listing
-`0x180003cb8..0x180003d31`); and a predelay of 0 skips the line where FL's
-is one sample long. `fl_fx.rs` follows FL. Reeverb 2 keeps its own network,
-so its output is unchanged by this work.
+Reeverb 2 drives the modulated process `FUN_180003270`, which has the same
+structure as `FUN_180002980` plus modulation and early reflections. It
+keeps its own network in `reeverb_2.rs` and takes `Line` and the tables
+from `fl_fx.rs`. `docs/plugins/fruity-reeverb-2.md` has where that network
+reads the tank and the taps.
 
 ## Front ends
 

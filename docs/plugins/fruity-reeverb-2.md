@@ -244,25 +244,28 @@ g)` is the Schroeder allpass `v = buf[i] - g x; buf[i] = x + g v; return v`,
 indices count down and wrap at `len`):
 
 ```
-// modulation (asm 0x18000336a..0x18000345d)
-rate   = speed^3 * 9.9 + 0.1 Hz;  phase += rate / SR; phase -= floor(phase)              // E+0x1fc, 0x180060420, 0x1800603f8
-depth  += (depthTarget - depth) * (1 - k),  k = powf(0.01, 1 / (0.1 SR))                 // E+0x20c; depthTarget = modDepth * 200/44100 * SR samples (0x1800603f0), 99 % in 100 ms
-mod    = depth * (sin(2 pi phase) + 1) * 0.5                                             // 0 .. depth samples
+// modulation (asm 0x18000336a..0x1800034b4), all f32 but the sine
+rate   = speed^3 * 9.9 + 0.1 Hz;  old = phase; phase += rate / SR; phase -= trunc(phase) // E+0x1fc, 0x180060420, 0x1800603f8
+d      = depthTarget - depth                                                             // E+0x20c; depthTarget = modDepth * 200/44100 * SR samples (0x1800603f0)
+depth  = |d| < 0.01 ? depthTarget : d * (1 - k) + depth + 1e-30,  k = powf(0.01, 1 / (0.1 SR))   // 99 % in 100 ms
+mod    = depth * ((sin(2 pi old) + 1) * 0.5)                                             // the phase before this sample's step; 0 .. depth samples
 
 // input: high cut, low cut
 x  = in + 1e-30
 lp += (x - lp) * cHigh                                                                   // E+0x10, E+0x34
 ap  = (lp - s1) * cLow + s2;  s2 = lp;  s1 = ap                                           // E+0x14, E+0x18, E+0x1c
-x   = cLow != 0 ? (lp - ap) * 0.5 : lp                                                   // first-order high pass when low cut is on
+x   = cLow != 0 ? (lp - ap) * 0.5 + 1e-30 : lp                                           // first-order high pass when low cut is on
 
-// four input diffusers, one gain
-x = ap(line0, len0, gIn);  x = ap(line1, len1, gIn);  x = ap(line2, len2, gIn);  x = ap(line3, len3, gIn)      // E+0x60..0x78, lengths E+0x108..0x114, gIn = E+0x2c
+// four input diffusers, one gain; every line's index counts down right after its access
+x = ap(line0, len0, gIn)                                                                 // E+0x60..0x78, lengths E+0x108..0x114, gIn = E+0x2c
+erLine[erIdx--] = x                                                                      // asm 0x1800037f7: the early reflections hear the first diffuser only
+x = ap(line1, len1, gIn);  x = ap(line2, len2, gIn);  x = ap(line3, len3, gIn)
 
 // predelay, then the tank. Two halves in a figure of eight; each half: read the other half's last delay, filter, allpass, delay, allpass, delay
-pd = predelay[idx];  predelay[idx] = x                                                    // E+0xc0, length E+0x138
+pd = predelay[idx];  predelay[idx] = x                                                    // E+0xc0, length E+0x138 = max(1, predelay) (FUN_006d1d00): a predelay of 0 is one sample
 pd += 1e-20
 
-for half in (A, B):                   // A reads line11 (E+0xb8) and writes line7 (E+0x98); B reads line7 and writes line11
+for half in (A, B):                   // A reads line11 (E+0xb8) before B writes it; B reads line7 (E+0x98) after A has written it and stepped (asm 0x180003a2c..0x180003a6a), one sample newer
     c   = lastDelay[other half] * g                                                      // g = E+0x20
     apx = (c - sX) * cCross + sX1;  sX1 = c;  sX = apx                                  // crossover allpass, E+0x44
     y   = (apx + c) * bass + c + pd                                                      // low shelf: bass = E+0x48 = (gBass/g - 1)/2; the low band is scaled by gBass/g
@@ -273,12 +276,13 @@ for half in (A, B):                   // A reads line11 (E+0xb8) and writes line
     v   = ap(line6|10, len6|10, gT2)                                                     // tank allpass 2, gT2 = E+0x28
     write line7|11 (the half's last delay)
 
-// early reflections (when requested): 8 taps per side from the ER line, which is written with the diffused input
+// early reflections (when requested, read before this sample's ER write, so a tap of k is k samples old): 8 taps per side from the ER line
 erL = sum over the first seven L taps of gainL[k] * erLine[write - lenL[k]] with signs (+ + - + + + +); the eighth L tap is computed but not summed
 erR = sum over all eight R taps with signs (+ - + + - + + -)
 // tank output taps, Dattorro style, weights w_k = (1 - g) K_k + g with K = 0.25, 0.6, 0.7, 0.2, 0.5 (0x18006036c..0x180060378)
-outL = line9[t0] - w1 line9[t1] - w3 line10[t2] - w4 line11[t3] + w2 line5[t4] + line6[t5] + w5 line7[t6]      // t = tapL[0..6]
-outR = w1 line5[t0'] + line5[t1'] - w3 line6[t2'] - w4 line7[t3'] - w2 line9[t4'] + line10[t5'] + w5 line11[t6']   // t' = tapR[0..6]
+// read after every line has stepped: line[t] is line[(idx + t) mod len], the sample written t - 1 samples ago
+outL = line9[t0] - w1 line9[t1] - w3 line10[t2] - w4 line11[t3] + w2 line5[t4] + line6[t5] + w5 line7[t6]      // t = tapL[0..6] (E+0x140..0x158)
+outR = w1 line5[t1'] + line5[t0'] - w3 line6[t2'] - w4 line7[t3'] - w2 line9[t4'] + line10[t5'] + w5 line11[t6']   // t' = tapR[0..6] (E+0x15c..0x174); w1 on t1', asm 0x180003cb8..0x180003d31
 ```
 
 Line numbering follows `T[]`: lines 0..3 are the input diffusers, 4..7 the
@@ -297,8 +301,6 @@ whole buffer, the eight filter states and the modulation lines (engine slot
 - `0x00739568` (the decay base) and `0x0073742c` (the pan-law make-up) live
   in `.bss` and no RIP-relative writer was found; both are tagged
   `inferred` from their use (`ln 0.001` and `sqrt 2`).
-- The tap weights' interaction with `g` is read from the decompile; the
-  listing was not checked for the exact pairing of `K_k` with `tap_k`.
 - `data+0x20` (second diffuser gain) is computed but the engine reads
   `E+0x2c` for all four input allpasses; whether that is a bug or an old
   layout is unknown.
@@ -311,3 +313,5 @@ whole buffer, the eight filter states and the modulation lines (engine slot
 - 333 corpus states, not 323; 3 templates carry it besides the 7 presets.
 - Dry 160 is +5.6 dB, not +4.1.
 - The decay feedback counts the four delays but not the four allpasses in the loop, so RT60 measures 1.39× the setting (2.29 s at 1.5 s). Open question whether FL shows the same.
+- Read again against the listing of `FUN_180003270` (`ghidra/out/reverbeng/asm`), seven details of the first port were off and are fixed: the second half read line 7 a sample too old; the 14 output taps were read before the lines stepped, a sample too old; on the right `w1` sat on tap 0 instead of tap 1; a predelay of 0 skipped the line instead of delaying one sample; the early reflections were fed after the fourth diffuser instead of the first; the LFO's sine took the phase after its step instead of before; and the depth never snapped to its target. The listing also pairs every `K_k` with its tap as section 3 shows.
+- The ER line is `2^(bits(round(0.3163 SR)) + 1)` long (32768 at 44.1 kHz), not the next power of two (`FUN_006d1d00`). Every tap fits either way, so `reeverb_2.rs` keeps the shorter line.
