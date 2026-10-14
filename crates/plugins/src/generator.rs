@@ -155,6 +155,9 @@ type Make = fn() -> Box<dyn Generator>;
 
 /// Every generator there is, by its event 201 name.
 const GENERATORS: &[(&str, Make)] = &[
+    (crate::autogun::NAME, || {
+        Box::new(crate::autogun::Autogun::default())
+    }),
     (crate::bassdrum::NAME, || {
         Box::new(crate::bassdrum::BassDrum::default())
     }),

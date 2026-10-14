@@ -32,6 +32,8 @@
 //! has [`Effect::controller_outputs`], which a host carries to the controls
 //! its project links them to, once for every [`Effect::tick`].
 
+pub mod autogun;
+mod autogun_engine;
 pub mod balance;
 pub mod bassdrum;
 pub mod blood_overdrive;
