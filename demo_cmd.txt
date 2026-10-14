@@ -1,0 +1,21 @@
+# Play FL Studio's demo projects through fl-rs.
+#
+# Run from the repo root. --release matters: the debug build is too slow
+# for realtime audio. FL_RS_DATA points at FL's Data directory so samples,
+# impulses and plugin data are found; the song starts once it has loaded.
+
+export FL_RS_DATA="/shared/code/fl-studio-target/winehome/prefix/drive_c/Program Files/Image-Line/FL Studio 2026/Data"
+
+# Every generator and audio effect in these is hosted. Nothing is silent or
+# passed through (Wave Candy is a visualiser and makes no sound).
+
+cargo run --release -p fl-rs -- "$FL_RS_DATA/Demo projects/Performance mode/Charles Deluxe - Performance Demo.flp"
+cargo run --release -p fl-rs -- "$FL_RS_DATA/Demo projects/Product demos/Olbaid - Sytrus Essentials.flp"      # all Sytrus, approximate
+cargo run --release -p fl-rs -- "$FL_RS_DATA/Demo projects/Product demos/Synth_dfr - Overcome - Sytrus.flp"    # all Sytrus, approximate, loud
+
+# Full songs with every generator playing but one or two effects passed
+# through dry, so they sound close to complete.
+
+cargo run --release -p fl-rs -- "$FL_RS_DATA/Demo projects/Demo songs/P.Priime - Use Me.flp"                   # Effector x2, Emphasis passed through
+cargo run --release -p fl-rs -- "$FL_RS_DATA/Demo projects/Demo songs/Jay Cactus x Confz - Mic Check Ready.flp" # Gross Beat passed through
+cargo run --release -p fl-rs -- "$FL_RS_DATA/Demo projects/Demo songs/Bombs Away ft KARRA - I'm Awake.flp"     # Gross Beat, EQUO, Effector, Patcher, Pitch Shifter, Flanger, Vintage Chorus passed through
