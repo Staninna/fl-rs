@@ -49,7 +49,7 @@ Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a 
 | Generator | Autogun | 6144 | yes | 9 | |
 | Generator | FL Keys | 4114 | yes | 8 | |
 | Effect | EQUO | 3728 | yes | 7 | implemented in crates/plugins (state versions 3 and 4, the curve with morph, shift, mix and master, 31 band passes with the 2x bands, balance law, gain lines, add mode, per-tick smoothing, silence sleep and the 2x allpass resampler exact; the send to another insert is not routed, so send only passes the input on (no corpus state has a send); a loaded state starts settled where FL glides in from flat; ticks counted from tempo and PPQ; the HQ render flag that forces oversampling is never set), docs/plugins/equo.md |
-| Effect | Hyper Chorus | 3846 |  | 7 | |
+| Effect | Hyper Chorus | 3846 |  | 7 | implemented in crates/plugins (exact from the C++ engine in Engine_x64.dll: the 4 or 8 modulated lines with Catmull-Rom reads, feedback and movement panning, Q 0.5 filters, high-pass fade, equal-power mix, and the parameter glide that brings a loaded state in from the defaults; differences: f32 rounds to nearest where FL's block rounds toward zero, every instance starts its LFOs where FL's first instance does, a new rate re-applies the parameters; no render test, so unit tests and the 20 corpus states), docs/plugins/hyper-chorus.md |
 | Effect | Pitch Shifter | 4161 | yes | 7 | |
 | Effect | Wave Candy | 4247 |  | 7 | |
 | Effect | Fruity NoteBook 2 | 3528 |  | 6 | |
