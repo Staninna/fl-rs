@@ -5,7 +5,15 @@
 //! out at the host's rate (`FUN_180020f50`) and `Voice::render` makes its
 //! samples at 38 kHz (`FUN_180020460`).
 
+// Limits are `max` then `min` in the binary's order, which turns a NaN into
+// the lower limit where `clamp` would keep it.
+#![allow(clippy::manual_clamp)]
+
 use std::f64::consts::TAU;
+
+/// The 2 pi the biquads are tuned with: the binary's, to seven digits.
+#[allow(clippy::approx_constant)]
+const BIQUAD_TAU: f64 = 6.283_185;
 
 /// How many parameters there are.
 pub const PARAMS: usize = 38;
@@ -351,7 +359,7 @@ impl Biquad {
         }
         self.set = Some((gain, freq, bw));
         let a = 10f32.powf(gain * 0.05);
-        let w = ((f64::from(freq) * 6.283_185 / f64::from(RATE)) as f32)
+        let w = ((f64::from(freq) * BIQUAD_TAU / f64::from(RATE)) as f32)
             .min(3.0)
             .max(0.0);
         let sin = w.sin();
@@ -507,6 +515,7 @@ impl Voice {
     }
 
     /// How many floats the lines have room for.
+    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.lines.len()
     }
@@ -553,7 +562,9 @@ impl Voice {
             self.low_pass = [[0.0; 4]; MAX_LINES];
             let mut at = 0;
             for line in 0..count {
-                let len = LANES / 4 - (first + line);
+                // Line `i` holds lanes `4i` to `4i + 3`, the longest a
+                // delay of `512 - 4i` samples, as `line_floats` sizes it.
+                let len = LANES - 4 * (first + line);
                 self.at[line] = at;
                 self.len[line] = len;
                 self.slot[line] = 0;
@@ -776,8 +787,12 @@ impl Voice {
                 }
                 let made = made.min(self.buffer.len() - 1);
                 self.made = made;
-                let (_, fresh) = self.buffer.split_at_mut(1);
-                if self.render(&mut fresh[..made]) {
+                // The buffer is lent out while the voice renders into it;
+                // taking a Vec moves it and allocates nothing.
+                let mut buffer = std::mem::take(&mut self.buffer);
+                let ended = self.render(&mut buffer[1..=made]);
+                self.buffer = buffer;
+                if ended {
                     self.clear();
                     stopped = true;
                 }

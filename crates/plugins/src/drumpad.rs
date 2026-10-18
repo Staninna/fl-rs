@@ -77,6 +77,10 @@
 //!   first one FL loads does: only its noise without Noise repeat is FL's.
 //! - A `DMP1` or `DMP2` state, which FL maps onto the 38, is turned down.
 
+// Limits are `max` then `min` in the binary's order, which turns a NaN into
+// the lower limit where `clamp` would keep it.
+#![allow(clippy::manual_clamp)]
+
 use crate::bassdrum::velocity_level;
 use crate::drumpad_voice::{MAX_LINES, Patch, RATE, Voice, line_floats};
 use crate::sampler::circular;
