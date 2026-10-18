@@ -833,12 +833,12 @@ fn a_sample_s_path_is_stored_the_way_fl_stores_its_own() {
         stored("/fl/Data/Patches/Packs/Kick.wav", Some("/fl")),
         r"%FLStudioFactoryData%\Data\Patches\Packs\Kick.wav"
     );
-    // A file that is not under the root keeps its own path.
-    assert_eq!(
-        stored("/home/me/Kick.wav", Some("/fl/Data")),
-        "/home/me/Kick.wav"
-    );
-    assert_eq!(stored("/home/me/Kick.wav", None), "/home/me/Kick.wav");
+    // A file that is not under the root keeps its own path, made absolute
+    // the platform's way: Windows puts the current drive in front.
+    let own = std::path::absolute("/home/me/Kick.wav").unwrap();
+    let own = own.to_string_lossy();
+    assert_eq!(stored("/home/me/Kick.wav", Some("/fl/Data")), own);
+    assert_eq!(stored("/home/me/Kick.wav", None), own);
     let relative = stored("Kick.wav", None);
     assert!(Path::new(&relative).is_absolute(), "{relative}");
 }
