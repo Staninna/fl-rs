@@ -7,15 +7,15 @@ A cross-platform DAW in Rust that opens FL Studio projects. It plays them by reb
 <!-- progress:start -->
 | | done | of | |
 |---|---:|---:|---|
-| Stock generators built, of all FL ships | 14 | 51 | `█████░░░░░░░░░░░░░░░` 27% |
+| Stock generators built, of all FL ships | 15 | 51 | `██████░░░░░░░░░░░░░░` 29% |
 | Stock effects built, of all FL ships | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
-| Built plugins with nothing approximated | 31 | 50 | `████████████░░░░░░░░` 62% |
-| Built plugins with their own doc | 46 | 50 | `██████████████████░░` 92% |
-| Plugin uses in shipped projects that are built | 824 | 1006 | `████████████████░░░░` 81% |
-| Shipped projects with any sound | 111 | 165 | `█████████████░░░░░░░` 67% |
-| Shipped projects that play in full | 32 | 165 | `████░░░░░░░░░░░░░░░░` 19% |
-| Effect slots hosted where sound reaches | 921 | 1021 | `██████████████████░░` 90% |
-| Generator channels with notes that play | 173 | 215 | `████████████████░░░░` 80% |
+| Built plugins with nothing approximated | 31 | 51 | `████████████░░░░░░░░` 60% |
+| Built plugins with their own doc | 51 | 51 | `████████████████████` 100% |
+| Plugin uses in shipped projects that are built | 826 | 1006 | `████████████████░░░░` 82% |
+| Shipped projects with any sound | 112 | 165 | `██████████████░░░░░░` 67% |
+| Shipped projects that play in full | 33 | 165 | `████░░░░░░░░░░░░░░░░` 20% |
+| Effect slots hosted where sound reaches | 928 | 1028 | `██████████████████░░` 90% |
+| Generator channels with notes that play | 180 | 215 | `█████████████████░░░` 83% |
 | Shipped projects saved back byte for byte | 165 | 165 | `████████████████████` 100% |
 | Event types in shipped projects with a reading | 146 | 147 | `████████████████████` 99% |
 | Event readings FL's loader and PyFLP agree on | 98 | 147 | `█████████████░░░░░░░` 66% |
@@ -44,7 +44,7 @@ of FL:
 Built so far, most used in the shipped projects first. `docs/plugins.md` says
 what is exact and what is approximated in each.
 
-- Generators: 3x Osc, Sytrus (approximate), Harmless (approximate), FPC, Harmor (approximate), DirectWave, Slicex (approximate), Autogun (approximate), FL Keys, Fruity DX10, Ogun, BassDrum, BooBass, Fruit Kick.
+- Generators: 3x Osc, Sytrus (approximate), Harmless (approximate), FPC, Harmor (approximate), DirectWave, Slicex (approximate), Autogun (approximate), FL Keys, Fruity DX10, Ogun, BassDrum, BooBass, Fruit Kick, Drumpad.
 - Effects: Fruity Parametric EQ 2, Fruity Limiter, Maximus, Fruity Reeverb 2, Fruity Delay 3, Fruity WaveShaper, Fruity Stereo Shaper, Fruity Peak Controller, Fruity Soft Clipper, Fruity PanOMatic, Fruity Flangus, Fruity Love Philter, Fruity Fast Dist, Pitcher, Fruity Delay 2, Gross Beat, Fruity Compressor, Transient Processor, Fruity Delay Bank, Effector, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Soundgoodizer, Vocodex, Fruity Chorus, Fruity Convolver, Fruity Stereo Enhancer, Luxeverb, Spreader, EQUO, Hyper Chorus, Pitch Shifter, Fruity Filter, Frequency Splitter, Fruity Fast LP.
 
 `tools/progress.py` writes this block from the docs.
