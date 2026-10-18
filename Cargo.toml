@@ -28,3 +28,16 @@ todo = "warn"
 # demo song, and an optimised one takes one.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The same for the crates that run on the audio thread: unoptimised, a
+# medium demo song plays at under half of realtime and the app drops out.
+# Overflow checks stay on. The app, the UI and the file crates stay at 0
+# so they debug well.
+[profile.dev.package.dsp]
+opt-level = 2
+
+[profile.dev.package.engine]
+opt-level = 2
+
+[profile.dev.package.plugins]
+opt-level = 2
