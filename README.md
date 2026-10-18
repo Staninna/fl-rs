@@ -7,57 +7,63 @@ A cross-platform DAW in Rust that opens FL Studio projects. It plays them by reb
 ## Progress
 
 <!-- progress:start -->
-| | done | of | |
+| FL's own plugins | done | of | |
 |---|---:|---:|---|
-| Stock generators built, of all FL ships | 15 | 51 | `██████░░░░░░░░░░░░░░` 29% |
-| Stock effects built, of all FL ships | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
-| Built plugins identical to FL's output | 0 | 51 | `░░░░░░░░░░░░░░░░░░░░` 0% |
-| Built plugins exact, not yet checked against FL | 20 | 51 | `████████░░░░░░░░░░░░` 39% |
-| Built plugins with their own doc | 51 | 51 | `████████████████████` 100% |
-| Plugin uses in shipped projects that are built | 826 | 1006 | `████████████████░░░░` 82% |
-| Shipped projects with any sound | 112 | 165 | `██████████████░░░░░░` 67% |
-| Shipped projects that play in full | 33 | 165 | `████░░░░░░░░░░░░░░░░` 20% |
-| Effect slots hosted where sound reaches | 928 | 1028 | `██████████████████░░` 90% |
-| Generator channels with notes that play | 180 | 215 | `█████████████████░░░` 83% |
-| Shipped projects saved back byte for byte | 165 | 165 | `████████████████████` 100% |
-| Event types in shipped projects with a reading | 146 | 147 | `████████████████████` 99% |
-| Event readings FL's loader and PyFLP agree on | 98 | 147 | `█████████████░░░░░░░` 66% |
+| Instruments rebuilt | 15 | 51 | `██████░░░░░░░░░░░░░░` 29% |
+| Effects rebuilt | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
+| Rebuilt and proven to sound identical to FL | 0 | 51 | `░░░░░░░░░░░░░░░░░░░░` 0% |
+| Rebuilt with nothing known to be missing | 20 | 51 | `████████░░░░░░░░░░░░` 39% |
+| Rebuilt and documented | 51 | 51 | `████████████████████` 100% |
 
-The plugin rows count against everything FL ships and everything built. The
-rest count what FL's 165 shipped projects contain, so 100% there is not 100%
-of FL:
+Rebuilt means read out of FL's plugin binary and written again in Rust. No
+plugin is proven identical yet: that needs a null test against FL's own
+render. The levels are explained under the plugin list below.
 
-- Identical and exact are port levels, below.
-- Plugin uses count once per project, and include third-party VSTs and
-  visualisers that will never be built, so this row cannot reach 100%.
-- A project has sound when anything comes out of it, even with half its plugins
-  passed through. It plays in full when it has sound, every plugin is hosted,
-  nothing is approximated, every sample is found and decoded, and every
-  automation target and clip stretch is applied. Neither means it sounds like FL.
-- The project, slot and channel counts come from the last corpus render, which
-  needs FL's files, so CI cannot rerun it; `tools/progress.py --render` records
-  them in `docs/plugins.md`.
-- Saved back byte for byte: unknown bytes are carried through, not understood.
-- Event types: the shipped projects use 147 of the 186 in
-  `docs/event-dictionary.md`, which also lists what FL's loader and PyFLP know.
-  5 readings conflict with PyFLP and 2 rest on PyFLP alone
-  (`docs/parity.md`).
+| The 165 projects that come with FL | done | of | |
+|---|---:|---:|---|
+| Projects that make any sound | 112 | 165 | `██████████████░░░░░░` 67% |
+| Projects that play with nothing missing | 33 | 165 | `████░░░░░░░░░░░░░░░░` 20% |
+| Plugins they load that are rebuilt | 826 | 1006 | `████████████████░░░░` 82% |
+| Instrument channels with notes that play | 180 | 215 | `█████████████████░░░` 83% |
+| Mixer effects that run, on tracks audio reaches | 928 | 1028 | `██████████████████░░` 90% |
+| Projects saved back unchanged, byte for byte | 165 | 165 | `████████████████████` 100% |
 
-Every plugin by how close it is to FL's, most used in the shipped projects first:
+These count only what FL's own projects contain, so 100% here is not 100%
+of FL.
 
-- Identical (0): none yet.
-- Exact (20): Fruity Limiter, Fruity Reeverb 2, Fruity Delay 3, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Fruity Filter, BassDrum, BooBass, Fruity Fast LP.
-- Exact with gaps (25): Fruity Parametric EQ 2, Maximus, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Fruity PanOMatic, FPC, Fruity Love Philter, DirectWave, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Frequency Splitter, Fruit Kick, Drumpad.
-- Approximate (6): Sytrus, Harmless, Harmor, Slicex, Autogun, Ogun.
-- Not built, with the shipped projects that use each (53): Control Surface (17), FLEX (15), Patcher effect (12), Patcher generator (12), ZGameEditor Visualizer (9), Wave Candy (7), Fruity NoteBook 2 (6), Emphasis (5), Vintage Chorus (5), Fruity Slicer (5), GMS (5), Edison (4), Frequency Shifter (4), Fruity Flanger (4), Morphine (4), Distructor (3), Fruity Parametric EQ (3), Fruity Phaser (3), Fruity X-Y Controller (3), Low Lifter (3), Fruity Envelope Controller (3), Kepler (3), MIDI Out (3), Sakura (3), Fruity Free Filter (2), Fruity NoteBook (2), Fruity Wrapper effect (2), Hardcore (2), Transporter (2), Fruity Granulizer (2), Fruity Wrapper generator (2), Minisynth (2), Toxic Biohazard (2), Wave Traveller (2), Emphasizer (1), Fruity Bass Boost (1), Fruity Delay (1), Fruity Formula Controller (1), Fruity HTML NoteBook (1), Fruity Reeverb (1), Fruity Scratcher (1), Fruity Send (1), Fruity Squeeze (1), Fruity Vocoder (1), Fruity dB Meter (1), Razer Chroma (1), Vintage Phaser (1), BeepMap (1), Drumaxx (1), Fruity DrumSynth Live (1), Fruity Keyboard Controller (1), Fruity Voltage Controller (1), PoiZone (1). 37 more no shipped project uses.
+- Any sound means something comes out, even with half the plugins skipped.
+  Nothing missing means every plugin runs, none is approximate, every sample
+  loads, and all automation and clip stretching is applied. Neither means it
+  sounds like FL yet.
+- Plugins count once per project, and include third-party VSTs and visualisers
+  that will never be rebuilt, so that row stays under 100%.
+- Saving back byte for byte carries unknown bytes through without understanding
+  them.
+- The sound, channel and mixer counts come from the last full render of the
+  projects. That needs FL's files, so CI can't rerun it;
+  `tools/progress.py --render` records it in `docs/plugins.md`.
 
-Identical means a null test against FL's own render matches sample for sample.
-Exact means every part was read from the binary and rebuilt, and nothing is
-known to be approximated. Exact with gaps is exact but for parts that are
-approximated or left out, which `docs/plugins.md` names. Approximate means the
-sound itself is rebuilt approximately. The levels live in
-`crates/plugins/src/port.rs`, and CI fails when it and `docs/plugins.md`
-disagree on what is built.
+| The `.flp` project format | done | of | |
+|---|---:|---:|---|
+| Kinds of record in FL's projects we can read | 146 | 147 | `████████████████████` 99% |
+| Kinds FL's loader and PyFLP both read the same way | 98 | 147 | `█████████████░░░░░░░` 66% |
+
+FL's projects use 147 of the 186 record kinds in
+`docs/event-dictionary.md`. Of the readings not on both, 41 come from FL's
+loader alone, 2 from PyFLP alone, and 5 disagree with PyFLP
+(`docs/parity.md`).
+
+Every plugin by how close the rebuild is to FL's, the ones FL's projects use
+most first:
+
+- **Identical** (0), a null test against FL's own render matches sample for sample: none yet.
+- **Exact** (20), every part read from the binary and rebuilt, nothing known to be missing: Fruity Limiter, Fruity Reeverb 2, Fruity Delay 3, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Fruity Filter, BassDrum, BooBass, Fruity Fast LP.
+- **Exact with gaps** (25), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, Maximus, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Fruity PanOMatic, FPC, Fruity Love Philter, DirectWave, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Frequency Splitter, Fruit Kick, Drumpad.
+- **Approximate** (6), the sound itself is an approximation: Sytrus, Harmless, Harmor, Slicex, Autogun, Ogun.
+- **Not rebuilt** (53), with how many of FL's projects use each: Control Surface (17), FLEX (15), Patcher effect (12), Patcher generator (12), ZGameEditor Visualizer (9), Wave Candy (7), Fruity NoteBook 2 (6), Emphasis (5), Vintage Chorus (5), Fruity Slicer (5), GMS (5), Edison (4), Frequency Shifter (4), Fruity Flanger (4), Morphine (4), Distructor (3), Fruity Parametric EQ (3), Fruity Phaser (3), Fruity X-Y Controller (3), Low Lifter (3), Fruity Envelope Controller (3), Kepler (3), MIDI Out (3), Sakura (3), Fruity Free Filter (2), Fruity NoteBook (2), Fruity Wrapper effect (2), Hardcore (2), Transporter (2), Fruity Granulizer (2), Fruity Wrapper generator (2), Minisynth (2), Toxic Biohazard (2), Wave Traveller (2), Emphasizer (1), Fruity Bass Boost (1), Fruity Delay (1), Fruity Formula Controller (1), Fruity HTML NoteBook (1), Fruity Reeverb (1), Fruity Scratcher (1), Fruity Send (1), Fruity Squeeze (1), Fruity Vocoder (1), Fruity dB Meter (1), Razer Chroma (1), Vintage Phaser (1), BeepMap (1), Drumaxx (1), Fruity DrumSynth Live (1), Fruity Keyboard Controller (1), Fruity Voltage Controller (1), PoiZone (1). 37 more no project uses.
+
+The levels live in `crates/plugins/src/port.rs`, and CI fails when it and
+`docs/plugins.md` disagree on what is rebuilt.
 
 `tools/progress.py` writes this block from the docs.
 <!-- progress:end -->

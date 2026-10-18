@@ -36,12 +36,13 @@ def number(pattern, text, source):
     return int(found[1]), int(found[2])
 
 
-# The variants of `Port` in port.rs, strongest first, as the README names them.
+# The variants of `Port` in port.rs, strongest first, as the README names and
+# explains them.
 LEVELS = {
-    "Identical": "Identical",
-    "Exact": "Exact",
-    "Gaps": "Exact with gaps",
-    "Approximate": "Approximate",
+    "Identical": ("Identical", "a null test against FL's own render matches sample for sample"),
+    "Exact": ("Exact", "every part read from the binary and rebuilt, nothing known to be missing"),
+    "Gaps": ("Exact with gaps", "exact but for the parts its row in `docs/plugins.md` names as approximate or left out"),
+    "Approximate": ("Approximate", "the sound itself is an approximation"),
 }
 
 
@@ -94,76 +95,85 @@ def block():
     built = sum(b for _, _, b in rows)
     never = sum(1 for _, used, b in rows if not b and not used)
 
-    table = [
-        ("Stock generators built, of all FL ships", [b for kind, _, b in rows if kind == "Generator"]),
-        ("Stock effects built, of all FL ships", [b for kind, _, b in rows if kind == "Effect"]),
+    generators = [b for kind, _, b in rows if kind == "Generator"]
+    effects = [b for kind, _, b in rows if kind == "Effect"]
+    lines = [
+        "| FL's own plugins | done | of | |",
+        "|---|---:|---:|---|",
+        row("Instruments rebuilt", sum(generators), len(generators)),
+        row("Effects rebuilt", sum(effects), len(effects)),
+        row("Rebuilt and proven to sound identical to FL", len(by_level["Identical"]), built),
+        row("Rebuilt with nothing known to be missing", len(by_level["Exact"]), built),
+        row("Rebuilt and documented", documented, built),
+        "",
+        "Rebuilt means read out of FL's plugin binary and written again in Rust. No",
+        "plugin is proven identical yet: that needs a null test against FL's own",
+        "render. The levels are explained under the plugin list below.",
+        "",
     ]
-    lines = ["| | done | of | |", "|---|---:|---:|---|"]
-    for label, of_kind in table:
-        lines.append(row(label, sum(of_kind), len(of_kind)))
-    lines.append(row("Built plugins identical to FL's output", len(by_level["Identical"]), built))
-    lines.append(row("Built plugins exact, not yet checked against FL", len(by_level["Exact"]), built))
-    lines.append(row("Built plugins with their own doc", documented, built))
     uses = sum(used for _, used, _ in rows)
     built_uses = sum(u for _, u, b in rows if b)
-    lines.append(row("Plugin uses in shipped projects that are built", built_uses, uses))
     sound = number(SOUND, plugins, "docs/plugins.md")
-    lines.append(row("Shipped projects with any sound", *sound))
     full = number(r"(\d+) of (\d+) play in full", plugins, "docs/plugins.md")
-    lines.append(row("Shipped projects that play in full", *full))
     slots = number(r"(\d+) of (\d+) effect slots", plugins, "docs/plugins.md")
-    lines.append(row("Effect slots hosted where sound reaches", *slots))
     channels = number(r"(\d+) of (\d+) generator channels", plugins, "docs/plugins.md")
-    lines.append(row("Generator channels with notes that play", *channels))
     trip = number(r"Container round trip: (\d+)/(\d+) projects", parity, "docs/parity.md")
-    lines.append(row("Shipped projects saved back byte for byte", *trip))
+    lines += [
+        f"| The {sound[1]} projects that come with FL | done | of | |",
+        "|---|---:|---:|---|",
+        row("Projects that make any sound", *sound),
+        row("Projects that play with nothing missing", *full),
+        row("Plugins they load that are rebuilt", built_uses, uses),
+        row("Instrument channels with notes that play", *channels),
+        row("Mixer effects that run, on tracks audio reaches", *slots),
+        row("Projects saved back unchanged, byte for byte", *trip),
+        "",
+        "These count only what FL's own projects contain, so 100% here is not 100%",
+        "of FL.",
+        "",
+        "- Any sound means something comes out, even with half the plugins skipped.",
+        "  Nothing missing means every plugin runs, none is approximate, every sample",
+        "  loads, and all automation and clip stretching is applied. Neither means it",
+        "  sounds like FL yet.",
+        "- Plugins count once per project, and include third-party VSTs and visualisers",
+        "  that will never be rebuilt, so that row stays under 100%.",
+        "- Saving back byte for byte carries unknown bytes through without understanding",
+        "  them.",
+        "- The sound, channel and mixer counts come from the last full render of the",
+        "  projects. That needs FL's files, so CI can't rerun it;",
+        "  `tools/progress.py --render` records it in `docs/plugins.md`.",
+        "",
+    ]
     events = number(r"Events with a reading: (\d+)/(\d+)", parity, "docs/parity.md")
-    lines.append(row("Event types in shipped projects with a reading", *events))
-    confidence = re.search(r"loader\+pyflp (\d+),.*conflict (\d+), pyflp (\d+),", parity)
+    confidence = re.search(r"loader\+pyflp (\d+), loader (\d+), conflict (\d+), pyflp (\d+),", parity)
     assert confidence, "docs/parity.md: no confidence counts"
-    agreed, conflict, pyflp = int(confidence[1]), confidence[2], confidence[3]
-    lines.append(row("Event readings FL's loader and PyFLP agree on", agreed, events[1]))
+    agreed, loader, conflict, pyflp = int(confidence[1]), *confidence.groups()[1:]
     dictionary = (ROOT / "docs/event-dictionary.md").read_text(encoding="utf-8")
     known = len(re.findall(r"(?m)^\| *\d+ ", dictionary))
     lines += [
+        "| The `.flp` project format | done | of | |",
+        "|---|---:|---:|---|",
+        row("Kinds of record in FL's projects we can read", *events),
+        row("Kinds FL's loader and PyFLP both read the same way", agreed, events[1]),
         "",
-        "The plugin rows count against everything FL ships and everything built. The",
-        "rest count what FL's 165 shipped projects contain, so 100% there is not 100%",
-        "of FL:",
+        f"FL's projects use {events[1]} of the {known} record kinds in",
+        f"`docs/event-dictionary.md`. Of the readings not on both, {loader} come from FL's",
+        f"loader alone, {pyflp} from PyFLP alone, and {conflict} disagree with PyFLP",
+        "(`docs/parity.md`).",
         "",
-        "- Identical and exact are port levels, below.",
-        "- Plugin uses count once per project, and include third-party VSTs and",
-        "  visualisers that will never be built, so this row cannot reach 100%.",
-        "- A project has sound when anything comes out of it, even with half its plugins",
-        "  passed through. It plays in full when it has sound, every plugin is hosted,",
-        "  nothing is approximated, every sample is found and decoded, and every",
-        "  automation target and clip stretch is applied. Neither means it sounds like FL.",
-        "- The project, slot and channel counts come from the last corpus render, which",
-        "  needs FL's files, so CI cannot rerun it; `tools/progress.py --render` records",
-        "  them in `docs/plugins.md`.",
-        "- Saved back byte for byte: unknown bytes are carried through, not understood.",
-        f"- Event types: the shipped projects use {events[1]} of the {known} in",
-        "  `docs/event-dictionary.md`, which also lists what FL's loader and PyFLP know.",
-        f"  {conflict} readings conflict with PyFLP and {pyflp} rest on PyFLP alone",
-        "  (`docs/parity.md`).",
-        "",
-        "Every plugin by how close it is to FL's, most used in the shipped projects first:",
+        "Every plugin by how close the rebuild is to FL's, the ones FL's projects use",
+        "most first:",
         "",
     ]
-    for level, label in LEVELS.items():
+    for level, (label, meaning) in LEVELS.items():
         names = by_level[level]
-        lines.append(f"- {label} ({len(names)}): {', '.join(names) or 'none yet'}.")
+        lines.append(f"- **{label}** ({len(names)}), {meaning}: {', '.join(names) or 'none yet'}.")
     lines += [
-        f"- Not built, with the shipped projects that use each ({len(unbuilt)}): "
-        f"{', '.join(unbuilt)}. {never} more no shipped project uses.",
+        f"- **Not rebuilt** ({len(unbuilt)}), with how many of FL's projects use each: "
+        f"{', '.join(unbuilt)}. {never} more no project uses.",
         "",
-        "Identical means a null test against FL's own render matches sample for sample.",
-        "Exact means every part was read from the binary and rebuilt, and nothing is",
-        "known to be approximated. Exact with gaps is exact but for parts that are",
-        "approximated or left out, which `docs/plugins.md` names. Approximate means the",
-        "sound itself is rebuilt approximately. The levels live in",
-        "`crates/plugins/src/port.rs`, and CI fails when it and `docs/plugins.md`",
-        "disagree on what is built.",
+        "The levels live in `crates/plugins/src/port.rs`, and CI fails when it and",
+        "`docs/plugins.md` disagree on what is rebuilt.",
         "",
         "`tools/progress.py` writes this block from the docs.",
     ]
