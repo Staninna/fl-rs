@@ -19,6 +19,9 @@ use std::f64::consts::TAU;
 /// It is the threshold FL's bank drops a partial at, 2^-24.
 pub const SILENT: f32 = 5.960_464_5e-8;
 
+/// How many partials [`SineBank::render_add`] runs side by side.
+const GROUP: usize = 8;
+
 /// A bank of sines.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SineBank {
@@ -118,31 +121,57 @@ impl SineBank {
     /// Add the next `out.len()` samples of the bank to `out`.
     pub fn render_add(&mut self, out: &mut [f32]) {
         let n = out.len();
-        let k_smooth = self.smoothing;
+        // The partials that sound go through the samples a few at a time:
+        // each one's recursion waits on its last sample, so several side
+        // by side keep the processor busy. Every sample still takes them
+        // in order, so the sums are what one partial at a time makes.
+        let mut group = [0; GROUP];
+        let mut found = 0;
         for k in 0..self.len {
-            let target = self.target[k];
-            let mut level = self.level[k];
-            let freq = self.freq[k];
+            let (level, target) = (self.level[k], self.target[k]);
             if level.abs() < SILENT && target.abs() < SILENT {
                 self.level[k] = 0.0;
-                self.advance(k, freq, n);
+                self.advance(k, self.freq[k], n);
                 continue;
             }
+            group[found] = k;
+            found += 1;
+            if found == GROUP {
+                self.render_group(&group, out);
+                found = 0;
+            }
+        }
+        self.render_group(&group[..found], out);
+    }
+
+    /// Add the partials `ks` into `out`, in that order at every sample,
+    /// and move them on.
+    fn render_group(&mut self, ks: &[usize], out: &mut [f32]) {
+        let k_smooth = self.smoothing;
+        let (mut coef, mut s1, mut s2) = ([0.0f32; GROUP], [0.0f32; GROUP], [0.0f32; GROUP]);
+        let (mut level, mut target) = ([0.0f32; GROUP], [0.0f32; GROUP]);
+        for (lane, &k) in ks.iter().enumerate() {
             // The recursion starts one and two samples back so that its
             // first value is the sine at the phase.
-            let phase = self.phase[k];
-            let coef = (2.0 * (TAU * freq).cos()) as f32;
-            let mut s1 = (TAU * (phase - freq)).sin() as f32;
-            let mut s2 = (TAU * (phase - 2.0 * freq)).sin() as f32;
-            for sample in out.iter_mut() {
-                let s = coef * s1 - s2;
-                *sample += s * level;
-                level = (level - target) * k_smooth + target;
-                s2 = s1;
-                s1 = s;
+            let (phase, freq) = (self.phase[k], self.freq[k]);
+            coef[lane] = (2.0 * (TAU * freq).cos()) as f32;
+            s1[lane] = (TAU * (phase - freq)).sin() as f32;
+            s2[lane] = (TAU * (phase - 2.0 * freq)).sin() as f32;
+            (level[lane], target[lane]) = (self.level[k], self.target[k]);
+        }
+        let lanes = ks.len();
+        for sample in out.iter_mut() {
+            for lane in 0..lanes {
+                let s = coef[lane] * s1[lane] - s2[lane];
+                *sample += s * level[lane];
+                level[lane] = (level[lane] - target[lane]) * k_smooth + target[lane];
+                s2[lane] = s1[lane];
+                s1[lane] = s;
             }
-            self.level[k] = level;
-            self.advance(k, freq, n);
+        }
+        for (lane, &k) in ks.iter().enumerate() {
+            self.level[k] = level[lane];
+            self.advance(k, self.freq[k], out.len());
         }
     }
 
