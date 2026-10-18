@@ -7,16 +7,28 @@ A cross-platform DAW in Rust that opens FL Studio projects. It plays them by reb
 <!-- progress:start -->
 | | done | of | |
 |---|---:|---:|---|
-| Generators built | 14 | 51 | `█████░░░░░░░░░░░░░░░` 27% |
-| Effects built | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
-| Plugin uses in shipped projects, built | 824 | 1006 | `████████████████░░░░` 81% |
-| Shipped projects with sound | 111 | 165 | `█████████████░░░░░░░` 67% |
-| Shipped projects that round-trip byte for byte | 165 | 165 | `████████████████████` 100% |
-| `.flp` events understood | 146 | 147 | `████████████████████` 99% |
+| Stock generators built, of all FL ships | 14 | 51 | `█████░░░░░░░░░░░░░░░` 27% |
+| Stock effects built, of all FL ships | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
+| Plugin uses in shipped projects that are built | 824 | 1006 | `████████████████░░░░` 81% |
+| Shipped projects with any sound | 111 | 165 | `█████████████░░░░░░░` 67% |
+| Shipped projects saved back byte for byte | 165 | 165 | `████████████████████` 100% |
+| Event types in shipped projects with a reading | 146 | 147 | `████████████████████` 99% |
 
-A plugin used by 20 projects counts 20 times in the plugin uses. The count of
-projects with sound comes from the last corpus render, which needs FL's files;
-`docs/plugins.md` keeps it. `tools/progress.py` writes this table from the docs.
+Only the first two rows count against everything FL ships. The rest count what
+FL's 165 shipped projects contain, so 100% there is not 100% of FL:
+
+- Plugin uses count once per project, and include third-party VSTs and
+  visualisers that will never be built, so this row cannot reach 100%.
+- A project has sound when anything comes out of it, even with half its plugins
+  passed through. It does not mean the project sounds like FL. The count comes
+  from the last corpus render, which needs FL's files; `docs/plugins.md` keeps it.
+- Saved back byte for byte: unknown bytes are carried through, not understood.
+- Event types: the shipped projects use 147 of the 186 in
+  `docs/event-dictionary.md`, which also lists what FL's loader and PyFLP know.
+  A reading is not proof: 5 conflict with PyFLP and 2 rest on PyFLP
+  alone (`docs/parity.md`).
+
+`tools/progress.py` writes this table from the docs.
 <!-- progress:end -->
 
 ## Layout

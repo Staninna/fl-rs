@@ -34,25 +34,43 @@ def block():
             rows.append((cells[0], int(cells[4]), cells[5].startswith("implemented")))
 
     table = [
-        ("Generators built", [built for kind, _, built in rows if kind == "Generator"]),
-        ("Effects built", [built for kind, _, built in rows if kind == "Effect"]),
+        ("Stock generators built, of all FL ships", [b for kind, _, b in rows if kind == "Generator"]),
+        ("Stock effects built, of all FL ships", [b for kind, _, b in rows if kind == "Effect"]),
     ]
     lines = ["| | done | of | |", "|---|---:|---:|---|"]
     for label, built in table:
         lines.append(row(label, sum(built), len(built)))
     uses = sum(used for _, used, _ in rows)
-    lines.append(row("Plugin uses in shipped projects, built", sum(u for _, u, b in rows if b), uses))
+    built_uses = sum(u for _, u, b in rows if b)
+    lines.append(row("Plugin uses in shipped projects that are built", built_uses, uses))
     sound = number(r"(\d+) of (\d+) shipped projects have sound", plugins, "docs/plugins.md")
-    lines.append(row("Shipped projects with sound", *sound))
+    lines.append(row("Shipped projects with any sound", *sound))
     trip = number(r"Container round trip: (\d+)/(\d+) projects", parity, "docs/parity.md")
-    lines.append(row("Shipped projects that round-trip byte for byte", *trip))
+    lines.append(row("Shipped projects saved back byte for byte", *trip))
     events = number(r"Events with a reading: (\d+)/(\d+)", parity, "docs/parity.md")
-    lines.append(row("`.flp` events understood", *events))
+    lines.append(row("Event types in shipped projects with a reading", *events))
+    confidence = re.search(r"conflict (\d+), pyflp (\d+),", parity)
+    assert confidence, "docs/parity.md: no confidence counts"
+    conflict, pyflp = confidence[1], confidence[2]
+    dictionary = (ROOT / "docs/event-dictionary.md").read_text(encoding="utf-8")
+    known = len(re.findall(r"(?m)^\| *\d+ ", dictionary))
     lines += [
         "",
-        "A plugin used by 20 projects counts 20 times in the plugin uses. The count of",
-        "projects with sound comes from the last corpus render, which needs FL's files;",
-        "`docs/plugins.md` keeps it. `tools/progress.py` writes this table from the docs.",
+        "Only the first two rows count against everything FL ships. The rest count what",
+        "FL's 165 shipped projects contain, so 100% there is not 100% of FL:",
+        "",
+        "- Plugin uses count once per project, and include third-party VSTs and",
+        "  visualisers that will never be built, so this row cannot reach 100%.",
+        "- A project has sound when anything comes out of it, even with half its plugins",
+        "  passed through. It does not mean the project sounds like FL. The count comes",
+        "  from the last corpus render, which needs FL's files; `docs/plugins.md` keeps it.",
+        "- Saved back byte for byte: unknown bytes are carried through, not understood.",
+        f"- Event types: the shipped projects use {events[1]} of the {known} in",
+        "  `docs/event-dictionary.md`, which also lists what FL's loader and PyFLP know.",
+        f"  A reading is not proof: {conflict} conflict with PyFLP and {pyflp} rest on PyFLP",
+        "  alone (`docs/parity.md`).",
+        "",
+        "`tools/progress.py` writes this table from the docs.",
     ]
     return "\n".join([START, *lines, END])
 
