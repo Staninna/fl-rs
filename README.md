@@ -1,5 +1,7 @@
 # fl-rs
 
+> This project is built and run entirely by vibe coding: the code, the docs, the commits and the reverse engineering all come out of an AI agent's sessions. If you don't like that, you know where the back button is.
+
 A cross-platform DAW in Rust that opens FL Studio projects. It plays them by rebuilding FL's stock plugins from FL's own binaries, one plugin at a time.
 
 ## Progress
@@ -9,7 +11,8 @@ A cross-platform DAW in Rust that opens FL Studio projects. It plays them by reb
 |---|---:|---:|---|
 | Stock generators built, of all FL ships | 15 | 51 | `██████░░░░░░░░░░░░░░` 29% |
 | Stock effects built, of all FL ships | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
-| Built plugins with nothing approximated | 31 | 51 | `████████████░░░░░░░░` 60% |
+| Built plugins identical to FL's output | 0 | 51 | `░░░░░░░░░░░░░░░░░░░░` 0% |
+| Built plugins exact, not yet checked against FL | 20 | 51 | `████████░░░░░░░░░░░░` 39% |
 | Built plugins with their own doc | 51 | 51 | `████████████████████` 100% |
 | Plugin uses in shipped projects that are built | 826 | 1006 | `████████████████░░░░` 82% |
 | Shipped projects with any sound | 112 | 165 | `██████████████░░░░░░` 67% |
@@ -24,8 +27,7 @@ The plugin rows count against everything FL ships and everything built. The
 rest count what FL's 165 shipped projects contain, so 100% there is not 100%
 of FL:
 
-- Nothing approximated: the plugin's row in `docs/plugins.md` names no
-  approximation. It is read from the binary, not yet checked against FL's output.
+- Identical and exact are port levels, below.
 - Plugin uses count once per project, and include third-party VSTs and
   visualisers that will never be built, so this row cannot reach 100%.
 - A project has sound when anything comes out of it, even with half its plugins
@@ -41,11 +43,21 @@ of FL:
   5 readings conflict with PyFLP and 2 rest on PyFLP alone
   (`docs/parity.md`).
 
-Built so far, most used in the shipped projects first. `docs/plugins.md` says
-what is exact and what is approximated in each.
+Every plugin by how close it is to FL's, most used in the shipped projects first:
 
-- Generators: 3x Osc, Sytrus (approximate), Harmless (approximate), FPC, Harmor (approximate), DirectWave, Slicex (approximate), Autogun (approximate), FL Keys, Fruity DX10, Ogun, BassDrum, BooBass, Fruit Kick, Drumpad.
-- Effects: Fruity Parametric EQ 2, Fruity Limiter, Maximus, Fruity Reeverb 2, Fruity Delay 3, Fruity WaveShaper, Fruity Stereo Shaper, Fruity Peak Controller, Fruity Soft Clipper, Fruity PanOMatic, Fruity Flangus, Fruity Love Philter, Fruity Fast Dist, Pitcher, Fruity Delay 2, Gross Beat, Fruity Compressor, Transient Processor, Fruity Delay Bank, Effector, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Soundgoodizer, Vocodex, Fruity Chorus, Fruity Convolver, Fruity Stereo Enhancer, Luxeverb, Spreader, EQUO, Hyper Chorus, Pitch Shifter, Fruity Filter, Frequency Splitter, Fruity Fast LP.
+- Identical (0): none yet.
+- Exact (20): Fruity Limiter, Fruity Reeverb 2, Fruity Delay 3, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Fruity Filter, BassDrum, BooBass, Fruity Fast LP.
+- Exact with gaps (25): Fruity Parametric EQ 2, Maximus, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Fruity PanOMatic, FPC, Fruity Love Philter, DirectWave, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Frequency Splitter, Fruit Kick, Drumpad.
+- Approximate (6): Sytrus, Harmless, Harmor, Slicex, Autogun, Ogun.
+- Not built, with the shipped projects that use each (53): Control Surface (17), FLEX (15), Patcher effect (12), Patcher generator (12), ZGameEditor Visualizer (9), Wave Candy (7), Fruity NoteBook 2 (6), Emphasis (5), Vintage Chorus (5), Fruity Slicer (5), GMS (5), Edison (4), Frequency Shifter (4), Fruity Flanger (4), Morphine (4), Distructor (3), Fruity Parametric EQ (3), Fruity Phaser (3), Fruity X-Y Controller (3), Low Lifter (3), Fruity Envelope Controller (3), Kepler (3), MIDI Out (3), Sakura (3), Fruity Free Filter (2), Fruity NoteBook (2), Fruity Wrapper effect (2), Hardcore (2), Transporter (2), Fruity Granulizer (2), Fruity Wrapper generator (2), Minisynth (2), Toxic Biohazard (2), Wave Traveller (2), Emphasizer (1), Fruity Bass Boost (1), Fruity Delay (1), Fruity Formula Controller (1), Fruity HTML NoteBook (1), Fruity Reeverb (1), Fruity Scratcher (1), Fruity Send (1), Fruity Squeeze (1), Fruity Vocoder (1), Fruity dB Meter (1), Razer Chroma (1), Vintage Phaser (1), BeepMap (1), Drumaxx (1), Fruity DrumSynth Live (1), Fruity Keyboard Controller (1), Fruity Voltage Controller (1), PoiZone (1). 37 more no shipped project uses.
+
+Identical means a null test against FL's own render matches sample for sample.
+Exact means every part was read from the binary and rebuilt, and nothing is
+known to be approximated. Exact with gaps is exact but for parts that are
+approximated or left out, which `docs/plugins.md` names. Approximate means the
+sound itself is rebuilt approximately. The levels live in
+`crates/plugins/src/port.rs`, and CI fails when it and `docs/plugins.md`
+disagree on what is built.
 
 `tools/progress.py` writes this block from the docs.
 <!-- progress:end -->
@@ -120,7 +132,7 @@ Start with `.scratch/handoff.md`: what was done last, what is half done, and whi
 - `.scratch/notes/<plugin>.md` is the handover for a plugin left half done: DLL addresses, what is confirmed and what is guessed, next steps.
 - `docs/plugins.md` is the scoreboard. A row says what is exact and what is approximated.
 
-Adding a plugin, in short: map its state and DSP from the DLL into `docs/plugins/<name>.md`, write `crates/plugins/src/<name>.rs` behind `Effect` or `Generator`, register it in `crates/plugins/src/lib.rs` (and `generator.rs` for a generator), fill in its row in `docs/plugins.md`, then run the corpus render through `tools/progress.py` so its counts are recorded:
+Adding a plugin, in short: map its state and DSP from the DLL into `docs/plugins/<name>.md`, write `crates/plugins/src/<name>.rs` behind `Effect` or `Generator`, register it in `crates/plugins/src/lib.rs` (and `generator.rs` for a generator), give it a port level in `crates/plugins/src/port.rs`, fill in its row in `docs/plugins.md`, then run the corpus render through `tools/progress.py` so its counts are recorded:
 
     cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render
 
