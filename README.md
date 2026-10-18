@@ -21,14 +21,21 @@ FL's 165 shipped projects contain, so 100% there is not 100% of FL:
   visualisers that will never be built, so this row cannot reach 100%.
 - A project has sound when anything comes out of it, even with half its plugins
   passed through. It does not mean the project sounds like FL. The count comes
-  from the last corpus render, which needs FL's files; `docs/plugins.md` keeps it.
+  from the last corpus render, which needs FL's files, so CI cannot rerun it;
+  `tools/progress.py --render` records it in `docs/plugins.md`.
 - Saved back byte for byte: unknown bytes are carried through, not understood.
 - Event types: the shipped projects use 147 of the 186 in
   `docs/event-dictionary.md`, which also lists what FL's loader and PyFLP know.
   A reading is not proof: 5 conflict with PyFLP and 2 rest on PyFLP
   alone (`docs/parity.md`).
 
-`tools/progress.py` writes this table from the docs.
+Built so far, most used in the shipped projects first. `docs/plugins.md` says
+what is exact and what is approximated in each.
+
+- Generators: 3x Osc, Sytrus (approximate), Harmless (approximate), FPC, Harmor (approximate), DirectWave, Slicex (approximate), Autogun (approximate), FL Keys, Fruity DX10, Ogun, BassDrum, BooBass, Fruit Kick.
+- Effects: Fruity Parametric EQ 2, Fruity Limiter, Maximus, Fruity Reeverb 2, Fruity Delay 3, Fruity WaveShaper, Fruity Stereo Shaper, Fruity Peak Controller, Fruity Soft Clipper, Fruity PanOMatic, Fruity Flangus, Fruity Love Philter, Fruity Fast Dist, Pitcher, Fruity Delay 2, Gross Beat, Fruity Compressor, Transient Processor, Fruity Delay Bank, Effector, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Soundgoodizer, Vocodex, Fruity Chorus, Fruity Convolver, Fruity Stereo Enhancer, Luxeverb, Spreader, EQUO, Hyper Chorus, Pitch Shifter, Fruity Filter, Frequency Splitter, Fruity Fast LP.
+
+`tools/progress.py` writes this block from the docs.
 <!-- progress:end -->
 
 ## Layout
@@ -36,8 +43,8 @@ FL's 165 shipped projects contain, so 100% there is not 100% of FL:
 - `crates/flp`: `.flp` and `.fst` files at the event level. Round-trips every shipped FL Studio project and preset byte for byte.
 - `crates/model`: the project as Rust types (channels, patterns, arrangements, inserts), converted from and back to the event stream without losing an event.
 - `crates/dsp`: gain, pan, biquad and interpolating sample readers.
-- `crates/plugins`: FL Studio's stock plugins, rebuilt from `docs/plugins/`, behind an `Effect` trait and a `Generator` trait. Generators so far: 3x Osc, BassDrum, Fruit Kick, BooBass, Autogun, Ogun, Fruity DX10, FPC, DirectWave, Slicex and FL Keys (the sample players read their samples from FL's own install or the project's files at runtime), and Sytrus, Harmless and Harmor (approximate; `docs/plugins.md` says where). Effects so far: Balance, Fast Dist, Soft Clipper, Filter, Fast LP, Delay 2, Delay 3, Stereo Enhancer, Compressor, Parametric EQ 2, Limiter, Reeverb 2, WaveShaper, Stereo Shaper, PanOMatic, Peak Controller, Maximus, Soundgoodizer, Love Philter, Convolver, Transient Processor, Multiband Compressor, Delay Bank, Flangus, Blood Overdrive, Chorus, Spreader, Effector, Gross Beat, Luxeverb, Pitcher, Vocodex, EQUO, Hyper Chorus, Frequency Splitter and Pitch Shifter. `docs/plugins.md` keeps the score. The engine runs them in the mixer's effect slots, and a Peak Controller's outputs drive whatever the project links them to.
-- `crates/engine`: offline renderer and realtime playback, with plugin delay compensation and hosting for the stock generators and effects in `crates/plugins`, including sidechain inputs. Sequences the playlist and plays sampler channels and audio clips, to a buffer or through cpal to the default output device; every shipped project renders and 111 of 165 are audible with the stock plugins built so far. Automation clips drive channel and insert volume and pan, send levels and the tempo.
+- `crates/plugins`: FL Studio's stock plugins, rebuilt from `docs/plugins/`, behind an `Effect` trait and a `Generator` trait. [Progress](#progress) lists the ones built so far and `docs/plugins.md` keeps the score. The sample players read their samples from FL's own install or the project's files at runtime. The engine runs the effects in the mixer's slots, and a Peak Controller's outputs drive whatever the project links them to.
+- `crates/engine`: offline renderer and realtime playback, with plugin delay compensation and hosting for the stock generators and effects in `crates/plugins`, including sidechain inputs. Sequences the playlist and plays sampler channels and audio clips, to a buffer or through cpal to the default output device; every shipped project renders, and [Progress](#progress) says how many have sound. Automation clips drive channel and insert volume and pan, send levels and the tempo.
 - `crates/ui`: the windows as egui panels. They draw a project and a transport position, and emit commands. So far: the top bar with transport, and a playlist with move, resize, mute, delete and duplicate edits under undo. The channel rack has LEDs, knobs, insert targets and the step sequencer with a velocity lane. The mixer has strips with faders, pans, meters, sends, routing and the slot panel. The piano roll draws, selects, moves, resizes, mutes and deletes notes with a lane for velocity, pan, fine pitch, release and mod X/Y. The browser is a tree of samples, projects and presets under FL's data directory and the project's folder: a double click plays a sample or opens a project, and a sample dragged onto the channel rack goes to a channel or makes a new one.
 - `apps/fl-rs`: the desktop app. It opens a project on a worker thread, plays it through the engine, saves it back and renders it to WAV.
 - `docs/parity.md`: how much of the `.flp` event dictionary is understood.
@@ -101,8 +108,12 @@ Start with `.scratch/handoff.md`: what was done last, what is half done, and whi
 - `.scratch/notes/<plugin>.md` is the handover for a plugin left half done: DLL addresses, what is confirmed and what is guessed, next steps.
 - `docs/plugins.md` is the scoreboard. A row says what is exact and what is approximated.
 
-Adding a plugin, in short: map its state and DSP from the DLL into `docs/plugins/<name>.md`, write `crates/plugins/src/<name>.rs` behind `Effect` or `Generator`, register it in `crates/plugins/src/lib.rs` (and `generator.rs` for a generator), fill in its row in `docs/plugins.md`, then run the corpus render and update the count of projects with sound at the top of `docs/plugins.md`.
+Adding a plugin, in short: map its state and DSP from the DLL into `docs/plugins/<name>.md`, write `crates/plugins/src/<name>.rs` behind `Effect` or `Generator`, register it in `crates/plugins/src/lib.rs` (and `generator.rs` for a generator), fill in its row in `docs/plugins.md`, then run the corpus render through `tools/progress.py` so the count of projects with sound is recorded:
+
+    cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render
+
+That updates `docs/plugins.md` and the README; commit both.
 
 Commit `.scratch/` with the code it describes, so the next clone starts where you stopped. Its paths name the machine the work started on; read them as your own FL install.
 
-The progress table updates itself. On every push to `main` that touches `docs/plugins.md`, `docs/parity.md`, `tools/progress.py` or this README, a workflow runs `tools/progress.py` and commits the README if the table changed. Pull before your next push. To see the table locally, run `python3 -I tools/progress.py`.
+The progress block updates itself. On every push to `main` that touches `docs/plugins.md`, `docs/parity.md`, `docs/event-dictionary.md`, `tools/progress.py` or this README, a workflow runs `tools/progress.py` and commits the README if the block changed. Pull before your next push. The one number CI cannot work out is the count of projects with sound, since the render needs FL's files; the `--render` command above records it.
