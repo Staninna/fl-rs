@@ -35,7 +35,7 @@ The user is working at this machine. Open no windows and play no sound: no `carg
 - Unit tests derived from the maths pass.
 - `cargo clippy -p plugins --all-targets -- -D warnings` and `cargo fmt` are clean for your files.
 - Its doc in `docs/plugins/<name>.md` maps the state and the signal chain with function addresses.
-- Its `docs/plugins.md` row says what is exact and what is approximated.
+- Its `docs/plugins.md` row says what is exact and what is approximated, and its line in `crates/plugins/src/port.rs` gives the level that row bears out: `Exact` when nothing is approximated or left out, `Gaps` when the row names parts that are, `Approximate` when the sound itself is. `Identical` waits for a null test against FL. `python3 -I tools/progress.py --check` passes.
 - Read the DSP from the binary rather than guessing. Where you approximate, say so in the row and in the plugin's `fidelity()`.
 - The audio path allocates nothing. Size buffers in `set_state` and `set_sample_rate`. `process`, `tick`, `set_tempo` and `set_param` run on the audio thread (tempo automation calls `set_tempo` mid-song), so they must not allocate.
 
