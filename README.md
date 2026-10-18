@@ -9,25 +9,37 @@ A cross-platform DAW in Rust that opens FL Studio projects. It plays them by reb
 |---|---:|---:|---|
 | Stock generators built, of all FL ships | 14 | 51 | `█████░░░░░░░░░░░░░░░` 27% |
 | Stock effects built, of all FL ships | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
+| Built plugins with nothing approximated | 31 | 50 | `████████████░░░░░░░░` 62% |
+| Built plugins with their own doc | 46 | 50 | `██████████████████░░` 92% |
 | Plugin uses in shipped projects that are built | 824 | 1006 | `████████████████░░░░` 81% |
 | Shipped projects with any sound | 111 | 165 | `█████████████░░░░░░░` 67% |
+| Shipped projects that play in full | 32 | 165 | `████░░░░░░░░░░░░░░░░` 19% |
+| Effect slots hosted where sound reaches | 921 | 1021 | `██████████████████░░` 90% |
+| Generator channels with notes that play | 173 | 215 | `████████████████░░░░` 80% |
 | Shipped projects saved back byte for byte | 165 | 165 | `████████████████████` 100% |
 | Event types in shipped projects with a reading | 146 | 147 | `████████████████████` 99% |
+| Event readings FL's loader and PyFLP agree on | 98 | 147 | `█████████████░░░░░░░` 66% |
 
-Only the first two rows count against everything FL ships. The rest count what
-FL's 165 shipped projects contain, so 100% there is not 100% of FL:
+The plugin rows count against everything FL ships and everything built. The
+rest count what FL's 165 shipped projects contain, so 100% there is not 100%
+of FL:
 
+- Nothing approximated: the plugin's row in `docs/plugins.md` names no
+  approximation. It is read from the binary, not yet checked against FL's output.
 - Plugin uses count once per project, and include third-party VSTs and
   visualisers that will never be built, so this row cannot reach 100%.
 - A project has sound when anything comes out of it, even with half its plugins
-  passed through. It does not mean the project sounds like FL. The count comes
-  from the last corpus render, which needs FL's files, so CI cannot rerun it;
-  `tools/progress.py --render` records it in `docs/plugins.md`.
+  passed through. It plays in full when it has sound, every plugin is hosted,
+  nothing is approximated, every sample is found and decoded, and every
+  automation target and clip stretch is applied. Neither means it sounds like FL.
+- The project, slot and channel counts come from the last corpus render, which
+  needs FL's files, so CI cannot rerun it; `tools/progress.py --render` records
+  them in `docs/plugins.md`.
 - Saved back byte for byte: unknown bytes are carried through, not understood.
 - Event types: the shipped projects use 147 of the 186 in
   `docs/event-dictionary.md`, which also lists what FL's loader and PyFLP know.
-  A reading is not proof: 5 conflict with PyFLP and 2 rest on PyFLP
-  alone (`docs/parity.md`).
+  5 readings conflict with PyFLP and 2 rest on PyFLP alone
+  (`docs/parity.md`).
 
 Built so far, most used in the shipped projects first. `docs/plugins.md` says
 what is exact and what is approximated in each.
@@ -108,7 +120,7 @@ Start with `.scratch/handoff.md`: what was done last, what is half done, and whi
 - `.scratch/notes/<plugin>.md` is the handover for a plugin left half done: DLL addresses, what is confirmed and what is guessed, next steps.
 - `docs/plugins.md` is the scoreboard. A row says what is exact and what is approximated.
 
-Adding a plugin, in short: map its state and DSP from the DLL into `docs/plugins/<name>.md`, write `crates/plugins/src/<name>.rs` behind `Effect` or `Generator`, register it in `crates/plugins/src/lib.rs` (and `generator.rs` for a generator), fill in its row in `docs/plugins.md`, then run the corpus render through `tools/progress.py` so the count of projects with sound is recorded:
+Adding a plugin, in short: map its state and DSP from the DLL into `docs/plugins/<name>.md`, write `crates/plugins/src/<name>.rs` behind `Effect` or `Generator`, register it in `crates/plugins/src/lib.rs` (and `generator.rs` for a generator), fill in its row in `docs/plugins.md`, then run the corpus render through `tools/progress.py` so its counts are recorded:
 
     cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render
 
@@ -116,4 +128,4 @@ That updates `docs/plugins.md` and the README; commit both.
 
 Commit `.scratch/` with the code it describes, so the next clone starts where you stopped. Its paths name the machine the work started on; read them as your own FL install.
 
-The progress block updates itself. On every push to `main` that touches `docs/plugins.md`, `docs/parity.md`, `docs/event-dictionary.md`, `tools/progress.py` or this README, a workflow runs `tools/progress.py` and commits the README if the block changed. Pull before your next push. The one number CI cannot work out is the count of projects with sound, since the render needs FL's files; the `--render` command above records it.
+The progress block updates itself. On every push to `main` that touches `docs/plugins.md`, `docs/parity.md`, `docs/event-dictionary.md`, `tools/progress.py` or this README, a workflow runs `tools/progress.py` and commits the README if the block changed. Pull before your next push. The numbers CI cannot work out are the corpus render's (projects with sound and in full, effect slots hosted, generator channels playing), since the render needs FL's files; the `--render` command above records them.

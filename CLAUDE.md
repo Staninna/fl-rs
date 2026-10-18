@@ -17,4 +17,4 @@ The paths in `.scratch/` name the machine the work started on (`/shared/code/fl-
 
 ## Progress table
 
-The block between the progress markers in `README.md` is generated: `python3 -I tools/progress.py` writes it from `docs/plugins.md` and `docs/parity.md`, and CI reruns it on every push to `main`. Change the docs, then run the script. Run the corpus render through it, `cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render`, and it records the count of projects with sound in `docs/plugins.md`; commit that with the README.
+The block between the progress markers in `README.md` is generated: `python3 -I tools/progress.py` writes it from `docs/plugins.md` and `docs/parity.md`, and CI reruns it on every push to `main`. Change the docs, then run the script. Run the corpus render through it, `cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render`, and it records the render's counts in `docs/plugins.md`; commit that with the README.
