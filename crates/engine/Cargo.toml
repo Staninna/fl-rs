@@ -16,6 +16,10 @@ rtrb = "0.4"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "pcm", "flac", "mp3", "ogg", "vorbis"] }
 wavicle = "0.1"
 
+[features]
+# Times each generator and effect slot per call, for the profile example.
+profile = []
+
 [dev-dependencies]
 hound = "3.5"
 plugins = { path = "../plugins", features = ["test-generators"] }

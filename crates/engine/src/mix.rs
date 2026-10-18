@@ -14,6 +14,46 @@ use std::path::Path;
 /// The samples a bus holds, and the most [`Mixer::process`] takes at once.
 pub(crate) const BLOCK: usize = 512;
 
+/// A part of the mix that the `profile` feature times on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// The generator of a plugin channel, by the index its 64 has.
+    Generator(u16),
+    /// The plugin in a slot of an insert, by the loader's insert number.
+    Slot { insert: u16, slot: u8 },
+}
+
+/// How long each part took since the last [`Spent::clear`], a part once for
+/// every block it played, with the `profile` feature. Without it this
+/// holds nothing and times nothing.
+#[derive(Default)]
+pub(crate) struct Spent {
+    #[cfg(feature = "profile")]
+    pub parts: Vec<(Part, std::time::Duration)>,
+}
+
+impl Spent {
+    fn time<T>(&mut self, part: impl FnOnce() -> Part, run: impl FnOnce() -> T) -> T {
+        #[cfg(feature = "profile")]
+        {
+            let started = std::time::Instant::now();
+            let out = run();
+            self.parts.push((part(), started.elapsed()));
+            out
+        }
+        #[cfg(not(feature = "profile"))]
+        {
+            let _ = part;
+            run()
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        #[cfg(feature = "profile")]
+        self.parts.clear();
+    }
+}
+
 /// The frames a tap takes to move along its delay line, and a slot with a
 /// late plugin to switch.
 const FADE: usize = 256;
@@ -357,13 +397,18 @@ fn generate(
     made: (&mut [f32], &mut [f32]),
     left: &mut [f32],
     right: &mut [f32],
+    spent: &mut Spent,
 ) {
     let (made_left, made_right) = made;
     let playing = generators.iter_mut();
     for hosted in playing.filter(|hosted| hosted.insert == insert) {
         made_left.fill(0.0);
         made_right.fill(0.0);
-        hosted.generator.process(made_left, made_right);
+        let channel = hosted.channel;
+        spent.time(
+            || Part::Generator(channel),
+            || hosted.generator.process(made_left, made_right),
+        );
         for (out, v) in left.iter_mut().zip(&*made_left) {
             *out += v * hosted.gains.0;
         }
@@ -518,6 +563,8 @@ pub(crate) struct Mixer {
     /// The generators of the plugin channels the engine hosts, in the
     /// order their first notes come.
     generators: Vec<Generator>,
+    /// How long each generator and slot took in the engine's last call.
+    pub(crate) spent: Spent,
     /// What one generator puts out for the block being mixed, [`BLOCK`]
     /// long, before its channel's volume and pan.
     made_left: Vec<f32>,
@@ -839,6 +886,7 @@ impl Mixer {
             dry_left: vec![0.0; BLOCK],
             dry_right: vec![0.0; BLOCK],
             generators: Vec::new(),
+            spent: Spent::default(),
             made_left: vec![0.0; BLOCK],
             made_right: vec![0.0; BLOCK],
             tail: 0,
@@ -1161,6 +1209,7 @@ impl Mixer {
             let (dry_left, dry_right) = (&mut self.dry_left[..len], &mut self.dry_right[..len]);
             let made = (&mut self.made_left[..len], &mut self.made_right[..len]);
             let generators = &mut self.generators;
+            let spent = &mut self.spent;
             // What was sent here is in the bus already. The voices go on
             // top in the order they started and the generators after
             // them, by way of their line when the sends can come in late.
@@ -1169,14 +1218,14 @@ impl Mixer {
                 for voice in playing {
                     voice.render(bus_left, bus_right);
                 }
-                generate(generators, strip.index, made, bus_left, bus_right);
+                generate(generators, strip.index, made, bus_left, bus_right, spent);
             } else {
                 dry_left.fill(0.0);
                 dry_right.fill(0.0);
                 for voice in playing {
                     voice.render(dry_left, dry_right);
                 }
-                generate(generators, strip.index, made, dry_left, dry_right);
+                generate(generators, strip.index, made, dry_left, dry_right, spent);
                 strip.played.write(dry_left, dry_right);
                 let tap = &mut strip.played_tap;
                 strip.played.add(tap, 1.0, bus_left, bus_right);
@@ -1186,7 +1235,11 @@ impl Mixer {
             }
             for slot in &mut strip.effects {
                 let dry = (&mut *dry_left, &mut *dry_right);
-                let run = slot.play(&strip.side, bus_left, bus_right, dry);
+                let part = Part::Slot {
+                    insert: strip.index,
+                    slot: slot.slot,
+                };
+                let run = spent.time(|| part, || slot.play(&strip.side, bus_left, bus_right, dry));
                 // The plugin's second output goes into the bus of its
                 // insert, with nothing for the frames the plugin sat out.
                 let Some(aux) = &mut slot.aux else {
@@ -1382,6 +1435,7 @@ mod tests {
             dry_left: vec![0.0; BLOCK],
             dry_right: vec![0.0; BLOCK],
             generators: Vec::new(),
+            spent: Spent::default(),
             made_left: vec![0.0; BLOCK],
             made_right: vec![0.0; BLOCK],
             tail: 0,
