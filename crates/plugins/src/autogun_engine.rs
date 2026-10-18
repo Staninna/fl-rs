@@ -435,6 +435,9 @@ pub struct Setup {
     /// EQ shift (-0.5 to 0.5) and rotation, both in partials' share.
     pub shift: f32,
     pub rotation: f32,
+    /// Read the tables with FL's linear interpolator (`FUN_00610ef0`, the
+    /// quality "low" picks it) and not the 6-point one.
+    pub linear: bool,
 }
 
 /// Scratch every voice uses in turn.
@@ -505,6 +508,7 @@ pub struct Timbre {
     predecay: f64,
     decay: f64,
     fresh: bool,
+    linear: bool,
     pub copies: [Copy; 9],
     pub count: usize,
 }
@@ -539,6 +543,7 @@ impl Timbre {
             predecay: 0.0,
             decay: 0.0,
             fresh: true,
+            linear: false,
             copies: [Copy::default(); 9],
             count: 1,
         }
@@ -588,6 +593,7 @@ impl Timbre {
         self.predecay = s.predecay;
         self.decay = s.decay;
         self.fresh = true;
+        self.linear = s.linear;
     }
 
     /// `FUN_00846f10`: the step at this pitch ratio.
@@ -901,14 +907,20 @@ impl Timbre {
                 for j in 0..len {
                     let at = copy.phase + step * j as f64;
                     let whole = at as i64;
-                    let x = (at - whole as f64) as f32 - 0.5;
+                    let frac = (at - whole as f64) as f32;
                     let frame = (whole & mask) as usize + HALF_GUARD;
                     let f = &self.frames;
+                    if self.linear {
+                        let (a, b) = (2 * frame, 2 * frame + 2);
+                        work.pairs[2 * j] = (f[b] - f[a]) * frac + f[a];
+                        work.pairs[2 * j + 1] = (f[b + 1] - f[a + 1]) * frac + f[a + 1];
+                        continue;
+                    }
                     let pick = |k: usize, side: usize| f[2 * (frame + k - 2) + side];
                     let newer = [0, 1, 2, 3, 4, 5].map(|k| pick(k, 0));
                     let older = [0, 1, 2, 3, 4, 5].map(|k| pick(k, 1));
-                    work.pairs[2 * j] = interpolate(newer, x);
-                    work.pairs[2 * j + 1] = interpolate(older, x);
+                    work.pairs[2 * j] = interpolate(newer, frac - 0.5);
+                    work.pairs[2 * j + 1] = interpolate(older, frac - 0.5);
                 }
                 let copy = &mut self.copies[c];
                 copy.phase += step * len as f64;

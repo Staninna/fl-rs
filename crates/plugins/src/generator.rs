@@ -180,6 +180,7 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::harmor::NAME, || {
         Box::new(crate::harmor::Harmor::default())
     }),
+    (crate::ogun::NAME, || Box::new(crate::ogun::Ogun::default())),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),

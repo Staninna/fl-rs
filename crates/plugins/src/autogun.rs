@@ -18,12 +18,15 @@
 //! state, the parameters, the voice (articulators, levels, pan, declick,
 //! the 1 to 3 stage filter) and the post chain.
 //!
+//! Ogun (`ogun.rs`, `docs/plugins/ogun.md`) plays on this file too: its
+//! DLL is the same code less the random presets, as [`Kind`] says.
+//!
 //! Approximated, and said in [`Generator::fidelity`]: nothing is null
 //! tested; IPP's `exp` and its CPU-specific random generators are taken to
 //! give what their generic paths give; a timbre seed 2 of 0, which draws a
 //! new seed for every note from a counter FL keeps per process, counts from
-//! 0 here; quality settings other than the default keep the default's
-//! interpolator and leave out the oversampled output filter; portamento and
+//! 0 here; the qualities above the default keep its interpolator and leave
+//! out the oversampled output filter; portamento and
 //! the velocity-to-envelope mode 2 are left out.
 
 // The voice and effect kernels index their channels and stages on purpose,
@@ -133,10 +136,26 @@ const COMB_ONES: u16 = 0x0180;
 /// A map baked for the mod X and Y wheels has this many steps.
 const MAP_STEPS: usize = 512;
 
-/// The oldest state read: before 13 the block and the articulators are
-/// other sizes. The newest is 19 (`0x00130003`).
-const OLDEST: i32 = 13;
+/// The newest state version, 19 (`0x00130003`). Every older one back to 0
+/// is read as `SaveRestoreState` reads it.
 const NEWEST: i32 = 19;
+/// The block at plugin+0x12c: 49 parameters and the switches after them.
+const BLOCK: usize = 0x100;
+/// Articulators an old state leaves out, which FL resets: before version 4
+/// the unison pitch and phase (`DAT_0087d7a0` = 0x30), before 10 rotation
+/// and EQ shifting (`DAT_0087d7a1` = 0x18, from articulator 8).
+const BEFORE_4: u8 = 0x30;
+const BEFORE_10: u8 = 0x18;
+
+/// The two plugins this file plays. Their DLLs share the code from the
+/// state loader to the post chain. Autogun is Ogun with random presets: it
+/// saves the random-preset seed, has magic dust and puts its master level
+/// a quarter lower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Autogun,
+    Ogun,
+}
 
 /// The switches at plugin+0x208, by their offset from it.
 const MOD_SMOOTH: usize = 0;
@@ -213,23 +232,37 @@ pub struct State {
 }
 
 impl State {
-    /// Read an event 213. A version FL would not read is turned down.
+    /// Read an Autogun event 213. A version FL would not read is turned
+    /// down.
     pub fn parse(bytes: &[u8]) -> Result<State, StateError> {
+        State::parse_as(bytes, Kind::Autogun)
+    }
+
+    /// Read an event 213 as this plugin's DLL does. An old state is a
+    /// shorter block read over the constructor's, and leaves out
+    /// articulators and curves that FL then resets.
+    pub fn parse_as(bytes: &[u8], kind: Kind) -> Result<State, StateError> {
         let raw = crate::state_version(bytes, 8)?;
         if raw == i32::MAX || raw >= 0x13_0004 {
             return Err(StateError::Version { found: raw });
         }
         let version = if raw > 0xffff { raw >> 16 } else { raw };
-        if !(OLDEST..=NEWEST).contains(&version) {
-            return Err(StateError::Version { found: version });
-        }
+        debug_assert!(version <= NEWEST);
         let body = miniz_oxide::inflate::decompress_to_vec_zlib(&bytes[4..]).map_err(|_| {
             StateError::Length {
                 expected: bytes.len() + 1,
                 found: bytes.len(),
             }
         })?;
-        let mut r = Reader::new(&body);
+        let mut stream = Reader::new(&body);
+        // Before version 8 there is no fine pitch, and FL sets it to 0.
+        let mut block = default_block();
+        let first = if version < 8 { 8 } else { 12 };
+        block[..first].copy_from_slice(stream.bytes(first)?);
+        block[first..12].fill(0);
+        let rest = block_rest(version);
+        block[12..12 + rest].copy_from_slice(stream.bytes(rest)?);
+        let mut r = Reader::new(&block);
         let mut params = [0; PARAMS];
         for p in &mut params {
             *p = r.i32()?;
@@ -248,6 +281,8 @@ impl State {
         }
         let more = r.bytes(4)?;
         let magic = r.i32()?;
+        r.end()?;
+        let mut r = stream;
         let three = r.bytes(3)?;
         let mut eq_types = [0; 3];
         for t in &mut eq_types {
@@ -266,9 +301,19 @@ impl State {
             let units: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
             String::from_utf16_lossy(&units)
         };
-        let seed = if version > 18 { r.i32()? } else { 0 };
+        let seed = if kind == Kind::Autogun && version > 18 {
+            r.i32()?
+        } else {
+            0
+        };
         let mut arts = Vec::with_capacity(ARTICULATORS);
-        for _ in 0..ARTICULATORS {
+        for k in 0..ARTICULATORS {
+            let reset = (version < 4 && k < 8 && (BEFORE_4 >> k) & 1 != 0)
+                || (version < 10 && (8..16).contains(&k) && (BEFORE_10 >> (k - 8)) & 1 != 0);
+            if reset {
+                arts.push(blank_art(k));
+                continue;
+            }
             let _format = r.u32()?;
             let base = r.f32()?;
             let env_amount = r.f32()?;
@@ -291,8 +336,19 @@ impl State {
             });
         }
         let mut shapes = Vec::with_capacity(SHAPES);
-        for _ in 0..SHAPES {
-            shapes.push(MEnvelope::read(&mut r, Class::Map)?);
+        for s in 0..SHAPES {
+            // Before version 5 there are no forced harmonics; before 6 a
+            // curve counted in partials and had no log axis.
+            if version < 5 && s == eng::FORCED {
+                shapes.push(blank_shape(s));
+                continue;
+            }
+            let mut shape = MEnvelope::read(&mut r, Class::Map)?;
+            if version < 6 {
+                old_curve(&mut shape, order);
+                flags[LOG_CURVES] = 1;
+            }
+            shapes.push(shape);
         }
         r.end()?;
         // Before 14 the curves were never weighted (`0x226`).
@@ -636,8 +692,9 @@ struct Derived {
     filter_scale: f32,
 }
 
-/// Autogun.
+/// Autogun, or Ogun when made with [`Autogun::new`] of [`Kind::Ogun`].
 pub struct Autogun {
+    kind: Kind,
     state: State,
     d: Derived,
     arts: Vec<Art>,
@@ -664,26 +721,7 @@ pub struct Autogun {
 /// The default state: the parameters at their defaults, every
 /// articulator and curve idle.
 fn blank_state() -> State {
-    let knobs = crate::menvelope::ENVELOPE_KNOBS;
-    let idle = |kind: u32, level: f64| crate::harmor_state::idle(kind, level, knobs);
-    let arts = (0..ARTICULATORS)
-        .map(|k| {
-            let centre = if BIPOLAR & (1 << k) != 0 { 0.5 } else { 1.0 };
-            ArtState {
-                base: 0.0,
-                env_amount: 1.0,
-                lfo_amount: 1.0,
-                envelope: idle(1, 0.0),
-                lfo: crate::harmor_state::idle(2, 0.5, crate::menvelope::LFO_KNOBS),
-                maps: [
-                    idle(3, centre),
-                    idle(3, centre),
-                    idle(3, centre),
-                    idle(3, centre),
-                ],
-            }
-        })
-        .collect();
+    let arts = (0..ARTICULATORS).map(blank_art).collect();
     State {
         version: NEWEST,
         params: DEFAULTS,
@@ -708,16 +746,134 @@ fn blank_state() -> State {
         info: String::new(),
         seed: 0,
         arts,
-        // The constructor's curves (`FUN_0078cc00`): no forced harmonics,
-        // the three EQs flat at their middle, which is a gain of 1.
-        shapes: (0..SHAPES)
-            .map(|s| idle(3, if s == eng::FORCED { 0.0 } else { 0.5 }))
-            .collect(),
+        shapes: (0..SHAPES).map(blank_shape).collect(),
     }
 }
 
-/// The settings of a quality (`FUN_0087e750`): interpolator points,
-/// oversampling bits, frame length in ms and the control tick at 44.1 kHz.
+/// Articulator `k` as the constructor makes it and as `FUN_0087ed10`
+/// resets it: every map flat at the value that changes nothing.
+fn blank_art(k: usize) -> ArtState {
+    let knobs = crate::menvelope::ENVELOPE_KNOBS;
+    let idle = |kind: u32, level: f64| crate::harmor_state::idle(kind, level, knobs);
+    let centre = if BIPOLAR & (1 << k) != 0 { 0.5 } else { 1.0 };
+    ArtState {
+        base: 0.0,
+        env_amount: 1.0,
+        lfo_amount: 1.0,
+        envelope: idle(1, 0.0),
+        lfo: crate::harmor_state::idle(2, 0.5, crate::menvelope::LFO_KNOBS),
+        maps: [
+            idle(3, centre),
+            idle(3, centre),
+            idle(3, centre),
+            idle(3, centre),
+        ],
+    }
+}
+
+/// The constructor's curve `s` (`FUN_0078cc00`): no forced harmonics, the
+/// three EQs flat at their middle, which is a gain of 1.
+fn blank_shape(s: usize) -> MEnvelope {
+    let level = if s == eng::FORCED { 0.0 } else { 0.5 };
+    crate::harmor_state::idle(3, level, crate::menvelope::ENVELOPE_KNOBS)
+}
+
+/// The block as the constructor leaves it and `SaveRestoreState` resets
+/// it before a read (+0x20f..+0x213, the combs, +0x224, +0x225, +0x227 and
+/// magic dust at 430): an old state overwrites only the front of it.
+fn default_block() -> [u8; BLOCK] {
+    let s = blank_state();
+    let mut b = Vec::with_capacity(BLOCK);
+    for v in s.params {
+        b.extend(v.to_le_bytes());
+    }
+    for v in [s.filter_type, s.filter_stages, s.filter_alt, s.order] {
+        b.extend(v.to_le_bytes());
+    }
+    b.extend([u8::from(s.reverb_on), u8::from(s.reverb_tempo), 0, 0]);
+    b.extend(s.quality.to_le_bytes());
+    b.extend(s.flags);
+    for v in s.combs {
+        b.extend(v.to_le_bytes());
+    }
+    b.extend([
+        u8::from(s.to_target),
+        u8::from(s.normalise),
+        u8::from(s.weighted),
+        s.spare,
+    ]);
+    b.extend(s.magic.to_le_bytes());
+    let mut block = [0; BLOCK];
+    block.copy_from_slice(&b);
+    block
+}
+
+/// How much of the block after its first 12 bytes a version saves
+/// (`SaveRestoreState`): each newer one added to its end.
+fn block_rest(version: i32) -> usize {
+    let mut rest = if version < 1 { 0xf3 } else { 0xf4 };
+    for (before, less) in [(2, 3), (7, 1), (9, 16), (11, 1), (12, 1), (13, 6)] {
+        if version < before {
+            rest -= less;
+        }
+    }
+    rest
+}
+
+/// A curve saved before version 6 (`SaveRestoreState`, the `v < 6` part):
+/// its `x` counted partials of the richness it was saved at, so it is
+/// stretched to `(2^(order-1) - 1) / 32767` of its length and held at its
+/// last level to the end, then read again at 16 points for the log axis,
+/// point `i` at `i / 15` with the value at `2^i / 32767`.
+fn old_curve(shape: &mut MEnvelope, order: i32) {
+    let partials = 1i32.wrapping_shl(((order - 1) & 31) as u32).wrapping_sub(1);
+    let scale = f64::from(partials) / 32_767.0;
+    for p in &mut shape.points {
+        p.x *= scale;
+    }
+    let last = shape.points.last().map_or(0.0, |p| p.y as f32);
+    add_point(&mut shape.points, 1.0, last);
+    let curve = Curve::new(&shape.points);
+    let from = shape.points.first().map_or(0.0, |p| p.x.max(0.0));
+    let mut points = Vec::with_capacity(16);
+    for i in 0..16 {
+        let y = curve.value_at(from + f64::from(1u32 << i) / 32_767.0) as f32;
+        add_point(&mut points, f64::from(i) / 15.0, y);
+    }
+    shape.arp = vec![0; points.len()];
+    shape.points = points;
+}
+
+/// `FUN_00786c60`: a straight point at `x` from the start of a one unit
+/// long map, before the first point after it, with its `x` and the next
+/// point's kept relative as FL keeps them (in f32 steps).
+fn add_point(points: &mut Vec<dsp::curve::Point>, x: f64, y: f32) {
+    let x = x.clamp(0.0, 1.0);
+    let (mut index, mut before) = (points.len(), 0.0);
+    if let Some(first) = points.first() {
+        let mut at = first.x;
+        before = at;
+        for (i, p) in points.iter().enumerate().skip(1) {
+            let next = at + p.x;
+            if x < next {
+                index = i;
+                break;
+            }
+            at = next;
+            before = at;
+        }
+    }
+    let step = ((x - before) as f32).max(0.0);
+    points.insert(index, dsp::curve::Point::new(f64::from(step), f64::from(y)));
+    if let Some(next) = points.get_mut(index + 1) {
+        next.x -= f64::from(step);
+    }
+}
+
+/// The settings of a quality (`FUN_0087e750`): interpolator (1 linear, 2
+/// the 6-point, 6 a longer one), oversampling bits, frame length in ms and
+/// the control tick at 44.1 kHz. A quality past 4 changes nothing, so the
+/// constructor's, which are quality 1's, stay.
 fn quality(q: i32) -> (u32, u32, i32, i32) {
     match q {
         0 => (1, 0, 50, 96),
@@ -826,11 +982,20 @@ fn velocity_of(gain: f32) -> f32 {
 
 impl Default for Autogun {
     fn default() -> Self {
+        Autogun::new(Kind::Autogun)
+    }
+}
+
+impl Autogun {
+    /// The plugin of this kind at its defaults, which both DLLs' constructors
+    /// share.
+    pub fn new(kind: Kind) -> Self {
         let state = blank_state();
         let rate = 44_100.0;
         let engine = Engine::new(state.order as u32, 0, rate);
         let work = Work::new(&engine);
         let mut plugin = Autogun {
+            kind,
             arts: Vec::new(),
             d: Derived {
                 rate,
@@ -895,9 +1060,7 @@ impl Default for Autogun {
         plugin.load();
         plugin
     }
-}
 
-impl Autogun {
     pub fn state(&self) -> &State {
         &self.state
     }
@@ -1074,7 +1237,13 @@ impl Autogun {
         d.rates = [seconds * 2.0, seconds * f64::from(d.tempo as f32) / 60.0];
         let host = 44_100.0 / rate;
         d.declick = round(96.0 / (host * host)) as i32;
-        d.master = (f64::from(level3(p[0] as f32 * 0.007_812_5)) * 0.25) as f32;
+        // Ogun's master level is `level3` itself (`FUN_0086a570`); Autogun
+        // takes a quarter of it (`FUN_00882700`).
+        let master = level3(p[0] as f32 * 0.007_812_5);
+        d.master = match self.kind {
+            Kind::Autogun => (f64::from(master) * 0.25) as f32,
+            Kind::Ogun => master,
+        };
         d.cents = p[1] * 100 + p[2];
         d.fullness = p[8] as f32 * 0.001;
         d.predecay = p[5] as f32 * 0.001;
@@ -1244,7 +1413,8 @@ impl Autogun {
     fn build_sg(&mut self) {
         self.sg = None;
         self.missing_sg = false;
-        if self.state.magic <= 0 {
+        // Ogun's `Gen_Render` (`0x0086d450`) has no magic dust.
+        if self.kind == Kind::Ogun || self.state.magic <= 0 {
             return;
         }
         let Some(bytes) = &self.sg_state else {
@@ -1435,6 +1605,7 @@ impl Autogun {
             copies,
             shift: (voice.notes[12] as f32).clamp(-0.5, 0.5),
             rotation: voice.notes[11] as f32,
+            linear: quality(state.quality).0 == 1,
         };
         voice.timbre.start(engine, &setup);
         let root = if copies < 3 {
@@ -1886,7 +2057,7 @@ fn filter_coefficients(d: &Derived, voice: &mut Voice) {
 
 impl Generator for Autogun {
     fn set_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
-        self.state = State::parse(bytes)?;
+        self.state = State::parse_as(bytes, self.kind)?;
         self.load();
         Ok(())
     }
@@ -1906,8 +2077,10 @@ impl Generator for Autogun {
     }
 
     fn set_resource_dir(&mut self, dir: &Path) {
-        self.sg_state = std::fs::read(dir.join(SG_STATE)).ok();
-        self.build_sg();
+        if self.kind == Kind::Autogun {
+            self.sg_state = std::fs::read(dir.join(SG_STATE)).ok();
+            self.build_sg();
+        }
     }
 
     fn note_on(&mut self, note: NoteOn) {
@@ -2016,16 +2189,31 @@ impl Generator for Autogun {
 
     fn fidelity(&self) -> Fidelity {
         let s = &self.state;
+        let ogun = self.kind == Kind::Ogun;
+        let say =
+            |autogun, ogun_text| Fidelity::Approximate(if ogun { ogun_text } else { autogun });
         if self.missing_sg {
             Fidelity::Approximate("Autogun without its magic dust state")
-        } else if s.quality != 1 {
-            Fidelity::Approximate("Autogun quality other than normal")
+        } else if (2..=4).contains(&s.quality) {
+            say(
+                "Autogun quality other than normal",
+                "Ogun quality other than normal",
+            )
         } else if s.params[11] == 0 && s.params[9] > 0 {
-            Fidelity::Approximate("Autogun timbre seed 2 drawn from a counter")
+            say(
+                "Autogun timbre seed 2 drawn from a counter",
+                "Ogun timbre seed 2 drawn from a counter",
+            )
         } else if s.flag(PORTA) != 0 || s.flag(VEL_ENV) & 2 != 0 {
-            Fidelity::Approximate("Autogun portamento or velocity envelope mode")
+            say(
+                "Autogun portamento or velocity envelope mode",
+                "Ogun portamento or velocity envelope mode",
+            )
         } else {
-            Fidelity::Approximate("Autogun: timbre engine not null-tested")
+            say(
+                "Autogun: timbre engine not null-tested",
+                "Ogun: timbre engine not null-tested",
+            )
         }
     }
 }
@@ -2096,6 +2284,40 @@ mod tests {
         c.set_param(11, 78.0);
         c.note_on(note(60));
         assert_ne!(render(&mut a, 4800).0, render(&mut c, 4800).0);
+    }
+
+    #[test]
+    fn an_old_block_is_a_front_of_the_new_one() {
+        assert_eq!(block_rest(NEWEST), BLOCK - 12);
+        assert_eq!(block_rest(13), BLOCK - 12);
+        // Version 0 stops after the seventh switch.
+        assert_eq!(12 + block_rest(0), 0xe3);
+        // What a short state leaves is the constructor's, and the reset
+        // switches are FL's.
+        let block = default_block();
+        assert_eq!(block[0xd8], 1);
+        assert_eq!(&block[0xe3..0xe8], &[0, 0, 1, 0, 0]);
+        assert_eq!(i32::from_le_bytes(block[0xfc..].try_into().unwrap()), 430);
+    }
+
+    #[test]
+    fn an_old_curve_is_stretched_to_its_partials_and_read_on_a_log_axis() {
+        // A ramp over the partials of order 11 (1023 of them), saved before
+        // version 6: it rises to 1 at partial 1023 and holds.
+        let mut shape = blank_shape(eng::IMPULSE);
+        shape.points = vec![
+            dsp::curve::Point::new(0.0, 0.0),
+            dsp::curve::Point::new(1.0, 1.0),
+        ];
+        old_curve(&mut shape, 11);
+        assert_eq!(shape.points.len(), 16);
+        let curve = Curve::new(&shape.points);
+        // Point i sits at i / 15 and holds the ramp at partial 2^i.
+        for i in 0..16 {
+            let want = (f64::from(1u32 << i) / 1023.0).min(1.0);
+            let got = curve.value_at(f64::from(i) / 15.0);
+            assert!((got - want).abs() < 1e-4, "{i}: {got} {want}");
+        }
     }
 
     #[test]
