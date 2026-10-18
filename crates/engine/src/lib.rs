@@ -118,6 +118,7 @@ mod voice;
 
 pub use curves::{Approximate, Curves, FlExact};
 pub use engine::Engine;
+pub use mix::Part;
 pub use sample::{PreparedSamples, prepare};
 pub use transport::Transport;
 

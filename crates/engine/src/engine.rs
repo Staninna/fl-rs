@@ -320,6 +320,13 @@ impl Engine {
         self.process_with(&Approximate, out_left, out_right);
     }
 
+    /// How long each generator and effect slot took in the last
+    /// [`Engine::process`], a part once for every block it played in it.
+    #[cfg(feature = "profile")]
+    pub fn spent(&self) -> &[(crate::Part, std::time::Duration)] {
+        &self.graph.mixer.spent.parts
+    }
+
     /// [`Engine::process`] with the curves the graph was built with.
     pub(crate) fn process_with(
         &mut self,
@@ -330,6 +337,7 @@ impl Engine {
         let len = out_left.len().min(out_right.len());
         out_left[len..].fill(0.0);
         out_right[len..].fill(0.0);
+        self.graph.mixer.spent.clear();
         let mut at = 0;
         while at < len {
             let end = self.graph.end;
