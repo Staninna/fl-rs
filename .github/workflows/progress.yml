@@ -1,0 +1,24 @@
+name: progress
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/plugins.md
+      - docs/parity.md
+      - tools/progress.py
+      - README.md
+permissions:
+  contents: write
+jobs:
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -I tools/progress.py
+      # A push made with the workflow's own token starts no new run.
+      - run: |
+          git diff --quiet README.md && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "docs(readme): update the progress table" README.md
+          git push
