@@ -131,7 +131,7 @@ A project named on the command line starts playing once it has loaded. `FL_RS_DA
 
 ## Continuing development
 
-Start with `.scratch/handoff.md`: what was done last, what is half done, and which plugins to build next by how many shipped projects need them. Then:
+Start with `.scratch/handoff.md`: what was done last, what is half done, and which plugins to build next by how many shipped projects need them. It only knows about work committed here, so before you pick something up, search the [issues](https://github.com/Staninna/fl-rs/issues?q=is%3Aissue), [pull requests](https://github.com/Staninna/fl-rs/pulls?q=is%3Apr) and branches for it, to avoid doing the same work twice. Then:
 
 - `.scratch/plan-phase4.md` is the method for one plugin, from the DLL to Rust.
 - `.scratch/agent-rules.md` is the brief each plugin agent gets: which files it owns in a shared tree, what "done" means for a plugin, and the rule that the audio path never allocates.

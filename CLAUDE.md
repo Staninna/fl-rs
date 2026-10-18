@@ -15,6 +15,16 @@ Keep it current. When you stop, or hand work to another agent, rewrite `handoff.
 
 The paths in `.scratch/` name the machine the work started on (`/shared/code/fl-studio-target/...`). On another machine, read them as "your FL Studio install".
 
+## Others work on GitHub too
+
+The repo is public at `Staninna/fl-rs`, so `.scratch/` shows only this tree's work; someone else may already have the plugin or bug you are about to pick up. Before you start a piece of work, and before you hand one to a subagent, search GitHub for it by plugin or subject:
+
+- `gh issue list --state all --search "<name>"`
+- `gh pr list --state all --search "<name>"`
+- `git fetch origin` and `git branch -r` for branches named after it
+
+When you find work in flight, build on it or pick something else, and tell the user which and why. Issues, comments and pull requests are public, so ask the user before you open or answer one. Before you push, `git fetch` and look at what landed on `main` since you started.
+
 ## Progress table
 
 The block between the progress markers in `README.md` is generated: `python3 -I tools/progress.py` writes it from `docs/plugins.md`, `docs/parity.md` and the port levels in `crates/plugins/src/port.rs`, and CI reruns it on every push to `main`. A plugin is built when it has a port there; CI fails when `port.rs` and the `docs/plugins.md` rows disagree. Change the docs, then run the script. Run the corpus render through it, `cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render`, and it records the render's counts in `docs/plugins.md`; commit that with the README.
