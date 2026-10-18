@@ -1,6 +1,6 @@
 # Handoff, 2026-10-18
 
-The repo is on GitHub as `Staninna/fl-rs`, branch `main` (local branch `phase-4` tracks it). Everything is committed. fmt, clippy and `cargo test -p plugins` with the corpus are green at `372526f`. A release corpus render there hears 111 of 165 projects.
+The repo is on GitHub as `Staninna/fl-rs`, branch `main` (local branch `phase-4` tracks it). Everything is committed. fmt, clippy and `cargo test -p plugins` with the corpus are green at `f2905bd`. A release corpus render there hears 111 of 165 projects. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve; `refs/backup/pre-rewrite` in the original clone keeps the old ones.
 
 ## Since 2026-10-14
 
@@ -14,7 +14,7 @@ The section below is the state as of 2026-10-14, kept for its detail on each plu
 
 ## Committed this session
 
-Harmor, Vocodex (two sidechain inputs, mix.rs `side: [Option<usize>; 2]`), EQUO, Hyper Chorus, FL Keys, Autogun. Fixes: `MEnvelope::read` sets decay -1 for LFOs. `engine/src/sample.rs` `prepare()` calls `set_resource_dir` before `set_state`, which brought FL Keys' Grand Piano to life in realtime. A release corpus render at `bdcaa85` hears 108 of 165 projects, and the README says so.
+Harmor, Vocodex (two sidechain inputs, mix.rs `side: [Option<usize>; 2]`), EQUO, Hyper Chorus, FL Keys, Autogun. Fixes: `MEnvelope::read` sets decay -1 for LFOs. `engine/src/sample.rs` `prepare()` calls `set_resource_dir` before `set_state`, which brought FL Keys' Grand Piano to life in realtime. A release corpus render at `971d670` hears 108 of 165 projects, and the README says so.
 
 ## Uncommitted, one commit per plugin
 
@@ -40,7 +40,7 @@ Every agent stopped mid-task and wrote its handover to `.scratch/notes/<plugin>.
 - Corpus render, about 3 minutes in release: `FL_RS_CORPUS="/shared/code/fl-studio-target/winehome/prefix/drive_c/Program Files/Image-Line/FL Studio 2026/Data" cargo test --release -q -p engine --test corpus -- --nocapture`. Its summary lines give the audible count and the most-silent and most-passed lists.
 - `.scratch/agent-rules.md` is the rules file each plugin agent was given. Point new agents at it.
 
-## Next by corpus usage (at 372526f)
+## Next by corpus usage (at f2905bd)
 
 Silent generators: FLEX 13 (patches in obfuscated `.flexpack` archives), Drumpad 6 (drafted), Fruity DrumSynth Live 2, Fruity Slicer 2, GMS 2.
 Passed-through effects: Fruity Wrapper 17 (third-party VSTs, out of scope), Patcher 15, Wave Candy 11 and ZGameEditor Visualizer 7 (visualisers, passing through is right), Emphasis 5.
@@ -51,7 +51,7 @@ Smaller follow-ups: Pitcher's MIDI Out routing, Emphasis, Vintage Chorus. `tools
 
 - Patcher: a plugin graph inside one slot, which needs engine work. Plan it with the user before assigning it.
 - FLEX: try to crack the `.flexpack` obfuscation, or leave FLEX out.
-- `8e9ed44`'s message says "No shipped project stores one". That was inferred from no peak changing, not checked. The user knows, and it stays unamended.
+- `1bd9782`'s message says "No shipped project stores one". That was inferred from no peak changing, not checked. The user knows, and it stays unamended.
 
 ## Standing instructions
 
