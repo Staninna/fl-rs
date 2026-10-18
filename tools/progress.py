@@ -17,7 +17,7 @@ import pathlib, re, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 START, END = "<!-- progress:start -->", "<!-- progress:end -->"
-SOUND = r"Corpus render at `\w+`: (\d+) of (\d+) shipped projects have sound"
+SOUND = r"Corpus render at `[\w-]+`: (\d+) of (\d+) shipped projects have sound"
 
 
 def bar(done, total, width=20):
@@ -140,10 +140,13 @@ def record_render():
         effects = re.search(r"corpus effects: (\d+) slots hosted and (\d+) passed", line) or effects
         generators = re.search(r"corpus generators: (\d+) channels hosted and (\d+) silent", line) or generators
     assert summary and effects and generators, "no corpus render summary on stdin; did it run?"
-    commit = subprocess.run(
-        ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
-        capture_output=True, text=True, check=True,
+    git = lambda *args: subprocess.run(
+        ["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=True
     ).stdout.strip()
+    # The commit names the code that rendered only when that code is committed.
+    commit = git("rev-parse", "--short", "HEAD")
+    if git("status", "--porcelain", "--", "crates", "apps", "Cargo.toml", "Cargo.lock"):
+        commit += "-dirty"
     projects, sound = int(summary[1]), int(summary[2])
     assert seen == projects, f"read {seen} project lines of {projects}; did their format change?"
     hosted, passed = int(effects[1]), int(effects[2])
@@ -155,7 +158,7 @@ def record_render():
         f"and {playing} of {playing + silent} generator channels with notes play."
     )
     path = ROOT / "docs/plugins.md"
-    text, count = re.subn(r"Corpus render at `\w+`:.*", line, path.read_text(encoding="utf-8"))
+    text, count = re.subn(r"Corpus render at `[\w-]+`:.*", line, path.read_text(encoding="utf-8"))
     assert count == 1, "docs/plugins.md: no corpus render line to update"
     path.write_text(text, encoding="utf-8")
 
