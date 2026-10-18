@@ -47,6 +47,17 @@ fn settle(app: &mut App) {
     }
 }
 
+/// Poll until `done` holds. A CI machine's output device can take a while
+/// to call back the first time, so a fixed sleep is not enough.
+fn wait_for(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+    let started = Instant::now();
+    while !done(app) {
+        assert!(started.elapsed() < Duration::from_secs(10), "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+        app.poll();
+    }
+}
+
 /// One bar at 120 BPM and PPQ 96 as FL 20.8 would write it: a sampler
 /// channel that plays `click.wav` on every beat, into the master.
 fn fixture() -> Project {
@@ -290,19 +301,19 @@ fn play_moves_the_clock_and_stop_takes_it_back() {
         return;
     }
     assert!(app.is_playing());
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(app.position() > 0, "the clock stood still");
+    wait_for(&mut app, "the clock stood still", |app| app.position() > 0);
     assert!(app.state().playing);
 
     // The bar is 384 ticks long, and the clock stops at its end.
     app.apply(Command::Seek(192));
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(app.position() >= 192, "tick {}", app.position());
+    wait_for(&mut app, "the seek did not land", |app| {
+        app.position() >= 192
+    });
 
     app.apply(Command::Stop);
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(app.position(), 0);
-    assert!(!app.is_playing());
+    wait_for(&mut app, "stop did not take the clock back", |app| {
+        app.position() == 0 && !app.is_playing()
+    });
     assert_eq!(app.error(), None);
 }
 
@@ -1155,7 +1166,8 @@ fn the_meters_follow_the_inserts_that_play() {
         return;
     }
     app.apply(Command::Play);
-    std::thread::sleep(Duration::from_millis(300));
+    // The click is on the first tick, so it has played once the clock moves.
+    wait_for(&mut app, "the clock stood still", |app| app.position() > 0);
     app.apply(Command::Stop);
     std::thread::sleep(Duration::from_millis(100));
     // The click played into insert 1, which sends to the master, and a
