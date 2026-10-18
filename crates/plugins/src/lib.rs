@@ -69,6 +69,7 @@ pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
 pub mod multiband_compressor;
+pub mod ogun;
 pub mod panomatic;
 pub mod parametric_eq_2;
 mod parts;
