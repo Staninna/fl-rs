@@ -156,6 +156,34 @@ impl Fft {
     }
 }
 
+/// The first taps over a run: frame `j` of `out` becomes the sum of
+/// `taps[k]` times the input `k` frames before it, added up from `k = 0`.
+/// Frame `j` of the run is `line[HEAD - 1 + j]`, with the inputs before it
+/// below. Sixteen frames are summed side by side, each in that order, so
+/// every sum comes out as it does one frame at a time.
+fn direct(taps: &[f32], line: &[f32], out: &mut [f32]) {
+    const LANES: usize = 16;
+    let mut j = 0;
+    while j + LANES <= out.len() {
+        let mut sums = [0.0f32; LANES];
+        for (k, tap) in taps.iter().enumerate() {
+            let from = HEAD - 1 + j - k;
+            for (sum, input) in sums.iter_mut().zip(&line[from..from + LANES]) {
+                *sum += tap * input;
+            }
+        }
+        out[j..j + LANES].copy_from_slice(&sums);
+        j += LANES;
+    }
+    for (j, out) in out.iter_mut().enumerate().skip(j) {
+        let mut sum = 0.0;
+        for (k, tap) in taps.iter().enumerate() {
+            sum += tap * line[HEAD - 1 + j - k];
+        }
+        *out = sum;
+    }
+}
+
 /// One group of blocks of one length: where in the impulse it starts and
 /// how many blocks it has.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -184,10 +212,10 @@ struct Part {
 /// One side of the convolution.
 #[derive(Debug, Clone, PartialEq)]
 struct Side {
-    /// The first taps, and the last inputs twice over, newest first.
+    /// The first taps, and the inputs in order: the `HEAD - 1` before the
+    /// run being summed, then the run.
     taps: Vec<f32>,
-    history: Vec<f32>,
-    at: usize,
+    line: Vec<f32>,
     /// How much of the shortest block has come in.
     fill: usize,
     parts: Vec<Part>,
@@ -267,8 +295,7 @@ impl Engine {
             }
             Side {
                 taps: impulse[..HEAD.min(impulse.len())].to_vec(),
-                history: vec![0.0; 2 * HEAD],
-                at: 0,
+                line: vec![0.0; 2 * HEAD],
                 fill: 0,
                 parts,
                 ahead: vec![0.0; ahead],
@@ -291,9 +318,9 @@ impl Engine {
     /// Forget the input so far.
     pub(crate) fn reset(&mut self) {
         for side in &mut self.sides {
-            side.history.fill(0.0);
+            side.line.fill(0.0);
             side.ahead.fill(0.0);
-            (side.at, side.fill, side.next) = (0, 0, 0);
+            (side.fill, side.next) = (0, 0);
             for part in &mut side.parts {
                 part.block.fill(0.0);
                 part.input_re.fill(0.0);
@@ -325,21 +352,14 @@ impl Engine {
                 part.block[part.fill..part.fill + run].copy_from_slice(chunk);
                 part.fill += run;
             }
+            side.line[HEAD - 1..HEAD - 1 + run].copy_from_slice(chunk);
+            direct(&side.taps, &side.line, chunk);
             for sample in chunk.iter_mut() {
-                // The newest input is at `at`, the one before it after it.
-                side.at = (side.at + HEAD - 1) % HEAD;
-                side.history[side.at] = *sample;
-                side.history[side.at + HEAD] = *sample;
-                let past = &side.history[side.at..side.at + HEAD];
-                let taps = &side.taps[..];
-                let mut direct = 0.0;
-                for k in 0..taps.len() {
-                    direct += taps[k] * past[k];
-                }
-                *sample = direct + side.ahead[side.next];
+                *sample += side.ahead[side.next];
                 side.ahead[side.next] = 0.0;
                 side.next = (side.next + 1) & mask;
             }
+            side.line.copy_within(run..run + HEAD - 1, 0);
             side.fill += run;
             at += run;
             if side.fill < HEAD {
