@@ -18,6 +18,7 @@ Other agents edit other files in this same working tree right now.
 - If the build fails in a file you do not own, wait a minute and retry. Leave that file to its owner.
 - Update only your own plugin's row in `docs/plugins.md`. Leave `README.md` alone.
 - Git is read-only for you (status, diff, log, show). The coordinator commits. Add, commit, stash, checkout, restore or reset can destroy other agents' work.
+- The repo is public on GitHub (`Staninna/fl-rs`), and people outside this tree work on it too. Before you start, run `gh issue list --state all --search "<plugin>"` and `gh pr list --state all --search "<plugin>"`, and put what you find in your report. When someone has the plugin in flight, stop and report before you write code. `gh` is read-only for you too: open, comment on or close nothing.
 
 ## Headless
 
