@@ -76,6 +76,7 @@ pub mod panomatic;
 pub mod parametric_eq_2;
 mod parts;
 pub mod peak_controller;
+pub mod pitch_shifter;
 pub mod pitcher;
 pub mod reeverb_2;
 mod sampler;
@@ -361,6 +362,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(parametric_eq_2::ParametricEq2::default()))
     } else if is(peak_controller::NAME) {
         Some(Box::new(peak_controller::PeakController::default()))
+    } else if is(pitch_shifter::NAME) {
+        Some(Box::new(pitch_shifter::PitchShifter::default()))
     } else if is(pitcher::NAME) {
         Some(Box::new(pitcher::Pitcher::default()))
     } else if is(reeverb_2::NAME) {
@@ -667,6 +670,7 @@ mod tests {
             ("luxeverb", 169, 11),
             ("pitcher", 160, 61),
             ("pitcher", 164, 1),
+            ("pitch shifter", 75, 15),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
         ] {
@@ -704,7 +708,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 36);
+        assert_eq!(lengths.count(), 37);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
