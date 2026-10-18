@@ -8,7 +8,7 @@ The five plugins below are committed, one commit each, after fmt and seven clipp
 
 Still open for each of Ogun, Fruity DX10, Frequency Splitter and Pitch Shifter: `docs/plugins/<name>.md`. Drumpad is committed as a draft: not in `lib.rs` or `generator.rs`, never compiled. Next for it: add the mod lines and the generator entry, fix what fails to compile, run its tests.
 
-`docs/plugins.md` now carries the corpus render count ("111 of 165 shipped projects have sound"), and `tools/progress.py` builds the README's progress table from it and `docs/parity.md`. Update that line after every corpus render.
+`docs/plugins.md` now carries the corpus render count ("111 of 165 shipped projects have sound"), and `tools/progress.py` builds the README's progress block (table and lists of plugins built) from it and `docs/parity.md`. Pipe every corpus render into `python3 -I tools/progress.py --render` and it updates that line itself.
 
 The section below is the state as of 2026-10-14, kept for its detail on each plugin.
 

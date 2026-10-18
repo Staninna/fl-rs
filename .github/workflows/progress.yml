@@ -5,6 +5,7 @@ on:
     paths:
       - docs/plugins.md
       - docs/parity.md
+      - docs/event-dictionary.md
       - tools/progress.py
       - README.md
 permissions:
