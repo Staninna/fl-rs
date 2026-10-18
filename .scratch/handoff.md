@@ -1,6 +1,6 @@
 # Handoff, 2026-10-18
 
-The repo is on GitHub as `Staninna/fl-rs`, branch `main` (local branch `phase-4` tracks it). Everything is committed. fmt, clippy and `cargo test -p plugins` with the corpus are green at `f2905bd`. A release corpus render there hears 111 of 165 projects. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve; `refs/backup/pre-rewrite` in the original clone keeps the old ones.
+The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed. fmt, clippy and `cargo test -p plugins` with the corpus are green at `f2905bd`. A release corpus render there hears 111 of 165 projects. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
 
 ## Since 2026-10-14
 
