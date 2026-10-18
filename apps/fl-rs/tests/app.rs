@@ -332,22 +332,26 @@ fn the_song_stops_at_its_end_unless_it_loops_or_a_pattern_plays() {
         app.apply(Command::Play);
         app.apply(Command::Seek(360));
         assert!(app.state().playing);
-        wait_for(app, "the seek did not land", |app| {
-            app.position() >= 360 || !app.is_playing()
-        });
     };
+    // Nothing is queued before this play, so the clock reads as running
+    // until the song ends.
     play_to_the_end(&mut app);
     wait_for(&mut app, "the song did not stop at its end", |app| {
         !app.is_playing() && app.position() == 0
     });
     assert!(!app.state().playing);
 
+    // A loop or a pattern never stops, so the seek can be waited for. A
+    // stop still queued from before reads as not playing until the play
+    // behind it lands.
+    let go_round = |app: &mut App, what: &str| {
+        play_to_the_end(app);
+        wait_for(app, "the seek did not land", |app| app.position() >= 360);
+        wait_for(app, what, |app| app.position() < 360);
+    };
     app.apply(Command::ToggleLoop);
     assert!(app.state().looping);
-    play_to_the_end(&mut app);
-    wait_for(&mut app, "the loop did not go round", |app| {
-        app.position() < 360
-    });
+    go_round(&mut app, "the loop did not go round");
     assert!(app.is_playing());
     app.apply(Command::Stop);
     app.apply(Command::ToggleLoop);
@@ -357,10 +361,7 @@ fn the_song_stops_at_its_end_unless_it_loops_or_a_pattern_plays() {
     app.apply(Command::SelectPattern(1));
     let state = app.state();
     assert!(!state.song_mode && !state.looping && state.pattern == 1);
-    play_to_the_end(&mut app);
-    wait_for(&mut app, "the pattern did not go round", |app| {
-        app.position() < 360
-    });
+    go_round(&mut app, "the pattern did not go round");
     assert!(app.is_playing());
     app.apply(Command::Stop);
     assert_eq!(app.error(), None);
