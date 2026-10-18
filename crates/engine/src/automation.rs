@@ -913,9 +913,7 @@ impl Automation {
             Some(ends) => ends,
             None => {
                 let (min, max) = project.channel(binding.channel)?.automation_range();
-                let raw =
-                    |part: i32| f64::from(low) + f64::from(part) / 12_800.0 * f64::from(high - low);
-                (raw(min), raw(max))
+                (raw_at(low, high, min), raw_at(low, high, max))
             }
         };
         let lane = self.lanes.iter().position(|lane| lane.control == found);
@@ -1060,9 +1058,26 @@ impl Automation {
     }
 }
 
+/// The raw value of a control whose range is `low` to `high` at `part` of
+/// an automation clip's 12800 steps. A plugin that leaves a parameter
+/// unbounded has the whole i32 for its range, wider than an i32 holds, so
+/// the width is taken in f64.
+fn raw_at(low: i32, high: i32, part: i32) -> f64 {
+    f64::from(low) + f64::from(part) / 12_800.0 * (f64::from(high) - f64::from(low))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_range_as_wide_as_an_i32_does_not_overflow() {
+        let (low, high) = (i32::MIN, i32::MAX);
+        assert_eq!(raw_at(low, high, 0), f64::from(low));
+        assert_eq!(raw_at(low, high, 12_800), f64::from(high));
+        assert_eq!(raw_at(low, high, 6_400), -0.5);
+        assert_eq!(raw_at(0, 100, 3_200), 25.0);
+    }
 
     fn point(x: f64, y: f64, mode: u8, tension: f32) -> Point {
         Point {
