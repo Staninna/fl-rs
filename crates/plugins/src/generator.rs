@@ -269,4 +269,12 @@ mod tests {
         assert!(generator_by_name("TestSine ").is_none());
         assert!(crate::by_name("TestSine").is_none());
     }
+
+    #[test]
+    fn every_generator_says_how_close_it_is_to_fl() {
+        for (name, _) in GENERATORS {
+            let port = crate::port::port(name);
+            assert!(port.is_some() || *name == crate::test_sine::NAME, "{name}");
+        }
+    }
 }

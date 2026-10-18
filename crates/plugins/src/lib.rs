@@ -80,6 +80,7 @@ mod parts;
 pub mod peak_controller;
 pub mod pitch_shifter;
 pub mod pitcher;
+pub mod port;
 pub mod reeverb_2;
 mod sampler;
 pub mod slicex;

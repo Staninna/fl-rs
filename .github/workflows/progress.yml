@@ -7,6 +7,7 @@ on:
       - docs/parity.md
       - docs/event-dictionary.md
       - tools/progress.py
+      - crates/plugins/src/port.rs
       - README.md
 permissions:
   contents: write

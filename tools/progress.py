@@ -1,12 +1,17 @@
-"""Write the progress block in README.md from docs/plugins.md and docs/parity.md.
+"""Write the progress block in README.md from docs/plugins.md, docs/parity.md
+and the port levels in crates/plugins/src/port.rs.
 
 Usage: python3 -I tools/progress.py
+       python3 -I tools/progress.py --check
        cargo test --release -p engine --test corpus -- --nocapture 2>&1 \\
            | python3 -I tools/progress.py --render
 
 The block sits between the progress markers in README.md: the table and
-the lists of plugins built. CI runs this on every push to main and commits
-the result, so change the docs, not the block.
+the plugins by port level. CI runs this on every push to main and commits
+the result, so change the docs and port.rs, not the block.
+
+It stops with an error when port.rs and docs/plugins.md disagree on which
+plugins are built. --check does only that, and writes nothing.
 
 --render reads a corpus render's output on stdin, passes it through, and
 writes its counts (projects with sound and in full, effect slots hosted,
@@ -31,26 +36,63 @@ def number(pattern, text, source):
     return int(found[1]), int(found[2])
 
 
+# The variants of `Port` in port.rs, strongest first, as the README names them.
+LEVELS = {
+    "Identical": "Identical",
+    "Exact": "Exact",
+    "Gaps": "Exact with gaps",
+    "Approximate": "Approximate",
+}
+
+
+def ports():
+    """Every built plugin's port level, by its lower-case name."""
+    src = ROOT / "crates/plugins/src"
+    table = (src / "port.rs").read_text(encoding="utf-8")
+    found = {}
+    for module, level in re.findall(r"\(crate::(\w+)::NAME, Port::(\w+)\)", table):
+        code = (src / f"{module}.rs").read_text(encoding="utf-8")
+        name = re.search(r'pub const NAME: &str = "(.*)";', code)
+        assert name, f"{module}.rs: no NAME for its port"
+        found[name[1].lower()] = level
+    assert found, "port.rs: no ports"
+    return found
+
+
 def block():
     plugins = (ROOT / "docs/plugins.md").read_text(encoding="utf-8")
     parity = (ROOT / "docs/parity.md").read_text(encoding="utf-8")
 
     # kind | plugin | DLL KB | render test | used by projects | status
-    rows, names = [], {"Generator": [], "Effect": []}
-    exact = documented = 0
-    for line in plugins.splitlines():
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) == 6 and cells[0] in ("Generator", "Effect"):
-            kind, name, status = cells[0], cells[1], cells[5]
-            built = status.startswith("implemented")
-            rows.append((kind, int(cells[4]), built))
-            if built:
-                rough = re.match(r"implemented[^,(]*, approximate", status)
-                names[kind].append(f"{name} (approximate)" if rough else name)
-                exact += "approximat" not in status
-                doc = re.search(r"docs/plugins/[\w.-]+\.md", status)
-                documented += bool(doc and (ROOT / doc[0]).exists())
+    levels = ports()
+    rows, by_level, unbuilt, problems = [], {level: [] for level in LEVELS}, [], []
+    documented = 0
+    table = [
+        cells
+        for cells in ([c.strip() for c in line.strip().strip("|").split("|")] for line in plugins.splitlines())
+        if len(cells) == 6 and cells[0] in ("Generator", "Effect")
+    ]
+    # FL ships a few names as both an effect and a generator; those get their kind.
+    names = [cells[1] for cells in table]
+    for kind, name, _, _, used, status in table:
+        used = int(used)
+        shown = f"{name} {kind.lower()}" if names.count(name) > 1 else name
+        level = levels.pop(name.lower(), None)
+        built = level is not None
+        if built != status.startswith("implemented"):
+            said = "has a port" if built else "has no port"
+            problems.append(f"{shown} {said} in port.rs, but docs/plugins.md says otherwise")
+        rows.append((kind, used, built))
+        if built:
+            by_level[level].append(shown)
+            doc = re.search(r"docs/plugins/[\w.-]+\.md", status)
+            documented += bool(doc and (ROOT / doc[0]).exists())
+        elif used:
+            unbuilt.append(f"{shown} ({used})")
+    problems += [f"{name} has a port in port.rs but no row in docs/plugins.md" for name in levels]
+    assert not problems, "\n".join(problems)
     built = sum(b for _, _, b in rows)
+    never = sum(1 for _, used, b in rows if not b and not used)
 
     table = [
         ("Stock generators built, of all FL ships", [b for kind, _, b in rows if kind == "Generator"]),
@@ -59,7 +101,8 @@ def block():
     lines = ["| | done | of | |", "|---|---:|---:|---|"]
     for label, of_kind in table:
         lines.append(row(label, sum(of_kind), len(of_kind)))
-    lines.append(row("Built plugins with nothing approximated", exact, built))
+    lines.append(row("Built plugins identical to FL's output", len(by_level["Identical"]), built))
+    lines.append(row("Built plugins exact, not yet checked against FL", len(by_level["Exact"]), built))
     lines.append(row("Built plugins with their own doc", documented, built))
     uses = sum(used for _, used, _ in rows)
     built_uses = sum(u for _, u, b in rows if b)
@@ -88,8 +131,7 @@ def block():
         "rest count what FL's 165 shipped projects contain, so 100% there is not 100%",
         "of FL:",
         "",
-        "- Nothing approximated: the plugin's row in `docs/plugins.md` names no",
-        "  approximation. It is read from the binary, not yet checked against FL's output.",
+        "- Identical and exact are port levels, below.",
         "- Plugin uses count once per project, and include third-party VSTs and",
         "  visualisers that will never be built, so this row cannot reach 100%.",
         "- A project has sound when anything comes out of it, even with half its plugins",
@@ -105,11 +147,23 @@ def block():
         f"  {conflict} readings conflict with PyFLP and {pyflp} rest on PyFLP alone",
         "  (`docs/parity.md`).",
         "",
-        "Built so far, most used in the shipped projects first. `docs/plugins.md` says",
-        "what is exact and what is approximated in each.",
+        "Every plugin by how close it is to FL's, most used in the shipped projects first:",
         "",
-        f"- Generators: {', '.join(names['Generator'])}.",
-        f"- Effects: {', '.join(names['Effect'])}.",
+    ]
+    for level, label in LEVELS.items():
+        names = by_level[level]
+        lines.append(f"- {label} ({len(names)}): {', '.join(names) or 'none yet'}.")
+    lines += [
+        f"- Not built, with the shipped projects that use each ({len(unbuilt)}): "
+        f"{', '.join(unbuilt)}. {never} more no shipped project uses.",
+        "",
+        "Identical means a null test against FL's own render matches sample for sample.",
+        "Exact means every part was read from the binary and rebuilt, and nothing is",
+        "known to be approximated. Exact with gaps is exact but for parts that are",
+        "approximated or left out, which `docs/plugins.md` names. Approximate means the",
+        "sound itself is rebuilt approximately. The levels live in",
+        "`crates/plugins/src/port.rs`, and CI fails when it and `docs/plugins.md`",
+        "disagree on what is built.",
         "",
         "`tools/progress.py` writes this block from the docs.",
     ]
@@ -168,6 +222,9 @@ def row(label, done, total):
 
 
 def main():
+    if sys.argv[1:] == ["--check"]:
+        block()
+        return
     if sys.argv[1:] == ["--render"]:
         record_render()
     readme = ROOT / "README.md"

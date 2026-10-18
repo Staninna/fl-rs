@@ -21,6 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # cpal links against ALSA on Linux.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # The plugins port.rs names and the ones docs/plugins.md calls built agree.
+      - run: python3 -I tools/progress.py --check
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
   test:
