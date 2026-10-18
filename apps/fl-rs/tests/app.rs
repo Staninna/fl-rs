@@ -326,22 +326,29 @@ fn the_song_stops_at_its_end_unless_it_loops_or_a_pattern_plays() {
         return;
     }
     // The bar is 384 ticks and two seconds long. From tick 360 the end is
-    // an eighth of a second away.
+    // an eighth of a second away. The seek lands when the output device
+    // next calls back, which a CI machine can be slow to do.
     let play_to_the_end = |app: &mut App| {
         app.apply(Command::Play);
         app.apply(Command::Seek(360));
         assert!(app.state().playing);
-        std::thread::sleep(Duration::from_millis(400));
+        wait_for(app, "the seek did not land", |app| {
+            app.position() >= 360 || !app.is_playing()
+        });
     };
     play_to_the_end(&mut app);
-    assert!(!app.is_playing() && !app.state().playing);
-    assert_eq!(app.position(), 0);
+    wait_for(&mut app, "the song did not stop at its end", |app| {
+        !app.is_playing() && app.position() == 0
+    });
+    assert!(!app.state().playing);
 
     app.apply(Command::ToggleLoop);
     assert!(app.state().looping);
     play_to_the_end(&mut app);
+    wait_for(&mut app, "the loop did not go round", |app| {
+        app.position() < 360
+    });
     assert!(app.is_playing());
-    assert!(app.position() < 360, "tick {}", app.position());
     app.apply(Command::Stop);
     app.apply(Command::ToggleLoop);
 
@@ -351,6 +358,9 @@ fn the_song_stops_at_its_end_unless_it_loops_or_a_pattern_plays() {
     let state = app.state();
     assert!(!state.song_mode && !state.looping && state.pattern == 1);
     play_to_the_end(&mut app);
+    wait_for(&mut app, "the pattern did not go round", |app| {
+        app.position() < 360
+    });
     assert!(app.is_playing());
     app.apply(Command::Stop);
     assert_eq!(app.error(), None);
