@@ -123,11 +123,17 @@ The corpus render plays every shipped project offline and prints how many have s
 
     cargo test --release -p engine --test corpus -- --nocapture
 
+The profile harness times every shipped project the way the app plays it: 20 s from the start and 10 s from a quarter, a half and three quarters in, in calls of 512 frames. Per project it prints how many times faster than realtime it plays, its 99th percentile and slowest call against the 10.7 ms a call may take, how many calls ran over, and a hash of everything it put out:
+
+    FL_RS_CORPUS="<FL Studio>/Data" taskset -c 2 cargo run --release -p engine --example profile
+
+`--frames 1024` sets the call size, `--whole` plays each song once from start to end, and a word keeps the projects whose path contains it. A change meant to keep the sound must keep every hash. Compare hashes taken at the same call size on the same machine: some plugins work once per block, so a different call size sounds a little different, and each OS's maths library rounds `sin` and `pow` its own way. The numbers move with a laptop's clock, so compare medians of three runs pinned to one core.
+
 ## Running
 
     FL_RS_DATA="<FL Studio>/Data" cargo run -p fl-rs -- song.flp
 
-A project named on the command line starts playing once it has loaded. `FL_RS_DATA` is where samples are looked up and where the browser starts, and without it samples are looked up beside the project. Use `--release` for playback; the debug build is too slow for realtime audio. `demo_cmd.txt` lists demo projects that play well.
+A project named on the command line starts playing once it has loaded. `FL_RS_DATA` is where samples are looked up and where the browser starts, and without it samples are looked up beside the project. The debug build optimises the audio crates, so it plays as fast as `--release`. `demo_cmd.txt` lists demo projects that play well.
 
 ## Continuing development
 
