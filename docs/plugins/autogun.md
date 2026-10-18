@@ -74,13 +74,15 @@ save:    Write(u32 0x00130003)                       // version 19 high word
            13 articulators, 4 curves (vtable+0x10)
 restore: v = Read(u32); v == 0x7fffffff or v >= 0x130004: ignore
          v > 0xffff: v >>= 16
-         block: 0xc bytes (8 before v7), then 0xf4 bytes less what each older version lacks
+         block: 0xc bytes (8 before v8), then 0xf4 bytes less what each older version lacks
          v < 18: string as i32 n + n ansi bytes; v > 18: the seed
          v < 4, v < 10, v < 5, v < 6: articulators and curves rebuilt (not read here)
 ```
 
-`autogun.rs` reads versions 13 to 19 (the block is 0x100 bytes from 13
-on); older ones are turned down.
+`autogun.rs` reads versions 0 to 19. The block is 0x100 bytes from 13 on.
+Older versions save a shorter block and leave out some articulators and
+curves; [ogun.md](ogun.md) section 1 lists what each one lacks. Before
+version 14 `autogun.rs` ignores the 1/sqrt weighting byte (+0x226).
 
 ### The block (plugin+0x12c, 0x100 bytes)
 
@@ -300,7 +302,8 @@ A21) is plain `exp`, and the CPU-specific random paths are taken to match
 the generic one. The envelope runner is `harmor_art.rs`'s port of the same
 shared class. A seed 2 of 0 draws from a counter that starts at 0 here and
 at a process-wide value in FL, so the render test's notes differ from FL's
-note by note. Qualities 0, 2, 3, 4 keep the 6-point interpolator and leave
-out the output oversampling filter. Portamento (colour 14 notes),
+note by note. Quality 0 reads with FL's linear interpolator
+(`FUN_00610ef0`). Qualities 2, 3 and 4 keep the default's 6-point
+interpolator and leave out the output oversampling filter. Portamento (colour 14 notes),
 velocity-to-envelope mode 2 and the host's polyphony limit are left out;
 16 voices, the oldest taken first.

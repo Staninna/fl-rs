@@ -44,7 +44,7 @@
 //! attack rate and falls at the decay rate; a note off makes it, and the
 //! modulators' depths, fall at their release rates. Modulator 1 can also
 //! be heard as it is, by the modulator thru. One LFO adds vibrato, and it
-//! is stepped every 100 samples of every voice, so it runs faster for every
+//! is stepped every 101 samples of every voice, so it runs faster for every
 //! voice that sounds. A voice ends when its envelope is under 0.0002.
 //!
 //! FL scales the voice so that its envelope starts at 1.2 whatever the
@@ -108,7 +108,8 @@ const QUIET: f32 = 0.0002;
 /// A depth envelope under this, as bits, goes to 0 at the end of a block.
 const TINY_BITS: i32 = 0x3380_0000;
 
-/// The samples between two steps of the LFO, for each voice.
+/// What a voice counts down from between two steps of the LFO: a step
+/// every 101 samples, as the count runs from 100 to 0.
 const LFO_STEP: i32 = 100;
 
 /// The table FL reads the modulators from, its index the phase's top 14

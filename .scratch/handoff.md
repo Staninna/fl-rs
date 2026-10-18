@@ -1,12 +1,14 @@
 # Handoff, 2026-10-18
 
-The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed. fmt, clippy and `cargo test -p plugins` with the corpus are green at `f2905bd`. A release corpus render there hears 111 of 165 projects. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
+The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed and CI is green on Linux, macOS and Windows. fmt, clippy and `cargo test -p plugins` with the corpus pass at `20f0570`, where a release corpus render hears 112 of 165 projects and 33 play in full. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
 
 ## Since 2026-10-14
 
 The five plugins below are committed, one commit each, after fmt and seven clippy fixes in `pitch_shifter.rs`. Ogun's commit carries the Autogun interpolator fix too: `Setup::linear` has to be filled in `autogun.rs`, which also holds Ogun's changes, so the two could not be split. Rows in `docs/plugins.md` are filled in from the notes.
 
-Still open for each of Ogun, Fruity DX10, Frequency Splitter and Pitch Shifter: `docs/plugins/<name>.md`. Drumpad is committed as a draft: not in `lib.rs` or `generator.rs`, never compiled. Next for it: add the mod lines and the generator entry, fix what fails to compile, run its tests.
+Drumpad is hosted since `20f0570`. Building it fixed two bugs in the draft: `Voice::play` now takes its buffer out while it renders, and `trigger` lays line `i` out with `512 - 4i` slots, not `128 - i`. Every built plugin now has its doc, Drumpad and the four above included, and `docs/plugins/autogun.md` reads versions 0 to 19 and quality 0's linear interpolator as the code does. `.scratch/notes/` keeps the handovers these docs grew from.
+
+Next: find what keeps 132 of the 165 projects from playing in full. The corpus render's per-project lines name what each left out or approximated; rank those before picking more plugins.
 
 `docs/plugins.md` now carries the corpus render count ("111 of 165 shipped projects have sound"), and `tools/progress.py` builds the README's progress block (table and lists of plugins built) from it and `docs/parity.md`. Pipe every corpus render into `python3 -I tools/progress.py --render` and it updates that line itself.
 
@@ -40,9 +42,9 @@ Every agent stopped mid-task and wrote its handover to `.scratch/notes/<plugin>.
 - Corpus render, about 3 minutes in release: `FL_RS_CORPUS="/shared/code/fl-studio-target/winehome/prefix/drive_c/Program Files/Image-Line/FL Studio 2026/Data" cargo test --release -q -p engine --test corpus -- --nocapture`. Its summary lines give the audible count and the most-silent and most-passed lists.
 - `.scratch/agent-rules.md` is the rules file each plugin agent was given. Point new agents at it.
 
-## Next by corpus usage (at f2905bd)
+## Next by corpus usage (at 20f0570)
 
-Silent generators: FLEX 13 (patches in obfuscated `.flexpack` archives), Drumpad 6 (drafted), Fruity DrumSynth Live 2, Fruity Slicer 2, GMS 2.
+Silent generators: FLEX 13 (patches in obfuscated `.flexpack` archives), Fruity DrumSynth Live 2, Fruity Slicer 2, GMS 2, Kepler 2.
 Passed-through effects: Fruity Wrapper 17 (third-party VSTs, out of scope), Patcher 15, Wave Candy 11 and ZGameEditor Visualizer 7 (visualisers, passing through is right), Emphasis 5.
 
 Smaller follow-ups: Pitcher's MIDI Out routing, Emphasis, Vintage Chorus. `tools/plugstate/dump213.py` undercounts 8-bit preset names.

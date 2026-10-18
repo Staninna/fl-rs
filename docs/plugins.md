@@ -2,7 +2,7 @@
 
 Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a render-test project exists for it in `Data/System/Render tests/`, and how many of the 165 shipped projects use it (by event 201 name). Sizes are the x64 DLL. Status column is ours; empty means not started.
 
-Corpus render at `e82ab06`: 111 of 165 shipped projects have sound with the stock plugins built so far, and 32 of 165 play in full. 921 of 1021 effect slots on inserts that sound reaches are hosted, and 173 of 215 generator channels with notes play.
+Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stock plugins built so far, and 33 of 165 play in full. 928 of 1028 effect slots on inserts that sound reaches are hosted, and 180 of 215 generator channels with notes play.
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
@@ -52,11 +52,11 @@ Corpus render at `e82ab06`: 111 of 165 shipped projects have sound with the stoc
 | Generator | FL Keys | 4114 | yes | 8 | implemented in crates/plugins (state, the four shipped wavetables read at runtime from FL's `Wavtables` (raw files directly, RIFF/Ogg files decoded by the host), key groups, velocity layers, mda's integer reader, envelope, release, overdrive, muffle filter, key pan, treble shelf, LFO, comb and the 32-voice limit exact; approximated: the channel volume is not raised to the velocity sensitivity with the velocity (every corpus state), pitch does not follow slides, Roto Organ's load-time resample), docs/plugins/fl-keys.md |
 | Effect | EQUO | 3728 | yes | 7 | implemented in crates/plugins (state versions 3 and 4, the curve with morph, shift, mix and master, 31 band passes with the 2x bands, balance law, gain lines, add mode, per-tick smoothing, silence sleep and the 2x allpass resampler exact; the send to another insert is not routed, so send only passes the input on (no corpus state has a send); a loaded state starts settled where FL glides in from flat; ticks counted from tempo and PPQ; the HQ render flag that forces oversampling is never set), docs/plugins/equo.md |
 | Effect | Hyper Chorus | 3846 |  | 7 | implemented in crates/plugins (exact from the C++ engine in Engine_x64.dll: the 4 or 8 modulated lines with Catmull-Rom reads, feedback and movement panning, Q 0.5 filters, high-pass fade, equal-power mix, and the parameter glide that brings a loaded state in from the defaults; differences: f32 rounds to nearest where FL's block rounds toward zero, every instance starts its LFOs where FL's first instance does, a new rate re-applies the parameters; no render test, so unit tests and the 20 corpus states), docs/plugins/hyper-chorus.md |
-| Effect | Pitch Shifter | 4161 | yes | 7 | implemented in crates/plugins (both engines from Shared/ildsp_x64.dll; IPP's FFT and the CRT maths swapped for Rust's, the sync button's load order inferred), no doc yet: .scratch/notes/pitch-shifter.md |
+| Effect | Pitch Shifter | 4161 | yes | 7 | implemented in crates/plugins (both engines from Shared/ildsp_x64.dll; IPP's FFT and the CRT maths swapped for Rust's, the sync button's load order inferred), docs/plugins/pitch-shifter.md |
 | Effect | Wave Candy | 4247 |  | 7 | |
 | Effect | Fruity NoteBook 2 | 3528 |  | 6 | |
-| Generator | Fruity DX10 | 4230 | yes | 6 | implemented in crates/plugins (mda DX10 with a second modulator, all 74 shipped states exact; the instrument tab and the mod X/Y filter not built), no doc yet: .scratch/notes/dx10.md |
-| Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), no doc yet: .scratch/notes/ogun.md |
+| Generator | Fruity DX10 | 4230 | yes | 6 | implemented in crates/plugins (mda DX10 with a second modulator, all 74 shipped states exact; the instrument tab and the mod X/Y filter not built), docs/plugins/fruity-dx10.md |
+| Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), docs/plugins/ogun.md |
 | Effect | Emphasis | 4045 | yes | 5 | |
 | Effect | Vintage Chorus | 3849 | yes | 5 | |
 | Generator | Fruity Slicer | 4483 | yes | 5 | |
@@ -67,7 +67,7 @@ Corpus render at `e82ab06`: 111 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Flanger | 3629 | yes | 4 | |
 | Generator | Morphine | 1704 |  | 4 | |
 | Effect | Distructor | 3571 |  | 3 | |
-| Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), no doc yet: .scratch/notes/frequency-splitter.md |
+| Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
 | Effect | Fruity Phaser | 3622 | yes | 3 | |
 | Effect | Fruity X-Y Controller | 3684 |  | 3 | |
@@ -85,7 +85,7 @@ Corpus render at `e82ab06`: 111 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Wrapper | 5856 |  | 2 | |
 | Effect | Hardcore | 626 | yes | 2 | |
 | Effect | Transporter | 4072 | yes | 2 | |
-| Generator | Drumpad | 4008 | yes | 2 | drafted in crates/plugins, not registered or compiled yet: .scratch/notes/drumpad.md |
+| Generator | Drumpad | 4008 | yes | 2 | implemented in crates/plugins (state, the 38 parameters with their velocity slots, the membrane lines, mallet, LOW, MID, HIGH and SOF filters, hold, lo-fi, the 38 kHz render and its resampler exact, and every shipped state plays exact; approximated: 32 voices where FL has 99, membrane room sized per state, each instance's noise starting where FL's first does, DMP1 and DMP2 states turned down), docs/plugins/drumpad.md |
 | Generator | Fruity Granulizer | 4371 | yes | 2 | |
 | Generator | Fruity Wrapper | 5857 |  | 2 | |
 | Generator | Minisynth | 542 | yes | 2 | |
