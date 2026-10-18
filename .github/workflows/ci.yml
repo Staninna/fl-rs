@@ -1,8 +1,28 @@
 name: ci
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+# A newer push to the same branch or pull request cancels the run before it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # cpal links against ALSA on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
   test:
     strategy:
       fail-fast: false
@@ -12,13 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       # cpal links against ALSA on Linux, and the ui snapshot test draws
       # through lavapipe.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev mesa-vulkan-drivers
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
