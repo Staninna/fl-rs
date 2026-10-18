@@ -1,6 +1,24 @@
-# Handoff, 2026-10-18
+# Handoff, 2026-10-19
 
 The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed and CI is green on Linux, macOS and Windows. fmt, clippy and `cargo test -p plugins` with the corpus pass at `20f0570`, where a release corpus render hears 112 of 165 projects and 33 play in full. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
+
+## Perf work, 2026-10-19
+
+Heavy demo projects dropped out in the app. Done so far, each measured with `crates/engine/examples/profile.rs` (README, Tests):
+
+- Dev builds optimise `dsp`, `engine` and `plugins` (`c4dbd55`). Unoptimised, Ookay - Thief played at 0.4x realtime.
+- An automation range is taken in f64 (`6df1664`). Harmor leaves part parameter 106 and globals 772 and 774 unbounded, so their range read back as the whole i32 and `high - low` overflowed in five projects. Harmor should clamp them to FL's ranges, read from its binary; not done.
+- The `profile` feature on `engine` times each generator and slot per call (`af47740`); the harness prints the six costliest per project with `--features profile`.
+- Fruity Convolver's 128-tap direct filter sums 16 frames side by side (`976e553`) and the sine bank runs 8 partials side by side (`7d196fb`). Both keep all 165 harness hashes. On one core, Stroll Up went from 0.9x to 1.3x realtime and Harmless Galactic from 1.9x to 2.6x.
+
+Open, waiting on the user:
+
+- Denormals. 3.1 billion floating point assists in one corpus run, about 13-20% of all its time, mostly in Vocodex, Frequency Splitter, Fruity Convolver, LuxeVerb, Sytrus and Harmor's effects. FL's engine runs with flush-to-zero and denormals-are-zero: `FLEngine_x64.dll` keeps MXCSR `0x9f80` at `0x13e4d50`, ORs in `0x40` at `0x63ab2b` when the CPU has DAZ, and loads it at `0x63a6d0` from 71 places. With both flags set around `Engine::process` (`no_denormals` crate), the corpus takes 17% less time, Stroll Up plays at 1.9x instead of 0.9x and Vocodex demo at 6.1x instead of 2.1x, and 10 of 165 hashes change. It needs `unsafe`, which the workspace forbids, so it waits for a decision.
+- Spreading Fruity Convolver's large partitions over the calls before their deadline (FL runs those over 4096 samples on a worker thread) would cut its bursts, but every partition adds into one output buffer, so the order of the sums and the low bits change.
+
+Found on the way: 44 of 165 projects come out a little different at 1024 frames a call than at 512, and 55 at 256. A note splits the blocks, so plugins that work once per block (Harmless, Harmor, DX10, Drumpad, PanOMatic, Multiband Compressor and others) see other block lengths. FL's output depends on its buffer size for such plugins too, so this may be right; it is why the harness hashes are only compared at one call size.
+
+Left from the perf plan: Maximus's saturator is FL's `powf` and `atan` per sample, with no range where it can be skipped without changing bits, so it stays. Running inserts in parallel waits until the denormal decision, and then for measurements of how much of a block it could take off.
 
 ## Since 2026-10-14
 
