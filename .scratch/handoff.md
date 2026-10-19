@@ -11,14 +11,21 @@ Heavy demo projects dropped out in the app. Done so far, each measured with `cra
 - The `profile` feature on `engine` times each generator and slot per call (`af47740`); the harness prints the six costliest per project with `--features profile`.
 - Fruity Convolver's 128-tap direct filter sums 16 frames side by side (`976e553`) and the sine bank runs 8 partials side by side (`7d196fb`). Both keep all 165 harness hashes. On one core, Stroll Up went from 0.9x to 1.3x realtime and Harmless Galactic from 1.9x to 2.6x.
 
-Open, waiting on the user:
+- The engine mixes with flush-to-zero and denormals-are-zero set (`d7b27bc`), as FL's engine does: `FLEngine_x64.dll` keeps MXCSR `0x9f80` at `0x13e4d50`, ORs in `0x40` at `0x63ab2b` when the CPU has DAZ, and loads it at `0x63a6d0` from 71 places. Before, one corpus run took 3.1 billion floating point assists, mostly in Vocodex, Frequency Splitter, Fruity Convolver, LuxeVerb, Sytrus and Harmor's effects. The user chose this over keeping the bits: 10 of 165 harness hashes changed, only below about 1e-38. `Engine::process_with` is the one place the workspace allows `unsafe` (the lint is `deny`, not `forbid`).
 
-- Denormals. 3.1 billion floating point assists in one corpus run, about 13-20% of all its time, mostly in Vocodex, Frequency Splitter, Fruity Convolver, LuxeVerb, Sytrus and Harmor's effects. FL's engine runs with flush-to-zero and denormals-are-zero: `FLEngine_x64.dll` keeps MXCSR `0x9f80` at `0x13e4d50`, ORs in `0x40` at `0x63ab2b` when the CPU has DAZ, and loads it at `0x63a6d0` from 71 places. With both flags set around `Engine::process` (`no_denormals` crate), the corpus takes 17% less time, Stroll Up plays at 1.9x instead of 0.9x and Vocodex demo at 6.1x instead of 2.1x, and 10 of 165 hashes change. It needs `unsafe`, which the workspace forbids, so it waits for a decision.
-- Spreading Fruity Convolver's large partitions over the calls before their deadline (FL runs those over 4096 samples on a worker thread) would cut its bursts, but every partition adds into one output buffer, so the order of the sums and the low bits change.
+All together, against the code before this work, medians of three runs at 512 frames: the corpus takes 25% less time, and 16 projects have a call over budget instead of 23 (13 at the 1024 frames PipeWire uses here). Stroll Up plays at 2.2x realtime instead of 0.6x, Vocodex demo at 5.5x instead of 2.1x, and Ookay - Thief and Harmless Galactic no longer run over.
+
+What the worst left spend their time on (`--features profile`): Bien Duro and Bombs Away - I'm Awake spread it over many inserts (the top six parts under 30%), so running inserts in parallel would pay there. Harmless Essentials is 99.5% one Harmless and Square a Saw - Oxygen 66% one Harmor, so only a faster plugin helps those. Harmor's partial bank already runs eight partials side by side.
+
+Next, for the user to choose:
+
+- Spread Fruity Convolver's large partitions over the calls before their deadline (FL runs those over 4096 samples on a worker thread). It cuts its bursts, but every partition adds into one output buffer, so the order of the sums and the low bits change. The user said: decide after the denormal fix, with the harness's numbers.
+- Run independent inserts in parallel (plan step 5): workers at real-time priority and in macOS's audio workgroup, a fallback to serial, the denormal flags on every worker, and tests for routes, sends and sidechains.
+- Harmless and Harmor themselves: their own reverb, Maximus and partial banks.
 
 Found on the way: 44 of 165 projects come out a little different at 1024 frames a call than at 512, and 55 at 256. A note splits the blocks, so plugins that work once per block (Harmless, Harmor, DX10, Drumpad, PanOMatic, Multiband Compressor and others) see other block lengths. FL's output depends on its buffer size for such plugins too, so this may be right; it is why the harness hashes are only compared at one call size.
 
-Left from the perf plan: Maximus's saturator is FL's `powf` and `atan` per sample, with no range where it can be skipped without changing bits, so it stays. Running inserts in parallel waits until the denormal decision, and then for measurements of how much of a block it could take off.
+Maximus's saturator is FL's `powf` and `atan` per sample, with no range where it can be skipped without changing bits, so it stays as it is.
 
 ## Since 2026-10-14
 
