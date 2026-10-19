@@ -18,7 +18,9 @@ thiserror = "2"
 ui = { path = "crates/ui" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Deny and not forbid, so that the one place that sets the processor's
+# denormal flags, Engine::process_with, can allow it.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "warn"

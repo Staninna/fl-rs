@@ -328,12 +328,29 @@ impl Engine {
     }
 
     /// [`Engine::process`] with the curves the graph was built with.
+    ///
+    /// It runs with the processor flushing denormals to zero, as FL's
+    /// engine does: `FLEngine_x64.dll` sets flush-to-zero and, where the
+    /// processor has it, denormals-are-zero (MXCSR `0x9fc0`) around its
+    /// processing. A tail that decays below f32's normal range otherwise
+    /// costs a microcode assist on every operation, about a sixth of all
+    /// the time FL's demo projects take.
     pub(crate) fn process_with(
         &mut self,
         curves: &dyn Curves,
         out_left: &mut [f32],
         out_right: &mut [f32],
     ) {
+        #[allow(unsafe_code)]
+        // SAFETY: the flags change only how numbers below f32's normal
+        // range round, nothing this crate or the plugins rely on, and they
+        // are put back as they were when the closure returns or unwinds.
+        unsafe {
+            no_denormals::no_denormals(|| self.mix(curves, out_left, out_right));
+        }
+    }
+
+    fn mix(&mut self, curves: &dyn Curves, out_left: &mut [f32], out_right: &mut [f32]) {
         let len = out_left.len().min(out_right.len());
         out_left[len..].fill(0.0);
         out_right[len..].fill(0.0);
