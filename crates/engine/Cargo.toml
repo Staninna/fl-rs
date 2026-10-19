@@ -11,6 +11,7 @@ cpal = "0.18"
 dsp = { path = "../dsp" }
 flp = { workspace = true }
 model = { workspace = true }
+no_denormals = "0.3"
 plugins = { path = "../plugins" }
 rtrb = "0.4"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "pcm", "flac", "mp3", "ogg", "vorbis"] }
