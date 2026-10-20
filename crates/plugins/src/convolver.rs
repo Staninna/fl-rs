@@ -35,12 +35,15 @@
 //!
 //! 1. With normalize on, the impulse is scaled so that the loudest 300 ms
 //!    of it has an RMS of 0.05, over both sides.
-//! 2. It is resampled to the song's rate times the stretch, which is
+//! 2. With self-convolution at `a = v / 1000`, each side becomes
+//!    `(1 - a/2) x + (a/2) (x * x) / |x|`, the convolution cut to the
+//!    impulse's length and `|x|` the louder side's L2 norm.
+//! 3. It is resampled to the song's rate times the stretch, which is
 //!    `2^(v / 1000)`, by FL's interpolator at its 256-point quality
 //!    ([`dsp::interpolator`]).
-//! 3. A level equaliser curve at `y` scales it by `(3^(2y) - 1) / 2`, which
+//! 4. A level equaliser curve at `y` scales it by `(3^(2y) - 1) / 2`, which
 //!    is 1 at the half it starts at.
-//! 4. What is under 2^-24 at its end is cut off, and what is under it at
+//! 5. What is under 2^-24 at its end is cut off, and what is under it at
 //!    its start counts as delay, with the pre-delay: `(7^(v / 1000) - 1) /
 //!    12` seconds.
 //!
@@ -62,8 +65,8 @@
 //!
 //! - An impulse whose file is not found, or is a kind of file that is not
 //!   decoded, leaves the plugin out: its input passes as it is.
-//! - The four layers, the self-convolution and an equaliser curve that is
-//!   not level are left out.
+//! - The four layers and an equaliser curve that is not level are left
+//!   out.
 //! - FL sleeps after as much silence as the impulse is long.
 
 use crate::menvelope::{Class, MEnvelope, Reader};
@@ -627,6 +630,62 @@ enum Source {
     Loaded(Impulse),
 }
 
+/// Mix an impulse with itself convolved (`FUN_0087b670`): FL's sample
+/// convolver (`FUN_00624000`) takes the impulse as its own kernel, scaled
+/// to unit energy by the louder side's (`FUN_006241b0`, mode 0), and mixes
+/// the convolution, cut to the impulse's length, back in at `amount / 2`
+/// over the impulse at `1 - amount / 2` (`FUN_00625690`). Each side is
+/// convolved with itself. FL trims the kernel's silent ends and aligns its
+/// output to undo the trim, which leaves the convolution as it is in a
+/// textbook; FL works it out by overlap-save through IPP's float FFT, and
+/// this through one float FFT of both sides at once.
+fn self_convolve(left: &mut [f32], right: &mut [f32], amount: f32) {
+    let len = left.len().min(right.len());
+    if len == 0 {
+        return;
+    }
+    let energy = |side: &[f32]| {
+        side.iter()
+            .map(|v| f64::from(*v) * f64::from(*v))
+            .sum::<f64>()
+    };
+    let loudest = energy(&left[..len]).max(energy(&right[..len])).sqrt();
+    let unit = if loudest == 0.0 {
+        1.0
+    } else {
+        (1.0 / loudest) as f32
+    };
+    let half = amount * 0.5;
+    let (wet, dry) = (half * unit, 1.0 - half);
+
+    // The left side in the real part and the right in the imaginary: the
+    // spectrum of each is half the sum or the difference of the spectrum
+    // and its mirror, and the square of each goes back the same way.
+    let size = (2 * len).next_power_of_two();
+    let fft = Fft::new(size);
+    let (mut re, mut im) = (vec![0f32; size], vec![0f32; size]);
+    re[..len].copy_from_slice(&left[..len]);
+    im[..len].copy_from_slice(&right[..len]);
+    fft.run(&mut re, &mut im, false);
+    let (mut out_re, mut out_im) = (vec![0f32; size], vec![0f32; size]);
+    for k in 0..size {
+        let mirror = (size - k) % size;
+        let (zr, zi, mr, mi) = (re[k], im[k], re[mirror], -im[mirror]);
+        let (lr, li) = ((zr + mr) * 0.5, (zi + mi) * 0.5);
+        let (rr, ri) = ((zi - mi) * 0.5, -(zr - mr) * 0.5);
+        let (l2r, l2i) = (lr * lr - li * li, 2.0 * lr * li);
+        let (r2r, r2i) = (rr * rr - ri * ri, 2.0 * rr * ri);
+        out_re[k] = l2r - r2i;
+        out_im[k] = l2i + r2r;
+    }
+    fft.run(&mut out_re, &mut out_im, true);
+    let scale = 1.0 / size as f32;
+    for t in 0..len {
+        left[t] = left[t] * dry + out_re[t] * scale * wet;
+        right[t] = right[t] * dry + out_im[t] * scale * wet;
+    }
+}
+
 /// The loudest RMS of both sides of an impulse over a window of 300 ms,
 /// which is what FL's normalize brings to 0.05.
 fn loudest(impulse: &Impulse) -> f32 {
@@ -753,15 +812,16 @@ impl Convolver {
         let target = f64::from(self.hz as f32 * stretch);
         let ratio = target / f64::from(impulse.rate);
         let resampled = (ratio - 1.0).abs() > 1e-9;
-        let ready = |side: &[f32]| -> Vec<f32> {
-            let scaled: Vec<f32> = side.iter().map(|v| v * gain).collect();
-            if resampled {
-                interpolator::resample(&scaled, ratio, QUALITY)
-            } else {
-                scaled
-            }
-        };
-        let (mut left, mut right) = (ready(&impulse.left), ready(&impulse.right));
+        let scaled = |side: &[f32]| -> Vec<f32> { side.iter().map(|v| v * gain).collect() };
+        let (mut left, mut right) = (scaled(&impulse.left), scaled(&impulse.right));
+        if self.self_convolution != 0 {
+            let amount = self.self_convolution as f32 / 1000.0;
+            self_convolve(&mut left, &mut right, amount);
+        }
+        if resampled {
+            left = interpolator::resample(&left, ratio, QUALITY);
+            right = interpolator::resample(&right, ratio, QUALITY);
+        }
         // A level equaliser curve is a gain: 1 at a half and 4 at the top.
         if let Some(level) = self.equaliser {
             let x = level * 2.0;
@@ -1013,10 +1073,8 @@ impl Effect for Convolver {
             }
             Source::Loaded(_) => {}
         }
-        if !self.layers_flat || self.self_convolution != 0 || self.equaliser.is_none() {
-            Fidelity::Approximate(
-                "Convolver's envelope layers, self-convolution and equaliser curve are left out",
-            )
+        if !self.layers_flat || self.equaliser.is_none() {
+            Fidelity::Approximate("Convolver's envelope layers and equaliser curve are left out")
         } else {
             Fidelity::Exact
         }
@@ -1350,6 +1408,51 @@ mod tests {
         let (mut left, mut right) = ([1.0f32, 0.0], [0.0f32, 0.0]);
         convolver.process(&mut left, &mut right);
         assert!((left[0] - 0.75).abs() < 1e-6 && (right[0] + 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn self_convolution_mixes_in_the_impulse_convolved_with_itself_at_unit_energy() {
+        let left: Vec<f32> = (0..300)
+            .map(|n| ((n * 37 % 101) as f32 - 50.0) / 60.0)
+            .collect();
+        let right: Vec<f32> = (0..300)
+            .map(|n| ((n * 53 % 89) as f32 - 44.0) / 70.0)
+            .collect();
+        let energy = |side: &[f32]| side.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+        let norm = energy(&left).max(energy(&right)).sqrt();
+        let amount = 0.6;
+        let (mut l, mut r) = (left.clone(), right.clone());
+        self_convolve(&mut l, &mut r, amount);
+        for (got, side) in [(&l, &left), (&r, &right)] {
+            for t in [0, 1, 50, 299] {
+                let conv: f64 = (0..=t)
+                    .map(|j| f64::from(side[j]) * f64::from(side[t - j]))
+                    .sum();
+                let want = f64::from(side[t]) * (1.0 - 0.3) + 0.3 * conv / norm;
+                assert!(
+                    (f64::from(got[t]) - want).abs() < 1e-4,
+                    "{t}: {} {want}",
+                    got[t]
+                );
+            }
+        }
+        // A state with it plays exactly.
+        let mut saved = Saved::new(wav_file(44_100, &[0.5, 0.25]));
+        saved.wheels[1] = 500;
+        let mut convolver = saved.load();
+        assert_eq!(convolver.fidelity(), Fidelity::Exact);
+        // 0.5 and 0.25 over a norm of sqrt(0.3125): 0.75 of the impulse
+        // and a quarter of its square.
+        let unit = 0.25 / 0.3125f32.sqrt();
+        let heard = click(&mut convolver, 4);
+        assert!(
+            (heard[0] - (0.5 * 0.75 + 0.25 * unit)).abs() < 1e-5,
+            "{heard:?}"
+        );
+        assert!(
+            (heard[1] - (0.25 * 0.75 + 0.25 * unit)).abs() < 1e-5,
+            "{heard:?}"
+        );
     }
 
     #[test]
