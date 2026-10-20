@@ -122,6 +122,30 @@ pub trait Generator: Send {
     /// that does not say: its notes keep the pitch they started with.
     fn set_note_pitch(&mut self, _voice: u32, _pitch: f32) {}
 
+    /// A tick of the song starts with the next block, as
+    /// [`Effect::tick`](crate::Effect::tick) has it. A host calls this for
+    /// a generator that has [`Generator::controller_outputs`], once for
+    /// every tick and in order, after the notes due on the tick's first
+    /// frame. The others take no notice. This allocates nothing.
+    fn tick(&mut self, _ppq_tick: u64, _tempo: f64) {}
+
+    /// What the plugin puts out beside sound, for a generator that is an
+    /// internal controller (Fruity Envelope Controller and its kind): one
+    /// value from 0 to 1 for every output, as the last
+    /// [`Generator::tick`] left them, as
+    /// [`Effect::controller_outputs`](crate::Effect::controller_outputs)
+    /// has them. Empty for a generator that is no controller, and the
+    /// length never changes.
+    fn controller_outputs(&self) -> &[f32] {
+        &[]
+    }
+
+    /// Whether the last [`Generator::tick`] moved one of the
+    /// [`Generator::controller_outputs`]. Asking takes the answer away.
+    fn controller_changed(&mut self) -> bool {
+        false
+    }
+
     /// Add one block of the generator's sound to what `left` and `right`
     /// hold. The two sides are as long as each other.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]);
@@ -240,6 +264,9 @@ const GENERATORS: &[(&str, Make)] = &[
     }),
     (crate::kepler::NAME, || {
         Box::new(crate::kepler::Kepler::default())
+    }),
+    (crate::keyboard_controller::NAME, || {
+        Box::new(crate::keyboard_controller::KeyboardController::default())
     }),
     (crate::minisynth::NAME, || {
         Box::new(crate::minisynth::MiniSynth::default())

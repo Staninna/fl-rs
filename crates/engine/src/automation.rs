@@ -60,6 +60,12 @@
 //! 2^30ths already, so the 16384 that FL's host multiplies an older
 //! controller's value by is not on it.
 //!
+//! A generator can be such a plugin too, Fruity Keyboard Controller and
+//! its kind: its output `n` is control `0x8000 + n` of its channel, and
+//! the channel is hosted whether a note reaches it or not. The engine
+//! ticks it after the effect slots, with the notes due on the tick's first
+//! frame already handed over.
+//!
 //! The controls are the ones a clip can drive, but for the tempo, which
 //! the clock is built from before the song plays. A control that a
 //! controller has set stays the controller's: a clip on the same control
@@ -76,7 +82,7 @@ use crate::sequence::Song;
 use crate::voice::{self, Follow, Voice};
 use crate::{Curves, clock::Clock};
 use flp::event::layout::Point;
-use model::rec::{ControllerOutput, control};
+use model::rec::{ChannelOutput, ControllerOutput, control};
 use model::{Binding, ChannelKind, LinkKind, Project, RecTarget};
 use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, TAU};
@@ -560,9 +566,20 @@ impl Lane {
     }
 }
 
+/// Where a controller plugin is: in an effect slot or on a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Controller {
+    /// The insert and the slot.
+    Slot(u16, u8),
+    /// The channel, by the index its 64 has.
+    Channel(u16),
+}
+
 /// A link from an output of a controller plugin to a control.
 struct Link {
-    source: ControllerOutput,
+    source: Controller,
+    /// The output's place among the plugin's.
+    output: u16,
     control: Control,
     /// The lowest and the highest raw value the control takes: where the
     /// output's 0 and its 1 land.
@@ -794,12 +811,28 @@ impl Automation {
             let Some(ids) = link.link else {
                 continue;
             };
-            let Some(source) = project.rec_target(ids.source).controller_output() else {
-                continue;
+            let from = project.rec_target(ids.source);
+            let (source, output, outputs) = match from.controller_output() {
+                Some(ControllerOutput {
+                    insert,
+                    slot,
+                    output,
+                }) => {
+                    let plugin = mix::hosted(project, insert, slot);
+                    let outputs = plugin.map_or(0, |plugin| plugin.controller_outputs().len());
+                    (Controller::Slot(insert, slot), output, outputs)
+                }
+                None => {
+                    let Some(ChannelOutput { channel, output }) = from.channel_output() else {
+                        continue;
+                    };
+                    let plugin = project.channel(channel);
+                    let plugin = plugin.and_then(|channel| generator::hosted(channel, None, None));
+                    let outputs = plugin.map_or(0, |plugin| plugin.controller_outputs().len());
+                    (Controller::Channel(channel), output, outputs)
+                }
             };
-            let outputs = mix::hosted(project, source.insert, source.slot)
-                .map_or(0, |plugin| plugin.controller_outputs().len());
-            if usize::from(source.output) >= outputs {
+            if usize::from(output) >= outputs {
                 continue;
             }
             self.controller_links += 1;
@@ -820,6 +853,7 @@ impl Automation {
             };
             self.links.push(Link {
                 source,
+                output,
                 control,
                 range: (f64::from(low), f64::from(high)),
                 formula,
@@ -837,19 +871,33 @@ impl Automation {
     /// The inserts with a controller plugin that drives one of those
     /// links. A mixer hosts them whether sound reaches them or not.
     pub fn controller_inserts(&self) -> BTreeSet<u16> {
-        let inserts = self.links.iter().map(|link| link.source.insert);
+        let inserts = self.links.iter().filter_map(|link| match link.source {
+            Controller::Slot(insert, _) => Some(insert),
+            Controller::Channel(_) => None,
+        });
         inserts.collect()
     }
 
-    /// Take the outputs of the controller in a slot of an insert, from 0
-    /// to 1, as its tick left them. [`Automation::carry`] sets the
-    /// controls they drive.
-    pub fn drive(&mut self, insert: u16, slot: u8, outputs: &[f32]) {
+    /// The channels with a controller plugin that drives one of those
+    /// links. The rack hosts their generators whether a note reaches
+    /// them or not.
+    pub fn controller_channels(&self) -> BTreeSet<u16> {
+        let channels = self.links.iter().filter_map(|link| match link.source {
+            Controller::Channel(channel) => Some(channel),
+            Controller::Slot(..) => None,
+        });
+        channels.collect()
+    }
+
+    /// Take the outputs of the controller at `source`, from 0 to 1, as
+    /// its tick left them. [`Automation::carry`] sets the controls they
+    /// drive.
+    pub fn drive(&mut self, source: Controller, outputs: &[f32]) {
         for link in &mut self.links {
-            if (link.source.insert, link.source.slot) != (insert, slot) {
+            if link.source != source {
                 continue;
             }
-            let Some(output) = outputs.get(usize::from(link.source.output)) else {
+            let Some(output) = outputs.get(usize::from(link.output)) else {
                 continue;
             };
             let raw = link.raw_at(f64::from(*output));
