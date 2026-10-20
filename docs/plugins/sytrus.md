@@ -788,6 +788,21 @@ with `0x62bb20` (`parts::glide`) over the call, by no more than
 `TAudioRenderer+0x34 x voice+0x40` (`0.001 x 44100 / SR` times the unison
 gain) a frame; the voice's first tick takes them as they are.
 
+Release and end (`Voice_Release` `0x86d5a0`, `0x872290`). A release sets
+the voice's stage to 5 and lets every envelope and LFO run go
+(`0x787c90`); with u8 0x4fe on (the default) the release segments first
+take the host's release time for the note (`Voice_ProcessEvent` 5,
+`GetRelTime`; 1 for an ordinary note, and not followed here). At each
+tick a released voice's stage is 9 unless an envelope is still running;
+at stage 9 the row gains aim at 0, so they glide down at the output cap,
+and once every output and send gain is 0 the voice is freed (stage 10).
+The implementation had cut a voice when its envelopes ended and faded
+one without envelopes over 10 ms.
+
+Free run (operator switch 3, `part+0x863`): the start phase adds
+`0x62b8 x f`, the frames the plugin has played times the operator's
+frequency (`0x86af20`); the implementation had a random phase.
+
 ## 11. The harmonics filter and the band limit (`0x847900`, `0x86ace0`, `0x8471d0`)
 
 `TSytrusShape` keeps two IPP real FFTs, orders 14 and 12 (`0x848980`;
