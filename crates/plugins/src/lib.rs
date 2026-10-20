@@ -61,6 +61,8 @@ pub mod frequency_splitter;
 pub mod fruit_kick;
 pub mod fruity_slicer;
 mod generator;
+pub mod gms;
+mod gms_fx;
 pub mod gross_beat;
 pub mod harmless;
 pub mod harmor;
