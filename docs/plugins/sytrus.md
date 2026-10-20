@@ -465,8 +465,8 @@ the kernel above over a 16384-sample table (section 10), band limited and filter
 and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
 law and the output levels; the send path goes through the effects
-(section 9). Left out, each named in `fidelity`: the comb and the phaser,
-the arpeggiator and portamento. Every state reports `Approximate`. The 597
+(section 9). Left out: the arpeggiator and portamento (section 14 lists what
+`fidelity` names). Every state reports `Approximate`. The 597
 REC parameters are the host's (section 6).
 
 ## 6. The REC parameters as a host moves them
@@ -874,6 +874,71 @@ own generator (`0x8088405 x + 1`) rather than IPP's, each plucked
 operator with room for 64 strings of up to 16384 samples (5.4 Hz) made
 with the state; a note that finds none free plays the operator silent.
 
+## 13. The filters (`0x86ebe0`, `0x870820`, `0x86af20`, `0x86ea60`)
+
+Read in run 6 line by line, with the SSE kernels `0x627010` / `0x6270d0`
+(state variable), `0x626e80` / `0x626f40` (ladder low / high), `0x625bd0`
+(biquad), `0x6274e0` / `0x6275c0` (four pole ladder, without and with
+drive) and `0x780d90` (phaser), all installed by `0x628580` when the CPU
+flag is set. Types (`+0x170`, the block's i32 at +0x2c): 0 state variable,
+1 / 2 ladder low / high, 3 low pass, 4 band pass, 5 notch, 6 high pass, 7
+all pass, 8 low shelf, 9 peak, 10 high shelf (the cookbook kinds 1..8 of
+`0x6253c0`, by the table at `0x8fd29c`), 11 a four pole ladder with drive
+(Love Philter's Mango) and 12 a phaser. Types 1..10 have the Love Philter
+constants the implementation already had (`0x870380..0x8704c0`).
+
+Voice start (`0x86af20`), per filter: `+0x174 = order - 1`; detuned
+(`+0x178`) when that is above 2, which takes 2 off; spread `+0x17c = 1 /
+(+0x174 + 1)`, for type 11 `1 / (+0x174 / 4 + 1)`; width `+0x180 =
+order` (its reciprocal for type 5) times `ln 2 / 2` (`0x90e500`); the
+alternate switch `+0x189 = part+0x881`; twice the rate `+0x188 =
+(part+0x880 and SR <= 176399) or (type 11 and SR <= 88199)`; scale
+`+0x184 = 44100 / SR`, halved at twice the rate; every stage's frequency
+at 0.5 and damping at 1 (0.1 for the ladders); for type 12 the phaser's
+`order` pairs of allpasses (`order + 5` with the alternate switch,
+`0x780c80`).
+
+Design, a tick (`c` cutoff and `r` resonance with their articulators):
+
+```
+alternate (types 1..10): r *= (c + 1) / 2;  the detuned rows' earlier stages: fc^0.5 (2) or fc^0.75 (3) (0x8fd2a0)
+0 state variable: f = (26^c - 1) x 0.0396; stage k (last first) frequency = T[min(round(f x 2048), len - 1)], f detuned
+                  damping (stage 0) = 1 (r <= 0), 0.2 (r >= 1), else 1 - 0.8 r; squared with the alternate switch
+                  T (0x86ea60, at the rate and at twice it) = 2 sin(asin(min(1, (i / 2048 + 0.01) / 2)) x 44100 / SR), i = 0..4095,
+                  up to the first value >= 1.175, which is 1.175
+                  gains: level(slider / 128) x articulator 4..6; with more than one stage each to the power of the spread (0 at <= 0)
+11 ladder:        fc = min((201^c - 1) 0.01495, 3); drive = (251^(low x art4 / 128) - 1) 0.12
+                  feedback = r > 0 ? (0.6 min(drive, 1) + 1.9) min(r, 1) : 0, with stages (fb + 1)^spread - 1
+                  g = min((fc + 0.01) x scale / 2, 0.65); pole = 1 - exp(-pi (1.873 g^3 + 0.4955 g^2 - 0.649 g + 0.9988) g)
+                  stage feedback = -fb (-3.9364 g^2 + 1.8409 g + 0.9968); drive >= 0.001: pole /= drive, heat = tanh(4 / drive),
+                  alternate: feedback x heat; gain = (1 / heat) (1 - feedback) / 2; else gain = (1 - feedback) / 2
+12 phaser:        fc = (151^c - 1) x 0.006666; feedback = 0 (r <= 0), 0.9 (r >= 1), else ln(10 r + 1) / ln 11 x 0.9
+                  w = min((fc + 1e-4) x scale, 1); a = (1 - w) / (1 + w)
+8..10 gain:       (8^(low x art4 / 64) - 1) / 8 + 1 / 8 (0x871f90, 0x871f98, 0x871fa8)
+```
+
+A render call (`0x870820`), per filter: the inputs summed; the volume
+(articulator 1) glided from where it was by no more than
+`TAudioRenderer+0x38` a sample (`0x62bb20`) and applied; with no stage
+that is all. At twice the rate every sample is written twice
+(`0x62c6d0`) and the pairs averaged afterwards (`0x62d280`). Type 0: the
+three gains glide (the same start and step for every stage), every
+stage's frequency glides and stage 0's damping glides (the others keep
+theirs, 1), all over the doubled frames and capped; with the alternate
+switch each stage's damping becomes `(stage 0: damping x scale; others:
+scale) / max(frequency start, end)`; per stage `low += band f; high = x -
+(band q + low); band += high f` in f64 with f and q stepping, then `out =
+low g0 + band g1 + high g2` in f32. Types 1, 2: frequency and keep glide,
+`speed += (x - low) g; low += speed; out = low (or x - low); speed *=
+k`. Types 3..10: the biquads, a stage after another. Type 11: per stage
+`p0 += ((y fb + x) - p0) pole; p1..p3 the same; y = p3 old + p3 new; out =
+gain y`, with drive every pole through `x (a^2 + 3a + 6) / (a^3 + 3a^2 +
+6a + 12)` of its value times the drive. Type 12: `s = s fb + x`, then per
+pair of allpasses `y = -a s + z0; z0 = s + a y; t = -a y + z1; z1 = y + a
+t; s = t`, `out = s`. Then the waveshaper (section 8).
+
+Implemented as read (`sytrus/filter.rs`).
+
 ## Corrections
 
 - Operator `header[0]` is the phase wheel, not an output level: the voice
@@ -904,3 +969,7 @@ with the state; a note that finds none free plays the operator silent.
 - Operator articulator 5 is the plucked operator's damping, which
   `0x86aba0` turns into the pluck's loop filter; it is no shape morph, and
   it does nothing for an operator that is not plucked.
+- Filter types 11 and 12 are a four pole ladder with drive (Love
+  Philter's Mango) and a phaser, not a comb and a phaser; the state
+  variable filter (type 0) has its own frequency table and damping, not
+  Love Philter's.
