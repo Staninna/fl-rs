@@ -5,10 +5,13 @@
 //! projects FL ships is its `Data` directory. The browser shows it. Without
 //! it samples are looked up beside the project. With `FL_RS_TRACE` set, the
 //! position and the peaks go to stderr once a second while a project plays.
+//!
+//! `fl-rs --render project.flp out.wav` renders the song to a WAV without
+//! opening a window, as the app's Render does.
 
 use eframe::egui;
 use fl_rs::App;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use ui::Command;
 
@@ -70,7 +73,34 @@ impl eframe::App for Desktop {
     }
 }
 
+/// Render `project` to `out`, with the samples under `FL_RS_DATA` or beside
+/// the project, at the rate the app renders at with no output open.
+fn render(project: &Path, out: &Path) -> Result<(), String> {
+    let root = std::env::var_os("FL_RS_DATA").map_or_else(
+        || project.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        PathBuf::from,
+    );
+    let notice = fl_rs::render(&fl_rs::read(project)?, &root, 44_100, out)?;
+    if let Some(notice) = notice {
+        eprintln!("{notice}");
+    }
+    Ok(())
+}
+
 fn main() -> eframe::Result {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--render") {
+        let [_, project, out] = args.as_slice() else {
+            eprintln!("usage: fl-rs --render <project.flp> <out.wav>");
+            std::process::exit(2);
+        };
+        if let Err(e) = render(Path::new(project), Path::new(out)) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let mut app = App::new(std::env::var_os("FL_RS_DATA").map(PathBuf::from));
     let traced = std::env::var_os("FL_RS_TRACE").map(|_| Instant::now());
     let options = eframe::NativeOptions {
