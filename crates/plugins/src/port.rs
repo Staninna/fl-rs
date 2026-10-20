@@ -54,6 +54,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::multiband_compressor::NAME, Port::Exact),
     (crate::ogun::NAME, Port::Approximate),
     (crate::panomatic::NAME, Port::Gaps),
+    (crate::parametric_eq::NAME, Port::Exact),
     (crate::parametric_eq_2::NAME, Port::Gaps),
     (crate::peak_controller::NAME, Port::Gaps),
     (crate::pitch_shifter::NAME, Port::Gaps),

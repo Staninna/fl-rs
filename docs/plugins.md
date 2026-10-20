@@ -68,7 +68,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Morphine | 1704 |  | 4 | |
 | Effect | Distructor | 3571 |  | 3 | |
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
-| Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
+| Effect | Fruity Parametric EQ | 3727 | yes | 3 | implemented in crates/plugins, docs/plugins/fruity-parametric-eq.md |
 | Effect | Fruity Phaser | 3622 | yes | 3 | |
 | Effect | Fruity X-Y Controller | 3684 |  | 3 | |
 | Effect | Low Lifter | 3704 | yes | 3 | |
