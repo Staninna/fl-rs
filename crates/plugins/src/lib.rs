@@ -133,6 +133,7 @@ pub mod test_sine;
 mod testing;
 pub mod three_osc;
 pub mod transient_processor;
+pub mod transporter;
 pub mod vintage_chorus;
 pub mod vintage_phaser;
 pub mod vocodex;
