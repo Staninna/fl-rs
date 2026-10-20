@@ -38,7 +38,7 @@ pub(crate) fn fft_size(step: i32, rate: i32) -> usize {
 
 /// A complex number in floats.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct C32 {
+pub(crate) struct C32 {
     re: f32,
     im: f32,
 }
@@ -52,15 +52,16 @@ impl C32 {
     }
 }
 
-/// An unscaled radix-2 FFT of one size, both ways.
+/// An unscaled radix-2 FFT, both ways, of the size it is made for or of
+/// any smaller power of two: its turns are the same numbers.
 #[derive(Debug, Clone, PartialEq, Default)]
-struct Fft {
+pub(crate) struct Fft {
     /// `e^(-2 pi i k / n)` for the first half of the turn.
     turns: Vec<C32>,
 }
 
 impl Fft {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         let turns = (0..n / 2)
             .map(|k| {
                 let (sin, cos) = (-TAU * k as f64 / n as f64).sin_cos();
@@ -76,6 +77,8 @@ impl Fft {
     /// The transform of `data` in place; `inverse` turns the other way.
     fn run(&self, data: &mut [C32], inverse: bool) {
         let n = data.len();
+        let size = 2 * self.turns.len();
+        debug_assert!(n <= size);
         let mut j = 0;
         for i in 1..n {
             let mut bit = n >> 1;
@@ -91,7 +94,7 @@ impl Fft {
         let mut len = 2;
         while len <= n {
             let half = len / 2;
-            let step = n / len;
+            let step = size / len;
             for start in (0..n).step_by(len) {
                 for k in 0..half {
                     let mut turn = self.turns[k * step];
@@ -117,8 +120,10 @@ impl Fft {
 
 /// One filter of a context (`FUN_1801e3040`, 0xa8 bytes): the filter's
 /// spectrum, a block of input a side and the overlap-added output a side.
+/// Frequency Splitter's mode runs four of them itself. A filter made room
+/// for `n` runs any smaller FFT too.
 #[derive(Debug, Clone, PartialEq, Default)]
-struct Convolver {
+pub(crate) struct Convolver {
     /// The filter's spectrum (`+0x38`).
     spectrum: Vec<C32>,
     /// The block filling up, its upper half always 0 (`+0x10`, `+0x18`).
@@ -131,7 +136,8 @@ struct Convolver {
 }
 
 impl Convolver {
-    fn make_room(&mut self, n: usize) {
+    /// Buffers for an FFT of `n`. This allocates.
+    pub(crate) fn make_room(&mut self, n: usize) {
         self.spectrum.resize(n, C32::default());
         for side in 0..2 {
             self.input[side].resize(n, C32::default());
@@ -139,8 +145,14 @@ impl Convolver {
         }
     }
 
+    /// The filter of a zero magnitude, with empty blocks: what op 2 makes.
+    pub(crate) fn silence(&mut self) {
+        self.clear();
+        self.spectrum.fill(C32::default());
+    }
+
     /// `FUN_1801e2a50`: the place and both blocks back to 0.
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.at = 0;
         for side in 0..2 {
             self.input[side].fill(C32::default());
@@ -153,7 +165,7 @@ impl Convolver {
     /// `n / 2`, mirrored, transformed back and over `n`: the zero-phase
     /// impulse, `n / 2` late. Its `n / 2` taps from `n / 4` under
     /// `sin(i pi / (n/2 - 1))`, and nothing after them.
-    fn design(&mut self, magnitudes: &[f32], n: usize, fft: &Fft, work: &mut [C32]) {
+    pub(crate) fn design(&mut self, magnitudes: &[f32], n: usize, fft: &Fft, work: &mut [C32]) {
         let (half, quarter) = (n / 2, n / 4);
         let work = &mut work[..n];
         work.fill(C32::default());
@@ -189,7 +201,13 @@ impl Convolver {
     /// `FUN_1801e2ad0`: a frame in, the frame the filter has for it out.
     /// Every `n / 2` frames the block goes through the filter and is
     /// added onto the output's tail.
-    fn frame(&mut self, frame: [f32; 2], n: usize, fft: &Fft, work: &mut [C32]) -> [f32; 2] {
+    pub(crate) fn frame(
+        &mut self,
+        frame: [f32; 2],
+        n: usize,
+        fft: &Fft,
+        work: &mut [C32],
+    ) -> [f32; 2] {
         let half = n / 2;
         let at = self.at;
         let mut out = [0.0; 2];
@@ -313,8 +331,7 @@ impl LinearPhase {
         self.fresh = false;
         self.kernel.fill(0.0);
         for filter in &mut self.filters {
-            filter.clear();
-            filter.spectrum.fill(C32::default());
+            filter.silence();
         }
         for side in &mut self.history {
             side.fill(0.0);
@@ -419,6 +436,23 @@ mod tests {
         fft.run(&mut data, true);
         for (a, b) in data.iter().zip(&before) {
             assert!((a.re / 16.0 - b.re).abs() < 1e-5 && (a.im / 16.0).abs() < 1e-5);
+        }
+    }
+
+    /// An FFT made for 64 runs one of 16 on the same turns, to the bit.
+    #[test]
+    fn a_smaller_fft_is_the_same_as_its_own() {
+        let input: Vec<C32> = (0..16)
+            .map(|n| C32 {
+                re: (n as f32 * 0.3).sin(),
+                im: (n as f32 * 0.7).cos(),
+            })
+            .collect();
+        for inverse in [false, true] {
+            let (mut big, mut own) = (input.clone(), input.clone());
+            Fft::new(64).run(&mut big, inverse);
+            Fft::new(16).run(&mut own, inverse);
+            assert_eq!(big, own);
         }
     }
 
