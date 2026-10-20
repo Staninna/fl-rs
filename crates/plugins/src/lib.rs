@@ -38,6 +38,7 @@ pub mod balance;
 pub mod bassdrum;
 pub mod blood_overdrive;
 pub mod boobass;
+pub mod center;
 pub mod chorus;
 pub mod compressor;
 pub mod control_surface;
@@ -77,6 +78,7 @@ pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
 pub mod multiband_compressor;
+pub mod mute_2;
 pub mod notebook;
 pub mod notebook_2;
 pub mod ogun;
@@ -85,6 +87,7 @@ pub mod parametric_eq_2;
 mod parts;
 pub mod pass_through;
 pub mod peak_controller;
+pub mod phase_inverter;
 pub mod pitch_shifter;
 pub mod pitcher;
 pub mod port;
@@ -343,6 +346,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
     let is = |known: &str| name.eq_ignore_ascii_case(known);
     if is(balance::NAME) {
         Some(Box::new(balance::Balance::default()))
+    } else if is(center::NAME) {
+        Some(Box::new(center::Center::default()))
+    } else if is(mute_2::NAME) {
+        Some(Box::new(mute_2::Mute2::default()))
+    } else if is(phase_inverter::NAME) {
+        Some(Box::new(phase_inverter::PhaseInverter::default()))
     } else if is(blood_overdrive::NAME) {
         Some(Box::new(blood_overdrive::BloodOverdrive::default()))
     } else if is(chorus::NAME) {

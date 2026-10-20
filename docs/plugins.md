@@ -113,10 +113,10 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Effect | FL Studio Mobile Rack FX | 8036 |  | 0 | |
 | Effect | Fruity 7 Band EQ | 3584 |  | 0 | |
 | Effect | Fruity Big Clock | 3514 |  | 0 | |
-| Effect | Fruity Center | 3504 | yes | 0 | |
+| Effect | Fruity Center | 3504 | yes | 0 | implemented in crates/plugins (exact: the follower `v += (x - y) a; y += v; v *= 0.96` per side in doubles, its pace `4.567e-6 * 44100 / rate` as a single, the state under 2^-24 cleared after each block; its render test sits inside a Fruity Wrapper), docs/plugins/fruity-center.md |
 | Effect | Fruity LSD | 4398 |  | 0 | |
-| Effect | Fruity Mute 2 | 3605 | yes | 0 | |
-| Effect | Fruity Phase Inverter | 3603 | yes | 0 | |
+| Effect | Fruity Mute 2 | 3605 | yes | 0 | implemented in crates/plugins (exact: mutes below half way, L, L + R or R by thirds of the Channel wheel, a muted side multiplied by 0 or zeroed as FL does; its render test sits inside a Fruity Wrapper), docs/plugins/fruity-mute-2.md |
+| Effect | Fruity Phase Inverter | 3603 | yes | 0 | implemented in crates/plugins (exact: Off, Left or Right by thirds of the wheel, half to even, the side's sign bits flipped; its render test sits inside a Fruity Wrapper), docs/plugins/fruity-phase-inverter.md |
 | Effect | Fruity Spectroman | 3668 |  | 0 | |
 | Effect | Fruity X-Y-Z Controller | 5661 |  | 0 | |
 | Effect | Multiband Delay | 3840 |  | 0 | |
