@@ -360,9 +360,14 @@ kernel[N/2] = kernel[N/2 - 1]
 engine: op 5 = SR, op 6 = window[0x374], op 2 = N, op 3 = kernel          // under the host lock
 ```
 
-The engine (`FUN_1801c8a70`) runs two overlapped FFT convolvers and
-crossfades between them over `N * window` samples when a new kernel arrives.
-So linear phase is "the minimum-phase IIR design, made zero-phase": the
+The engine (`FUN_1801c8a70`, op 4 per frame) runs two FFT convolvers and
+crossfades between them linearly over `SR * window` frames when a new
+kernel arrives, the new one primed with the last N frames. Each convolver
+(`FUN_1801e2c90`) takes the zero-phase impulse of the magnitudes, keeps the
+N/2 taps from N/4 under a half sine window (`sinf(i pi / (N/2 - 1))`), and
+convolves by IPP complex FFTs made with `IPP_FFT_NODIV_BY_ANY` (neither
+direction scales) in blocks of N/2. `.scratch/notes/fruity-parametric-eq-2.md`
+has the addresses and what is left to read for a rebuild. So linear phase is "the minimum-phase IIR design, made zero-phase": the
 magnitude is identical to the IIR path, the latency is 3N/4 samples (1536 at
 44.1 kHz with the default step 2).
 
@@ -384,8 +389,10 @@ first.
 
 ## 4. What stays unknown
 
-- The 13 polyphase coefficients at `0x0074e290` were not transcribed; read
-  them with `pe.py g 0x74e290 13`.
+- The IPP calls of the linear phase convolver (`FUN_1801e1960`,
+  `FUN_1801e2ad0`), the 2^x polynomial and clamps of the kernel builder,
+  and what sets the band flag at `+0x1371` that snaps a bin to a band's
+  centre.
 - `0x364`, `0x2078`, `0x20e8..0x20ea`, `0x212c`, `0x20ec`: saved GUI state,
   values constant in the corpus.
 - What distinguishes state version 7 from 8 (same bytes).
