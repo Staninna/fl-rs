@@ -24,7 +24,10 @@
 use crate::harmless::shape;
 use crate::harmor_art::{ArtRun, Articulator, Inputs, smoothing};
 use crate::harmor_fx::{FX_BLOCK, GlobalFx};
-use crate::harmor_state::{ARTICULATORS, GLOBAL_PARAMS, PARAMS, PART_PARAMS, Part, State};
+use crate::harmor_state::{
+    ARTICULATORS, GLOBAL_PARAMS, GLOBAL_RANGES, KNOB_RANGES, PARAMS, PART_PARAMS, PART_RANGES,
+    Part, SMOOTHING_RANGE, State,
+};
 use crate::maximus::Maximus;
 use crate::menvelope::MEnvelope;
 use crate::{Effect, Fidelity, Generator, NoteOn, StateError};
@@ -2494,6 +2497,12 @@ fn fst_state(bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Which articulator and which of its eight quick knobs part parameter
+/// `k` is: 95 to 342 are `95 + 8 a + j` (`FUN_00879380`).
+fn knob(k: usize) -> Option<(usize, usize)> {
+    (95..343).contains(&k).then(|| ((k - 95) / 8, (k - 95) % 8))
+}
+
 impl Generator for Harmor {
     fn set_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
         self.state = State::parse(bytes)?;
@@ -2602,9 +2611,17 @@ impl Generator for Harmor {
         PARAMS
     }
 
+    /// An articulator's quick knob reads from its envelope or LFO, where
+    /// FL keeps it (`0x879540`); the rest from the parameter array.
     fn param(&self, index: usize) -> f32 {
         if index < 2 * PART_PARAMS {
-            self.state.parts[index / PART_PARAMS].params[index % PART_PARAMS] as f32
+            let (p, k) = (index / PART_PARAMS, index % PART_PARAMS);
+            let part = &self.state.parts[p];
+            match knob(k) {
+                Some((a, j)) if j < 4 => part.arts[a].envelope.knobs[j] as f32,
+                Some((a, j)) => part.arts[a].lfo.knobs[j - 4] as f32,
+                None => part.params[k] as f32,
+            }
         } else if index < PARAMS {
             self.state.globals.params[index - 2 * PART_PARAMS] as f32
         } else {
@@ -2619,13 +2636,30 @@ impl Generator for Harmor {
         let value = value.round() as i32;
         if index < 2 * PART_PARAMS {
             let (p, k) = (index / PART_PARAMS, index % PART_PARAMS);
-            let value = match crate::harmor_state::PART_RANGES.get(k) {
-                Some((min, max, _)) => value.clamp(*min, *max),
-                None => value,
+            // A quick knob goes to the articulator's envelope or LFO and
+            // not to the array (`0x879540`, `FUN_007a2c10`).
+            if let Some((a, j)) = knob(k) {
+                let (min, max) = KNOB_RANGES[j];
+                let value = value.clamp(min, max);
+                let (state, dsp) = (&mut self.state.parts[p].arts[a], &mut self.parts[p].arts[a]);
+                if j < 4 {
+                    state.envelope.knobs[j] = value;
+                    dsp.envelope.set_knobs(state.envelope.knobs);
+                } else {
+                    state.lfo.knobs[j - 4] = value;
+                    dsp.lfo.set_knobs(state.lfo.knobs);
+                }
+                return;
+            }
+            let (min, max) = match PART_RANGES.get(k) {
+                Some((min, max, _)) => (*min, *max),
+                None => SMOOTHING_RANGE,
             };
-            self.state.parts[p].params[k] = value;
+            self.state.parts[p].params[k] = value.clamp(min, max);
         } else {
             let g = index - 2 * PART_PARAMS;
+            let (min, max) = GLOBAL_RANGES[g];
+            let value = value.clamp(min, max);
             self.state.globals.params[g] = value;
             if (49..53).contains(&g)
                 && let Some(m) = &mut self.compression
@@ -2752,6 +2786,61 @@ mod tests {
         assert!((h3 / h1 - 1.0 / 3.0).abs() < 0.03, "{}", h3 / h1);
         // One part alone is at 0.5.
         assert!((h1 - 0.5).abs() < 0.05, "{h1}");
+    }
+
+    #[test]
+    fn every_parameter_is_kept_inside_its_control() {
+        let mut plugin = Harmor::default();
+        // The range a host reads back is what the plugin keeps a value in.
+        let range = |plugin: &mut Harmor, index: usize| {
+            plugin.set_param(index, f32::MIN);
+            let low = plugin.param(index);
+            plugin.set_param(index, f32::MAX);
+            (low, plugin.param(index))
+        };
+        // Part 1's volume articulator's release knob, and an LFO's speed
+        // and pulse width.
+        assert_eq!(plugin.param(106), 128.0);
+        assert_eq!(range(&mut plugin, 106), (0.0, 256.0));
+        assert_eq!(plugin.state.parts[0].arts[1].envelope.knobs[3], 256);
+        assert_eq!(plugin.state.parts[0].params[106], 0);
+        assert_eq!(range(&mut plugin, 386 + 99), (512.0, 65_536.0));
+        assert_eq!(range(&mut plugin, 102), (-112.0, 112.0));
+        // A smoothing, Mod X, Mod Z, the strum mode, the last compression
+        // band.
+        assert_eq!(range(&mut plugin, 343), (0.0, 1001.0));
+        assert_eq!(range(&mut plugin, 772), (0.0, 512.0));
+        assert_eq!(range(&mut plugin, 774), (0.0, 512.0));
+        assert_eq!(range(&mut plugin, 779), (0.0, 3.0));
+        assert_eq!(range(&mut plugin, 824), (0.0, 2000.0));
+        for index in 0..PARAMS {
+            let (low, high) = range(&mut plugin, index);
+            assert!(low > -1e6 && high < 1.1e6, "{index}: {low} {high}");
+        }
+        // The release knob is heard: a note on part 1 with a volume
+        // envelope rings out four times as long at 256 as at 64, but for
+        // the fade and a tick.
+        let rings = |knob: f32| {
+            let mut plugin = Harmor::default();
+            let envelope = &mut plugin.state.parts[0].arts[1].envelope;
+            envelope.active = true;
+            envelope.points = vec![
+                dsp::curve::Point::new(0.0, 1.0),
+                dsp::curve::Point::new(0.1, 1.0),
+                dsp::curve::Point::new(0.1, 0.0),
+            ];
+            envelope.decay = 1;
+            envelope.loop_end = 1;
+            plugin.load();
+            plugin.set_param(106, knob);
+            plugin.note_on(note(60));
+            render(&mut plugin, 4410);
+            plugin.note_off(1);
+            let (l, _) = render(&mut plugin, 44_100);
+            l.iter().rposition(|v| v.abs() > 1e-3).unwrap_or(0)
+        };
+        let (short, long) = (rings(64.0), rings(256.0));
+        assert!(long > 5 * short / 2 && short > 0, "{short} {long}");
     }
 
     #[test]
