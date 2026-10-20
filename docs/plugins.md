@@ -71,7 +71,7 @@ Corpus render at `3d38082`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | implemented in crates/plugins, docs/plugins/fruity-parametric-eq.md |
 | Effect | Fruity Phaser | 3622 | yes | 3 | implemented in crates/plugins (exact), docs/plugins/fruity-phaser.md |
 | Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, `FPF_NoProcess`; state, the ten parameters, speed and acceleration at the song's PPQ, the point's motion each tick, tension, min and max and the two outputs exact, with Rust's `ln`, `exp`, `atan` and `sin_cos` for Delphi's; a loaded pad starts at its levels, inferred from FL ticking while stopped; the joystick input left out, none in the corpus), docs/plugins/fruity-x-y-controller.md |
-| Effect | Low Lifter | 3704 | yes | 3 | |
+| Effect | Low Lifter | 3704 | yes | 3 | implemented in crates/plugins (exact: the Faust processor in Shared/ildsp_x64.dll transcribed and matched bit for bit against its own code run under an emulator, over the corpus and preset states at five rates; the MSVC runtime's FMA3 tanf, expf and powf and Delphi's Ln and Exp for the wheel curves transcribed too; the render's one-second quiet gate and the 10 ms lookahead latency as FL's; not yet nulled against FL), docs/plugins/low-lifter.md |
 | Generator | BassDrum | 3973 | yes | 3 | implemented in crates/plugins (oscillator table and noise sample read from FL's data at runtime), docs/plugins/bassdrum.md |
 | Generator | BooBass | 3599 | yes | 3 | implemented in crates/plugins (samples read from FL's BooBass_Eng_x64.dll at runtime), docs/plugins/boobass.md |
 | Generator | Fruit Kick | 4168 | yes | 3 | implemented in crates/plugins (articulation block approximated), docs/plugins/fruit-kick.md |
@@ -103,7 +103,7 @@ Corpus render at `3d38082`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Vocoder | 3725 | yes | 1 | |
 | Effect | Fruity dB Meter | 3576 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` keeps the peaks and copies the block with `ippsCopy_64s`; the meter is left out), docs/plugins/fruity-db-meter.md |
 | Effect | Razer Chroma | 3952 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` reads the block for the keyboard lights and copies it with `ippsCopy_64s`; the lights are left out), docs/plugins/razer-chroma.md |
-| Effect | Vintage Phaser | 3880 |  | 1 | |
+| Effect | Vintage Phaser | 3880 |  | 1 | implemented in crates/plugins (the engine_x64.dll phaser, both engines, the upsampler, halfbands, hiss, gate and delay, the same to the bit as the DLL run under an emulator but for an ULP of the sine LFO's sinf; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-phaser.md |
 | Generator | BeepMap | 4186 | yes | 1 | |
 | Generator | Drumaxx | 4319 | yes | 1 | |
 | Generator | Fruity DrumSynth Live | 1062 |  | 1 | |
