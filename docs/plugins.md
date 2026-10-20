@@ -8,7 +8,7 @@ Corpus render at `3d38082`: 112 of 165 shipped projects have sound with the stoc
 |---|---|---:|:---:|---:|---|
 | Effect | Fruity Parametric EQ 2 | 3942 | yes | 54 | implemented in crates/plugins (cookbook and matched HQ filters and both 2x resamplers exact; linear phase approximated), docs/plugins/fruity-parametric-eq-2.md |
 | Effect | Fruity Limiter | 3777 | yes | 52 | implemented in crates/plugins, docs/plugins/fruity-limiter.md |
-| Effect | Maximus | 5766 | yes | 40 | implemented in crates/plugins (IIR, FIR and linear-phase crossovers (the engine's FFT convolver, its rounding aside), curves, detectors, saturators, low cut and the polyphase half-band oversampling exact; left as they were: attack and release times rounded to whole frames where FL keeps the fraction, and a slope change does not flush as FL's does), docs/plugins/maximus.md |
+| Effect | Maximus | 5766 | yes | 40 | implemented in crates/plugins (IIR, FIR and linear-phase crossovers (the engine's FFT convolver, its rounding aside), curves, detectors, saturators, low cut and the polyphase half-band oversampling exact, stage times and the flush on a slope change as FL's), docs/plugins/maximus.md |
 | Generator | 3x Osc | 4247 | yes | 39 | implemented in crates/plugins (HQ tables approximated), docs/plugins/3x-osc.md |
 | Effect | Fruity Reeverb 2 | 3742 | yes | 38 | implemented in crates/plugins (network, taps, predelay and modulation follow the engine's listing sample for sample; coefficients follow the Delphi update in f64 and are not checked bit for bit), docs/plugins/fruity-reeverb-2.md |
 | Effect | Fruity Delay 3 | 3847 |  | 31 | implemented in crates/plugins, docs/plugins/fruity-delay-3.md |

@@ -74,7 +74,7 @@
 //! says: an oversampling order past 3 or a linear-phase precision past 7,
 //! which no shipped state has.
 
-use crate::limiter::{Highest, Mean, coef, frames, gain};
+use crate::limiter::{Highest, Mean, coef, gain};
 use crate::linear_phase::LinearPhase;
 use crate::menvelope::{Class, MEnvelope, Reader};
 use crate::parametric_eq_2::HalfBand;
@@ -431,6 +431,15 @@ fn run(sections: &mut [Section], mut frame: [f32; 2]) -> [f32; 2] {
         frame = section.run(frame);
     }
     frame
+}
+
+/// A time wheel in frames at `rate`, unrounded, as `FUN_008415c0` works
+/// it: `float(501^(float(v) * 1e-4f) - 1) * 2 ms`, the power by `exp` and
+/// `ln` in doubles.
+fn wheel_frames(value: i32, rate: f64) -> f64 {
+    let x = f64::from(value as f32 * 1e-4f32);
+    let ms = f64::from(((x * 501f64.ln()).exp() - 1.0) as f32) * 2.0;
+    ms * 0.001 * rate
 }
 
 /// The linear-phase FFT size (`FUN_00847730`): `512 << precision`, halved
@@ -949,7 +958,6 @@ pub struct Maximus {
     /// the inputs the magnitudes were last asked for with, which bands
     /// still have to send theirs (`0x120`), and room for one magnitude.
     contexts: [LinearPhase; 3],
-    linear_setting: Option<LinearSetting>,
     linear_dirty: [bool; 3],
     magnitudes: Vec<f32>,
     mix: f32,
@@ -979,7 +987,6 @@ impl Default for Maximus {
             low_cut_on: false,
             oversampler: Oversampler::default(),
             contexts: Default::default(),
-            linear_setting: None,
             linear_dirty: [false; 3],
             magnitudes: Vec::new(),
             mix: 1.0,
@@ -1005,7 +1012,7 @@ impl Maximus {
     /// Have the memory for the longest time a wheel can ask for at this
     /// rate and oversampling, a second, and for the longest FIR.
     fn make_room(&mut self) {
-        let longest = frames(10_000, self.hz).max(1);
+        let longest = (wheel_frames(10_000, self.hz).round_ties_even() as usize).max(1);
         let os = self.os();
         for (b, band) in self.bands.iter_mut().enumerate() {
             band.make_room(if b == MASTER { longest } else { longest * os });
@@ -1092,24 +1099,13 @@ impl Maximus {
             (fir_half + band_delay.unwrap_or(0)) / os + master
         };
         self.hold = self.latency as i64 + (1.5 * self.hz).round_ties_even() as i64;
-        // A new magnitude for each band when what it is made of moves
-        // (FL's `FUN_00848930`).
-        if self.switches.linear {
-            let setting = self.linear_setting();
-            if self.linear_setting != Some(setting) {
-                self.linear_setting = Some(setting);
-                self.linear_dirty = [true; 3];
-            }
-        }
     }
 
     /// `FUN_00847e50`, at the start of each block: each band that has a
     /// new magnitude to send sends it once its context has finished its
     /// crossfade (ops 0xe, 5, 6, 2, 3).
     fn send_magnitudes(&mut self) {
-        let Some(setting) = self.linear_setting else {
-            return;
-        };
+        let setting = self.linear_setting();
         let window = WINDOWS[self.switches.fade.clamp(0, 3) as usize];
         for b in 0..3 {
             if !self.linear_dirty[b] || !self.contexts[b].settled() {
@@ -1311,11 +1307,13 @@ impl Maximus {
     fn tune_band(&mut self, b: usize) {
         let p: [i32; PER_BAND] = self.band_params(b).try_into().unwrap();
         let hz = self.hz;
-        // FL rounds a time at the project rate, then multiplies it by the
-        // oversampling for the three bands; the master runs at the project
-        // rate.
+        // The master runs at the project rate, the three bands at the band
+        // rate. FL rounds the delay and the window at the project rate and
+        // multiplies them by the oversampling; the stage times it keeps
+        // unrounded, at the band rate.
         let os = if b == MASTER { 1 } else { self.os() };
-        let at = |value: i32| frames(value, hz) * os;
+        let at = |value: i32| wheel_frames(value, hz).round_ties_even() as usize * os;
+        let exact = |value: i32| wheel_frames(value, hz) * os as f64;
         let compressing = (0..MASTER).any(|k| self.bands[k].effective == 0);
         let band = &mut self.bands[b];
         let held = band.effective < 2
@@ -1338,13 +1336,14 @@ impl Maximus {
         let attack = if p[ATTACK] == 0 {
             lookahead as f64
         } else {
-            at(p[ATTACK]) as f64
+            exact(p[ATTACK])
         };
-        let attack = attack * 0.8 / root(p[ATTACK_STAGES]);
+        // FL's 0.8 is a single's.
+        let attack = attack * f64::from(0.8f32) / root(p[ATTACK_STAGES]);
         let release_2 = if p[RELEASE_2] == 0 {
             attack
         } else {
-            at(p[RELEASE_2]) as f64 * 2.0 / root(p[ATTACK_STAGES])
+            exact(p[RELEASE_2]) * 2.0 / root(p[ATTACK_STAGES])
         };
         let count = p[ATTACK_STAGES] as usize;
         if band.attack.count != count {
@@ -1363,8 +1362,8 @@ impl Maximus {
             band.rms.start(window);
         }
 
-        let release = at(p[RELEASE]);
-        let count = if release > 0 {
+        let release = exact(p[RELEASE]);
+        let count = if release > 0.0 {
             p[RELEASE_STAGES] as usize
         } else {
             0
@@ -1374,7 +1373,7 @@ impl Maximus {
         }
         band.release.count = count;
         band.release.rise = 0.0;
-        band.release.fall = coef(release as f64 * 2.0 / root(p[RELEASE_STAGES]));
+        band.release.fall = coef(release * 2.0 / root(p[RELEASE_STAGES]));
 
         band.rest = band.pre * band.post * band.table.gains[0];
         band.saturator = saturator(&p, band);
@@ -1823,6 +1822,20 @@ impl Effect for Maximus {
         if let Some(range) = RANGES.get(index) {
             self.params[index] = knob_value(value, *range);
             self.update();
+            // A slope remakes the oversamplers and flushes the plugin,
+            // which wakes on the next block with sound (`FUN_008485d0`,
+            // `FUN_00846280`, 0x788 = 0xc0000001).
+            // The four crossover globals ask for new linear-phase
+            // magnitudes (`0x842933`, `0x842960`); the low cut and the
+            // band modes are read with the next of them.
+            if index <= HIGH_SLOPE && self.switches.linear {
+                self.linear_dirty = [true; 3];
+            }
+            if index == LOW_SLOPE || index == HIGH_SLOPE {
+                self.flush();
+                self.countdown = -0x3fff_ffff;
+                self.asleep = true;
+            }
         }
     }
 
@@ -1835,7 +1848,7 @@ impl Effect for Maximus {
 
     /// Two time wheels at their end and the longest FIR.
     fn max_latency(&self) -> usize {
-        let wheel = frames(10_000, self.hz);
+        let wheel = wheel_frames(10_000, self.hz).round_ties_even() as usize;
         let crossover = if self.switches.linear {
             self.linear_size() * 3 / 4
         } else {
@@ -1849,7 +1862,9 @@ impl Effect for Maximus {
         for context in &mut self.contexts {
             context.restart();
         }
-        self.linear_setting = None;
+        // FL's `FUN_00848930`: every band sends a magnitude after a load
+        // (and here after a new rate, which reaches the same reset).
+        self.linear_dirty = [self.switches.linear; 3];
         self.update();
         self.flush();
         self.countdown = self.hold;
@@ -2283,6 +2298,8 @@ mod tests {
         assert!((1600..4800).any(|n| out[n].abs() > 0.05));
         // A moved crossover sends new magnitudes, which fade in over
         // the window of the speed menu.
+        plugin.set_param(LOW_CUT, 30_000.0);
+        assert_eq!(plugin.linear_dirty, [false; 3]);
         plugin.set_param(LOW_FREQ, 30_000.0);
         assert_eq!(plugin.linear_dirty, [true; 3]);
         let out = run(&mut plugin, &input[..512]);
@@ -2374,7 +2391,7 @@ mod tests {
         let mid = &twice.bands[1];
         assert_eq!(
             mid.release.fall,
-            coef((2 * frames(4000, HZ)) as f64 * 2.0 / 3f64.sqrt())
+            coef(2.0 * wheel_frames(4000, HZ) * 2.0 / 3f64.sqrt())
         );
         assert_eq!(twice.bands[MASTER], once.bands[MASTER]);
         // The crossover is designed at the band rate.
@@ -2445,15 +2462,21 @@ mod tests {
         // The LMH delay is 2 ms, the band's attack 2 ms over 0.8 / sqrt(4).
         assert_eq!(low.delay.frames.len(), 96);
         assert_eq!(low.attack.count, 4);
-        assert_eq!(low.attack.fall, coef(96.0 * 0.8 / 2.0));
-        assert_eq!(low.attack.rise, coef(frames(5000, HZ) as f64 * 2.0 / 2.0));
+        assert_eq!(
+            low.attack.fall,
+            coef(wheel_frames(1115, HZ) * f64::from(0.8f32) / 2.0)
+        );
+        assert_eq!(low.attack.rise, coef(wheel_frames(5000, HZ) * 2.0 / 2.0));
         assert_eq!(low.release.count, 2);
         assert_eq!(low.release.rise, 0.0);
         assert_eq!(
             low.release.fall,
-            coef(frames(5000, HZ) as f64 * 2.0 / 2f64.sqrt())
+            coef(wheel_frames(5000, HZ) * 2.0 / 2f64.sqrt())
         );
-        assert_eq!(low.window, frames(2882, HZ));
+        assert_eq!(
+            low.window,
+            wheel_frames(2882, HZ).round_ties_even() as usize
+        );
         // Release 2 at 0 falls back on the attack, and no release means
         // no stages.
         let mid = &plugin.bands[1];
@@ -2622,6 +2645,31 @@ mod tests {
         assert!(db(testing::partial(&out[48_000..], 10.0 / HZ)) < -20.0);
         let out = run(&mut plugin, &testing::sine(200.0 / HZ, 96_000));
         assert!(db(testing::partial(&out[48_000..], 200.0 / HZ)).abs() < 0.2);
+    }
+
+    #[test]
+    fn a_moved_slope_flushes_the_plugin_and_a_frequency_does_not() {
+        let mut plugin = at_48k(&v15(DEFAULTS, defaults()));
+        let tone = testing::sine(0.01, 2048);
+        run(&mut plugin, &tone);
+        plugin.set_param(LOW_FREQ, 30_000.0);
+        assert!(!plugin.asleep);
+        assert!(plugin.bands[1].delay.frames.iter().any(|f| f[0] != 0.0));
+        plugin.set_param(HIGH_SLOPE, 0.0);
+        assert!(plugin.asleep && plugin.countdown == -0x3fff_ffff);
+        assert!(plugin.bands[1].delay.frames.iter().all(|f| *f == [0.0; 2]));
+        assert!(
+            plugin
+                .low
+                .iter()
+                .all(|s| s.state == [Biquad64::default(); 2])
+        );
+        // Silence passes through asleep; sound wakes it.
+        let mut quiet = [0.0f32; 64];
+        plugin.process(&mut quiet.clone(), &mut quiet);
+        assert!(plugin.asleep);
+        run(&mut plugin, &tone[..256]);
+        assert!(!plugin.asleep);
     }
 
     #[test]
