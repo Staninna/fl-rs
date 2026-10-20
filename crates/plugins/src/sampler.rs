@@ -9,7 +9,7 @@
 //! is in the host's list of what it did not find.
 
 use crate::{SampleFile, StateError};
-use dsp::resample::read_hermite;
+use dsp::interpolator::Interpolator;
 use std::f64::consts::FRAC_PI_4;
 
 /// A decoded file, kept by the plugin that plays it.
@@ -38,17 +38,41 @@ impl Wave {
 
     /// Both sides at `pos` frames in. A whole position is the frame as the
     /// file has it, which is what FL's player does at a step of 1. Between
-    /// frames this is a 4-point Hermite curve: FL's kernels are not read.
+    /// frames this is a 4-point Hermite curve, in place of FL's kernels.
     pub(crate) fn frame(&self, pos: f64) -> (f32, f32) {
         let side = |side: &[f32]| {
             if pos.fract() == 0.0 && pos >= 0.0 {
                 side.get(pos as usize).copied().unwrap_or(0.0)
             } else {
-                read_hermite(side, pos)
+                dsp::resample::read_hermite(side, pos)
             }
         };
         let left = side(&self.left);
         (left, self.right.as_deref().map_or(left, side))
+    }
+
+    /// Both sides at `pos` frames in, read by `reader` as FL's player reads
+    /// them: at a speed of 1 from a whole place the frames are copied, and
+    /// otherwise they go through the interpolator, the file's end frames
+    /// held past its ends.
+    pub(crate) fn read(&self, pos: f64, reader: &Interpolator) -> (f32, f32) {
+        if reader.speed() == 1.0 && pos.fract() == 0.0 && pos >= 0.0 {
+            let side = |side: &[f32]| side.get(pos as usize).copied().unwrap_or(0.0);
+            let left = side(&self.left);
+            return (left, self.right.as_deref().map_or(left, side));
+        }
+        let index = pos.floor() as i64;
+        let frac = pos - index as f64;
+        match &self.right {
+            Some(right) => {
+                let [l, r] = reader.read([&self.left, right], index, frac);
+                (l, r)
+            }
+            None => {
+                let l = reader.frame(&self.left, index, frac);
+                (l, l)
+            }
+        }
     }
 }
 
@@ -118,13 +142,6 @@ impl Bank {
     pub(crate) fn lacking(&self) -> bool {
         let ready = |slot: &Slot| matches!(slot, Slot::Ready(_));
         !self.slots.iter().all(ready)
-    }
-
-    /// Whether any file is at another rate than `rate`, so that every note
-    /// of it is read between its frames.
-    pub(crate) fn resampled(&self, rate: f32) -> bool {
-        let other = |slot: &Slot| matches!(slot, Slot::Ready(wave) if wave.rate as f32 != rate);
-        self.slots.iter().any(other)
     }
 }
 
@@ -217,6 +234,23 @@ pub(crate) fn step(cents: f64, file_rate: u32, rate: f32) -> f64 {
     2f64.powf(cents / 1200.0) * f64::from(file_rate) / f64::from(rate)
 }
 
+/// The taps a side FL's players read with when a song is rendered. A
+/// player that is not told a quality takes its unit's, which the host sets
+/// with `FPD_ProcessMode` (bits 8 to 15 are the points: FPC's dispatcher
+/// `0x0086a970` -> `FUN_0062ede0`). FL's export settings keep the quality
+/// as a mode of the points table, 1 to 9 for 1, 3, 8, 12, 16, 32, 64, 128
+/// and 256, and a new install's is mode 5 (`FLEngine_x64.dll` 0xedff62),
+/// the dialog's "32-point sinc". That the render hands plugins that
+/// setting is inferred: the engine's sender was not found.
+pub(crate) const RENDER_POINTS: u32 = 16;
+
+/// FL's interpolator at the render's quality and `step`.
+pub(crate) fn reader(step: f64) -> Interpolator {
+    let mut reader = Interpolator::new(RENDER_POINTS);
+    reader.set_speed(step);
+    reader
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,7 +308,6 @@ mod tests {
         assert!(bank.lacking());
         bank.set("b.wav", Some(file));
         assert!(!bank.lacking());
-        assert!(!bank.resampled(44_100.0) && bank.resampled(48_000.0));
         assert_eq!(
             (bank.find("b.wav"), bank.find("c.wav"), bank.find("")),
             (Some(1), None, None)
