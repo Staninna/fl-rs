@@ -119,6 +119,7 @@ pub mod reeverb;
 pub mod reeverb_2;
 mod sampler;
 pub mod send;
+pub mod seven_band_eq;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
@@ -463,6 +464,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(reeverb_2::Reeverb2::default()))
     } else if is(send::NAME) {
         Some(Box::new(send::Send::default()))
+    } else if is(seven_band_eq::NAME) {
+        Some(Box::new(seven_band_eq::SevenBandEq::default()))
     } else if is(soft_clipper::NAME) {
         Some(Box::new(soft_clipper::SoftClipper::default()))
     } else if is(soundgoodizer::NAME) {
