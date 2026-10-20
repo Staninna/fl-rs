@@ -2162,7 +2162,12 @@ impl Harmless {
         };
         voice.levels[0] = d.subs[0] * resonance * pluck1;
         let osc_hz = f64::from(cut_hz) * f64::from(d.res_ratio);
-        voice.bank.set_freq(0, osc_hz / d.rate);
+        // FL sets the resonance partial, and starts it again, only when
+        // its frequency moves (`FUN_00784a10`).
+        let osc = osc_hz / d.rate;
+        if voice.bank.freq(0) != osc {
+            voice.bank.set_freq(0, osc);
+        }
         voice.alias[0] = alias_weight(osc_hz as f32);
 
         // To the bank.
