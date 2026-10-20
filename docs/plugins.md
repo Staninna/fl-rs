@@ -25,7 +25,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Love Philter | 5856 | yes | 18 | implemented in crates/plugins (all twelve filters, oversampling, articulators, follower and waveshaper exact; looped sustain and arpeggiator points approximated, none in the corpus), docs/plugins/fruity-love-philter.md |
 | Generator | DirectWave | 1094 | yes | 18 | implemented in crates/plugins (state, zones, groups, the 32.32 linear reader, loop modes, ADSR envelopes, LFOs, the modulation matrix, cookbook filters, limiter, gains and shapers exact; the program's three send effects (one a reverb), program LFOs, zone effects, filter types 6 and 7, stretching and HQ interpolation left out and said; FL's `rand` stream and block sizes not FL's), docs/plugins/directwave.md |
 | Generator | Slicex | 6135 | yes | 18 | implemented in crates/plugins, approximate (state, regions from the WAV's cue, ltxt and tlst chunks, key map, slice volume, pan and pitch, knob volume and pitch exact; articulators, declicker, filter, stretching, reverse, start offset and the layer modes that pick one slice left out; FL's resampler stands in as a Hermite curve), docs/plugins/slicex.md |
-| Effect | Control Surface | 5556 |  | 17 | |
+| Effect | Control Surface | 5556 |  | 17 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its 2048 controller outputs are not driven, so the 174 corpus links from it, in all 17 projects that use it, play nothing, and it says so as approximated; MIDI out left out), docs/plugins/control-surface.md |
 | Effect | Fruity Fast Dist | 3616 | yes | 17 | implemented in crates/plugins, docs/plugins/fruity-fast-dist.md |
 | Effect | Pitcher | 436 | yes | 17 | implemented in crates/plugins (detector, scale correction, delay-line and formant shifters, harmony voices exact up to the last bit of powf, log2f and cos, read from Pitcher_x64.dll itself; MIDI mode and MIDI-driven harmony approximated: no host sends the notes of a MIDI Out channel yet, 2 of 65 corpus states), docs/plugins/pitcher.md |
 | Effect | Fruity Delay 2 | 3644 | yes | 16 | implemented in crates/plugins, docs/plugins/fruity-delay-2.md |
@@ -70,7 +70,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
 | Effect | Fruity Phaser | 3622 | yes | 3 | |
-| Effect | Fruity X-Y Controller | 3684 |  | 3 | |
+| Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its two controller outputs are not driven, so the 60 corpus links from it in 3 projects play nothing, and it says so as approximated), docs/plugins/fruity-x-y-controller.md |
 | Effect | Low Lifter | 3704 | yes | 3 | |
 | Generator | BassDrum | 3973 | yes | 3 | implemented in crates/plugins (oscillator table and noise sample read from FL's data at runtime), docs/plugins/bassdrum.md |
 | Generator | BooBass | 3599 | yes | 3 | implemented in crates/plugins (samples read from FL's BooBass_Eng_x64.dll at runtime), docs/plugins/boobass.md |

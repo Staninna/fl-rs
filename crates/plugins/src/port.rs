@@ -26,6 +26,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::boobass::NAME, Port::Exact),
     (crate::chorus::NAME, Port::Exact),
     (crate::compressor::NAME, Port::Exact),
+    (crate::control_surface::NAME, Port::Gaps),
     (crate::convolver::NAME, Port::Gaps),
     (crate::delay_2::NAME, Port::Exact),
     (crate::delay_3::NAME, Port::Exact),
@@ -77,6 +78,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::wave_candy::NAME, Port::Exact),
     (crate::waveshaper::NAME, Port::Gaps),
     (crate::wrapper::NAME, Port::Gaps),
+    (crate::xy_controller::NAME, Port::Gaps),
 ];
 
 /// The port of a plugin by its event 201 name, in any case.
