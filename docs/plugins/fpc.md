@@ -274,10 +274,20 @@ rate   = 2 period / SR                          // every envelope's +0x10: x uni
 layer (127) on a new note is `2.053 * 0.7071` twice over what a sampler
 channel makes of the same file, +3.2 dB.
 
-The sample player is the unit the IL samplers share (`FUN_0061acd0`
-constructor). A step of exactly 1 from a whole position copies frames
-(`+0x75`); anything else goes through the interpolator its quality setting
-picks (`+0xe4` points, `+0xf0` the kernel), which was not read.
+The sample player is FL's interpolator, the class the IL samplers share
+(`FUN_0061acd0` constructor, the same object as Fruity Convolver's
+`FUN_0061f3d0`; `docs/plugins/fl-interpolator.md`). FPC reads the whole
+file, not looped, with the end frames held past its ends. A step of
+exactly 1 from a whole position copies frames (`+0x75`); anything else goes
+through the kernel its quality picks. FPC sets no quality of its own
+(`+0xe4` stays 0), so `FUN_0061b0a0` takes the unit's, which the host sets
+through `FPD_ProcessMode` (dispatcher `0x0086a970`, message 1: bits 8..15
+are the points, `FUN_0062ede0`); before the host says, it is 12 points a
+side (`FUN_0062edc0`, mode 4). FL's export settings default to mode 5, 16
+points a side, the dialog's "32-point sinc" (`FLEngine_x64.dll` 0xedff62
+writes it, the `Interpolation` key at 0xeeb6fc keeps it), and that is what
+the Rust takes a render to send; that the render sends that setting is
+inferred.
 
 `Voice_Release` (`FUN_008700f0`) releases the two envelope runs of every
 layer voice of the note (`FUN_00788ed0`) and does nothing else: a pad with no
@@ -287,8 +297,8 @@ envelope plays its file to the end whatever the note's length. `Voice_Kill`
 ## 4. What stays unknown
 
 - The old fixed state layout below version 1000011 (`FUN_0086c5e0`).
-- The interpolation kernels of the shared sample player and which one FPC
-  asks for.
+- The quality FL's render sends plugins: the export setting's default is
+  read, the code that sends it is not.
 - `TFPCEnvelope`'s own overrides: what its values are counted from (0 for
   the volume and 0.5 for the pan are `inferred` from the defaults, a pan
   envelope that is one point at 0.5), and how its release differs from

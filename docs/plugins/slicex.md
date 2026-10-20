@@ -120,10 +120,16 @@ with two or more: the layer mode picks (0 all at 1, 1 all at 1/n, 2 by velocity,
 ```
 
 Each slice gets a voice (0x97c bytes) with the slice's floats, its six
-articulator items, and the shared sample player (`FUN_0061f6c0`) on the region:
-`FUN_00620360(player, data + start, ..., length = end - start)`, so the
-region's last frame does not sound. The voice's pitch takes `(60 - note) *
-100` so a key plays its slice at the file's pitch.
+articulator items, and FL's interpolator (constructor `FUN_0061f6c0`, the
+class of `docs/plugins/fl-interpolator.md`) on the region:
+`FUN_00620360(player, data + start, channels, format, 0, 0, end - start)`
+sets the player's frames to `0 .. end - start + 1` (`+0x58 = last + 1`), so
+the region's last frame sounds, and the frames past the region's ends that
+the kernel reaches are the region's own end frames, not the file's
+neighbours. The voice sets `+0x77` (a read past the end goes on and says
+where it ended) and no quality, so the unit's, which the host sets through
+`FPD_ProcessMode`, applies (`FUN_0061fa90`), as in FPC. The voice's pitch
+takes `(60 - note) * 100` so a key plays its slice at the file's pitch.
 
 ## 5. Rendering (`FUN_008843d0`)
 
@@ -138,7 +144,8 @@ gains (FUN_006226e0): pan 0 -> (vol, vol); else ComputeLRVol(pan, vol * sqrt 2) 
 pitch = slice pitch + Final.Pitch + (60 - note) * 100 + pitch knob;
         step = e^(pitch ln 2 / 1200) * file rate / SR (FUN_006200d0)
 the player reads the block (FUN_00621cb0); a short read ends the voice
-the declicker (FUN_00876880) shapes the first and last samples
+the declicker (FUN_00876880, its settings at plugin+0x106c) shapes the first samples and, from where
+       a short read ended (voice state 9), the release; the whole block is mixed either way
 the gains ramp over the block (FUN_00637c60) and the host adds the voice to the output
 ```
 
@@ -151,8 +158,10 @@ envelopes that finish end it earlier.
 
 - The WAV region reader (the writer was read instead).
 - The articulators' running (`FUN_007971e0`), the layer crossfade curves,
-  the filter (`FUN_00883cd0`), the declicker's tables and the sample player's
-  interpolation and stretching.
+  the filter (`FUN_00883cd0`), the declicker (`FUN_00876880`: attack modes
+  2, 3 and 4 and release modes 1 to 4, tables from `FUN_00875e10` and
+  `FUN_00875f50`) and stretching.
+- The quality FL's render hands the player (see `docs/plugins/fpc.md`).
 - What the deck settings' bytes and the knob words 0, 1, 3, 4, 6, 7 do.
 
 ## Implementation notes (crates/plugins/src/slicex.rs)
@@ -161,7 +170,11 @@ envelopes that finish end it earlier.
 - Articulators, the declicker, the filter, stretching, reversing, the start
   delay and offset, and the layer modes that pick one slice are left out;
   fidelity says so. With the articulators off a slice plays out as in FL.
-- Between frames the file is read through a Hermite curve (`sampler::Wave`).
+- The file is read through FL's interpolator on the region's frames
+  (`sampler::Wave::read_in`) at FL's default render quality, 16 taps a side
+  (inferred). The voice stops after the region's last frame: what FL's
+  player makes past it, held end frames that the declicker's release fades,
+  is left out with the declicker.
 - A pan other than 0 uses FL's circular pan law with `vol * sqrt 2` and
   sends nothing across.
 - A linked file is decoded by the host; its regions are read by the plugin

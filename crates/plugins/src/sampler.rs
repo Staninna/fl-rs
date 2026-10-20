@@ -9,7 +9,7 @@
 //! is in the host's list of what it did not find.
 
 use crate::{SampleFile, StateError};
-use dsp::resample::read_hermite;
+use dsp::interpolator::Interpolator;
 use std::f64::consts::FRAC_PI_4;
 
 /// A decoded file, kept by the plugin that plays it.
@@ -36,19 +36,44 @@ impl Wave {
         self.left.len()
     }
 
-    /// Both sides at `pos` frames in. A whole position is the frame as the
-    /// file has it, which is what FL's player does at a step of 1. Between
-    /// frames this is a 4-point Hermite curve: FL's kernels are not read.
-    pub(crate) fn frame(&self, pos: f64) -> (f32, f32) {
-        let side = |side: &[f32]| {
-            if pos.fract() == 0.0 && pos >= 0.0 {
-                side.get(pos as usize).copied().unwrap_or(0.0)
-            } else {
-                read_hermite(side, pos)
+    /// Both sides at `pos` frames in, read by `reader` as FL's player reads
+    /// them: at a speed of 1 from a whole place the frames are copied, and
+    /// otherwise they go through the interpolator, the file's end frames
+    /// held past its ends.
+    pub(crate) fn read(&self, pos: f64, reader: &Interpolator) -> (f32, f32) {
+        self.read_in(0..self.len(), pos, reader)
+    }
+
+    /// The same, for a player FL gives only the frames `region` of the
+    /// file: `pos` counts from the region's start, and the region's own end
+    /// frames are the ones held past its ends.
+    pub(crate) fn read_in(
+        &self,
+        region: std::ops::Range<usize>,
+        pos: f64,
+        reader: &Interpolator,
+    ) -> (f32, f32) {
+        let end = region.end.min(self.len());
+        let start = region.start.min(end);
+        let left = &self.left[start..end];
+        let right = self.right.as_deref().map(|right| &right[start..end]);
+        if reader.speed() == 1.0 && pos.fract() == 0.0 && pos >= 0.0 {
+            let side = |side: &[f32]| side.get(pos as usize).copied().unwrap_or(0.0);
+            let l = side(left);
+            return (l, right.map_or(l, side));
+        }
+        let index = pos.floor() as i64;
+        let frac = pos - index as f64;
+        match right {
+            Some(right) => {
+                let [l, r] = reader.read([left, right], index, frac);
+                (l, r)
             }
-        };
-        let left = side(&self.left);
-        (left, self.right.as_deref().map_or(left, side))
+            None => {
+                let l = reader.frame(left, index, frac);
+                (l, l)
+            }
+        }
     }
 }
 
@@ -118,13 +143,6 @@ impl Bank {
     pub(crate) fn lacking(&self) -> bool {
         let ready = |slot: &Slot| matches!(slot, Slot::Ready(_));
         !self.slots.iter().all(ready)
-    }
-
-    /// Whether any file is at another rate than `rate`, so that every note
-    /// of it is read between its frames.
-    pub(crate) fn resampled(&self, rate: f32) -> bool {
-        let other = |slot: &Slot| matches!(slot, Slot::Ready(wave) if wave.rate as f32 != rate);
-        self.slots.iter().any(other)
     }
 }
 
@@ -217,6 +235,23 @@ pub(crate) fn step(cents: f64, file_rate: u32, rate: f32) -> f64 {
     2f64.powf(cents / 1200.0) * f64::from(file_rate) / f64::from(rate)
 }
 
+/// The taps a side FL's players read with when a song is rendered. A
+/// player that is not told a quality takes its unit's, which the host sets
+/// with `FPD_ProcessMode` (bits 8 to 15 are the points: FPC's dispatcher
+/// `0x0086a970` -> `FUN_0062ede0`). FL's export settings keep the quality
+/// as a mode of the points table, 1 to 9 for 1, 3, 8, 12, 16, 32, 64, 128
+/// and 256, and a new install's is mode 5 (`FLEngine_x64.dll` 0xedff62),
+/// the dialog's "32-point sinc". That the render hands plugins that
+/// setting is inferred: the engine's sender was not found.
+pub(crate) const RENDER_POINTS: u32 = 16;
+
+/// FL's interpolator at the render's quality and `step`.
+pub(crate) fn reader(step: f64) -> Interpolator {
+    let mut reader = Interpolator::new(RENDER_POINTS);
+    reader.set_speed(step);
+    reader
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,7 +309,6 @@ mod tests {
         assert!(bank.lacking());
         bank.set("b.wav", Some(file));
         assert!(!bank.lacking());
-        assert!(!bank.resampled(44_100.0) && bank.resampled(48_000.0));
         assert_eq!(
             (bank.find("b.wav"), bank.find("c.wav"), bank.find("")),
             (Some(1), None, None)
@@ -288,15 +322,21 @@ mod tests {
             right: None,
             rate: 44_100,
         };
-        assert_eq!(wave.frame(1.0), (1.0, 1.0));
-        assert_eq!(wave.frame(4.0), (0.0, 0.0));
-        let between = wave.frame(1.5).0;
-        assert!(between > 0.4 && between < 0.7, "{between}");
+        let copy = reader(1.0);
+        assert_eq!(wave.read(1.0, &copy), (1.0, 1.0));
+        assert_eq!(wave.read(4.0, &copy), (0.0, 0.0));
+        let between = wave.read(1.5, &copy).0;
+        assert_eq!(between, copy.frame(&wave.left, 1, 0.5));
         let stereo = Wave {
             right: Some(vec![0.25; 4]),
             ..wave
         };
-        assert_eq!(stereo.frame(3.0), (-1.0, 0.25));
+        assert_eq!(stereo.read(3.0, &copy), (-1.0, 0.25));
+        // A region holds its own ends, far from them.
+        let slow = reader(0.5);
+        let held = stereo.read_in(1..3, 40.5, &slow).0;
+        assert!((held - 0.0).abs() < 1e-3, "{held}");
+        assert!((stereo.read_in(1..3, -40.5, &slow).0 - 1.0).abs() < 1e-3);
     }
 
     #[test]

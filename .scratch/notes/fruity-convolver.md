@@ -2,11 +2,14 @@
 
 `crates/plugins/src/convolver.rs` plays every state; what the corpus render
 still calls approximate is in the impulse preparation (rebuild thread
-`FUN_0087b750`, `docs/plugins/fruity-convolver.md` section 3). Nothing of
-this note is built yet. Addresses are in `Fruity Convolver_x64.dll` (image
-base 0x400000). Ghidra outputs of this session were under
-`/root/ghidra/approx/out/cv*` and are gone; rerun `DecompileAddrs.java` on
-the addresses below.
+`FUN_0087b750`, `docs/plugins/fruity-convolver.md` section 3). Addresses are
+in `Fruity Convolver_x64.dll` (image base 0x400000). Ghidra outputs are
+gone; rerun `DecompileAddrs.java` on the addresses below.
+
+Built since (2026-10-20, second session): the resampler (FL's interpolator,
+`crates/dsp/src/interpolator.rs`, `docs/plugins/fl-interpolator.md`) and the
+self-convolution (`self_convolve` in `convolver.rs`, correction 12 of the
+plugin doc). Left: the EQ curve (3 corpus slots) and the layers (none).
 
 ## What the corpus asks for (survey of the 21 project states)
 
@@ -38,7 +41,7 @@ trim the tail under 2^-24; lead / block as built
 `PTR_DAT_008f7898` -> `0x8c7d50` is 0.5 (the flat EQ's `/ 2`), and
 `PTR_DAT_008f7ba8` -> `0x90653c` is ln 3.
 
-## Resampler (`FUN_0062b090` -> `FUN_0062aad0(sample, ratio, mode, 0)`)
+## Resampler (`FUN_0062b090` -> `FUN_0062aad0(sample, ratio, mode, 0)`) -- built
 
 - `FUN_0062b090(s, rate, mode)`: when `rate != s+0x70`, resample by
   `rate / s+0x70` with `mode`, then `s+0x70 = s+0x78 = rate`.
@@ -50,7 +53,7 @@ trim the tail under 2^-24; lead / block as built
   one. Then `FUN_0061fe40(obj, sample, loop?, -1...)`, `FUN_0061fc90(obj,
   1.0 / ratio)` (the speed), output length `round(len * ratio)`, rendered by
   `FUN_00620bc0(obj, out, n <= 1024, 0)` in chunks.
-- Not read: the resampler class itself (`0x0061f3d0..0x00620bc0` and what
+- Read since, see `docs/plugins/fl-interpolator.md`. Was not read: the resampler class itself (`0x0061f3d0..0x00620bc0` and what
   `FUN_0061f6c0` builds for 256 points: the sinc table, its window, how a
   fractional position is interpolated in the table, any normalisation).
   This is FL's sample interpolator, the one FPC, Fruity Slicer and Slicex
@@ -96,7 +99,7 @@ wet 1, dry 0, kernel gain 1.
   `+0x28` when not 0 (`PTR_DAT_008f69e8`), then added (`FUN_005c7090`).
   The result keeps the source's length.
 
-### Self-convolution (`FUN_0087b670(this, IR, amount)`)
+### Self-convolution (`FUN_0087b670(this, IR, amount)`) -- built
 
 ```
 c = new; c+8 = IR; FUN_006245c0(c, IR, 0)        // the IR is its own kernel, unit energy
@@ -104,9 +107,10 @@ c+0x2c = amount * 0.5; c+0x28 = 1.0 - amount * 0.5
 FUN_00624f90(c, 0, len - 1); FUN_00625690(c, 0, len - 1)
 ```
 
-So `IR' = (1 - a/2) IR + (a/2) (IR * IR) / ||IR||`, cut to the IR's length,
-aligned by `+0x20` (to be checked: the convolution's frame 0 against the
-IR's).
+So `IR' = (1 - a/2) IR + (a/2) (IR * IR) / ||IR||`, cut to the IR's length.
+Checked: `FUN_0062c190` trims the kernel's exact-zero ends and `+0x24` is
+the frames trimmed at the start; the overlap-save starting `+0x20` early puts
+the output on `(h * x)[t]` of the untrimmed kernel.
 
 ### EQ curve (`FUN_0087b2b0(this, IR, eq, stretch)`)
 
@@ -143,10 +147,10 @@ first thing to check.
 
 ## Next steps
 
-1. Rebuild FL's resampler class in `dsp` (read `FUN_0061f3d0`,
-   `FUN_0061f6c0`, `FUN_0061fe40`, `FUN_0061fc90`, `FUN_00620bc0`), use it
-   for mode 9 here, and offer it to FPC, Fruity Slicer and Slicex.
-2. Read `FUN_00636ca0`, `FUN_00637aa0`, `FUN_00624620`, `FUN_0062c190` and
-   `FUN_00791500`, then build the sample convolver class (self-convolution
-   and the EQ), checking the output alignment against the doc's formulas.
-3. Layers last: no corpus state draws one.
+1. The EQ curve: read `FUN_00636ca0` (window type 2, 0.25), `FUN_00637aa0`
+   (frequency to the editor's x), `FUN_00624620` (the spectrum's
+   resampling) and `FUN_00791500` (the envelope runner), then build
+   `FUN_00624910` (kernel from a magnitude spectrum) and run it through the
+   same convolution `self_convolve` uses (the kernel is mono and centred:
+   `+0x20 = (len - 1) >> 1`).
+2. Layers last: no corpus state draws one.
