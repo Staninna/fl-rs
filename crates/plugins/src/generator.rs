@@ -30,10 +30,38 @@ pub struct NoteOn {
     pub mod_x: f32,
     pub mod_y: f32,
     /// A slide note. FL sounds no voice for one: it bends the voices that
-    /// are sounding to its key.
+    /// are sounding to its key. A host that does that itself, with
+    /// [`Generator::set_note_pitch`], does not send one.
     pub slide: bool,
     /// A note that glides in from the one before it.
     pub porta: bool,
+    /// The note's colour, 0 to 15, where 0 is FL's first: the low nibble
+    /// of byte 19 of its record, which FL's host keeps at `rec+0x26c` of
+    /// the voice and hands a plugin for `FPV_GetColor`
+    /// (`docs/plugins/host-voice.md`). FL also takes it as the note's MIDI
+    /// channel.
+    pub color: u8,
+}
+
+impl Default for NoteOn {
+    /// Voice 0 at key 60, as a new note in FL's piano roll is: velocity
+    /// 100, which is a gain of 1, in the centre, release 64, the mods in
+    /// the middle and the first colour.
+    fn default() -> Self {
+        NoteOn {
+            voice: 0,
+            key: 60,
+            velocity: 1.0,
+            pan: 0.0,
+            fine_pitch: 0.0,
+            release: 0.5,
+            mod_x: 0.0,
+            mod_y: 0.0,
+            slide: false,
+            porta: false,
+            color: 0,
+        }
+    }
 }
 
 /// One plugin on a channel.
@@ -80,6 +108,19 @@ pub trait Generator: Send {
 
     /// Let go of every note, as [`Generator::note_off`] does for one.
     fn all_notes_off(&mut self);
+
+    /// The pitch of the note the host gave this number has moved, from the
+    /// first frame of the next block: a slide note bends it, or a clip
+    /// moves its channel's pitch. `pitch` is in cents from key 60, as
+    /// `(key - 60) * 100 + fine_pitch` of its [`NoteOn`] was, and stands
+    /// in for that from now on: it is FL's `FinalLevels.Pitch`, which FL's
+    /// host works out again on every tick (`FUN_00d265e0`) and a plugin
+    /// reads as its voices run. A note let go of may still be told until
+    /// its release is over.
+    ///
+    /// Nothing happens for a number no sounding note has, nor in a plugin
+    /// that does not say: its notes keep the pitch they started with.
+    fn set_note_pitch(&mut self, _voice: u32, _pitch: f32) {}
 
     /// Add one block of the generator's sound to what `left` and `right`
     /// hold. The two sides are as long as each other.

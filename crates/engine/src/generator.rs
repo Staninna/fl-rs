@@ -230,6 +230,7 @@ impl Rack {
             mod_y: levels.mod_y,
             slide: note.slide(),
             porta: note.porta(),
+            color: note.color(),
         };
         for (at, signal) in [(start, Signal::On(on)), (end, Signal::Off(voice))] {
             self.cues.push(Cue {
