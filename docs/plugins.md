@@ -80,7 +80,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | MIDI Out | 3953 |  | 3 | |
 | Generator | Sakura | 4194 | yes | 3 | |
 | Effect | Fruity Fast LP | 3664 | yes | 2 | implemented in crates/plugins, docs/plugins/fruity-fast-lp.md |
-| Effect | Fruity Free Filter | 3689 | yes | 2 | |
+| Effect | Fruity Free Filter | 3689 | yes | 2 | implemented in crates/plugins (exact; the corner is worked out at 44.1 kHz at every rate, as in FL), docs/plugins/fruity-free-filter.md |
 | Effect | Fruity NoteBook | 3526 |  | 2 | |
 | Effect | Fruity Wrapper | 5856 |  | 2 | |
 | Effect | Hardcore | 626 | yes | 2 | |

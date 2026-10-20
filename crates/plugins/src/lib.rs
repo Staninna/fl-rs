@@ -15,7 +15,7 @@
 //! [`chorus::Chorus`], [`compressor::Compressor`],
 //! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
 //! [`delay_bank::DelayBank`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
-//! [`flanger::Flanger`], [`flangus::Flangus`],
+//! [`flanger::Flanger`], [`flangus::Flangus`], [`free_filter::FreeFilter`],
 //! [`limiter::Limiter`], [`love_philter::LovePhilter`],
 //! [`maximus::Maximus`],
 //! [`multiband_compressor::MultibandCompressor`], [`panomatic::PanOMatic`],
@@ -60,6 +60,7 @@ pub mod fl_keys;
 pub mod flanger;
 pub mod flangus;
 pub mod fpc;
+pub mod free_filter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
 mod generator;
@@ -348,6 +349,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(vintage_chorus::VintageChorus::default()))
     } else if is(phaser::NAME) {
         Some(Box::new(phaser::Phaser::default()))
+    } else if is(free_filter::NAME) {
+        Some(Box::new(free_filter::FreeFilter::default()))
     } else if is(flanger::NAME) {
         Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
@@ -664,6 +667,7 @@ mod tests {
             ("fruity blood overdrive", 36, 26),
             ("fruity chorus", 52, 20),
             ("fruity flanger", 52, 5),
+            ("fruity free filter", 21, 4),
             ("fruity flangus", 32, 56),
             ("fruity limiter", 168, 156),
             ("fruity limiter", 169, 190),
@@ -725,7 +729,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 40);
+        assert_eq!(lengths.count(), 41);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
