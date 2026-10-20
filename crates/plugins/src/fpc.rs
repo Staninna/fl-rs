@@ -65,9 +65,10 @@
 //!
 //! # What is not FL's
 //!
-//! - FL's resampler is not read. A file at the song's rate with no tune is
-//!   copied frame by frame, as FL does it. Anything else is read through a
-//!   4-point Hermite curve, and fidelity says so.
+//! - A file at the song's rate with no tune is copied frame by frame, as
+//!   FL does it. Anything else goes through FL's interpolator
+//!   ([`dsp::interpolator`]) at the quality the host asks for, taken to be
+//!   FL's default render quality (`sampler::RENDER_POINTS`).
 //! - The envelopes run as [`menvelope`](crate::menvelope) runs Sytrus's.
 //!   What `TFPCEnvelope` does on top of that is not read, and fidelity
 //!   says so for a state that has one switched on.
@@ -86,6 +87,7 @@
 use crate::menvelope::{Class, MEnvelope, Reader, Run, Track};
 use crate::sampler::{self, Bank, Chunks};
 use crate::{Fidelity, Generator, NoteOn, SampleFile, StateError, knob_gain, knob_value};
+use dsp::interpolator::Interpolator;
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "FPC";
@@ -354,6 +356,7 @@ struct Voice {
     /// The source frame the next sample reads, and how far it moves on.
     pos: f64,
     step: f64,
+    reader: Interpolator,
     /// The gains that stay: the note's and the pad's, a side.
     fixed: (f32, f32),
     volume: Option<Run>,
@@ -586,13 +589,15 @@ impl Generator for Fpc {
                     self.voices.remove(0);
                 }
                 let active = |track: &Track| track.active().then(|| track.start(pace));
+                let step = sampler::step(tuned, file.rate, self.rate);
                 self.voices.push(Voice {
                     note: note.voice,
                     pad: index,
                     layer: place,
                     wave,
                     pos: 0.0,
-                    step: sampler::step(tuned, file.rate, self.rate),
+                    step,
+                    reader: sampler::reader(step),
                     fixed: (level * left * pad_gains.0, level * right * pad_gains.1),
                     volume: active(&pad.volume_envelope),
                     pan: active(&pad.pan_envelope),
@@ -711,7 +716,7 @@ impl Generator for Fpc {
                 let ramped = voice.slope.0 != 0.0;
                 let mut ramp = Ramp::new(voice.now, voice.slope, run);
                 for n in at..at + run {
-                    let (l, r) = wave.frame(voice.pos);
+                    let (l, r) = wave.read(voice.pos, &voice.reader);
                     let gains = if ramped { ramp.gains() } else { voice.target };
                     left[n] += l * gains.0;
                     right[n] += r * gains.1;
@@ -787,10 +792,6 @@ impl Generator for Fpc {
         }
         let sounding = |pad: &&Pad| pad.layers.iter().any(|layer| layer.wave.is_some());
         let mut pads = self.pads.iter().filter(sounding);
-        let tuned = |pad: &Pad| pad.tune != 0 || pad.layers.iter().any(|layer| layer.tune != 0);
-        if self.bank.resampled(self.rate) || pads.clone().any(tuned) {
-            return Fidelity::Approximate("FPC: a Hermite curve stands in for FL's resampler");
-        }
         let enveloped =
             |pad: &Pad| pad.volume_envelope.active() || pad.pan_envelope.active() || !pad.plain;
         if pads.clone().any(enveloped) {
@@ -988,16 +989,21 @@ pub(crate) mod tests {
     #[test]
     fn the_fine_pitch_the_tunes_and_the_file_s_rate_set_the_step() {
         let sound = ramp(512);
-        // An octave of fine pitch reads every other frame.
+        // An octave of fine pitch reads every other frame, through the
+        // interpolator's low-pass at twice the speed.
         let mut fpc = kit(&[simple(60, &[plain("a.wav")])]);
         fpc.set_sample("a.wav", Some(file(&sound, 44_100)));
         let mut high = note(1, 60);
         high.fine_pitch = 1200.0;
         fpc.note_on(high);
         let (left, _) = play(&mut fpc, 300);
-        for n in 0..256 {
-            assert!((left[n] - sound[2 * n] * unity()).abs() < 1e-6, "{n}");
+        let reader = sampler::reader(2.0);
+        for (n, heard) in left[..256].iter().enumerate() {
+            let want = reader.frame(&sound, 2 * n as i64, 0.0) * unity();
+            assert!((heard - want).abs() < 1e-6, "{n}");
         }
+        // Away from the ends a ramp stays a ramp.
+        assert!((left[100] - sound[200] * unity()).abs() < 1e-3);
         assert!(left[256..].iter().all(|v| *v == 0.0));
 
         // A pad tune of 64 and a layer tune of 64 are an octave, and a
@@ -1010,21 +1016,22 @@ pub(crate) mod tests {
         );
         let mut fpc = kit(&[tuned]);
         fpc.set_sample("a.wav", Some(file(&sound, 22_050)));
-        assert!(matches!(fpc.fidelity(), Fidelity::Approximate(what) if what.contains("Hermite")));
+        assert_eq!(fpc.fidelity(), Fidelity::Exact);
         fpc.note_on(note(1, 60));
         let (left, _) = play(&mut fpc, 512);
         for n in 0..512 {
             assert!((left[n] - sound[n] * unity()).abs() < 1e-6, "{n}");
         }
 
-        // Between the frames the curve goes through them.
+        // Between the frames it is FL's interpolator, at half speed.
         let mut fpc = fpc_at(&sound, 22_050, 44_100.0);
         fpc.note_on(note(1, 60));
         let (left, _) = play(&mut fpc, 1000);
+        let reader = sampler::reader(0.5);
         for n in 1..500 {
             assert!((left[2 * n] - sound[n] * unity()).abs() < 1e-6, "{n}");
-            let between = (sound[n] + sound[n + 1]) / 2.0 * unity();
-            assert!((left[2 * n + 1] - between).abs() < 1e-4, "{n}");
+            let between = reader.frame(&sound, n as i64, 0.5) * unity();
+            assert!((left[2 * n + 1] - between).abs() < 1e-6, "{n}");
         }
         // And the song's rate counts as the file's does.
         let mut fpc = fpc_at(&sound, 48_000, 48_000.0);
