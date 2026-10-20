@@ -7,10 +7,11 @@
 //! The state is read as FL writes it, to the last byte, for every version
 //! from 8 to 25. The sound is an approximation: the operators, the matrix,
 //! the filters, the envelopes and the output levels follow what the voice
-//! kernel does, with no band limiting of the wavetables, no plucked
-//! (Karplus-Strong) operators and no delay, chorus, reverb or EQ after the
-//! voices. The filters' waveshapers are FL's kernels over the baked
-//! curve (section 8 of the doc). The unison is FL's: up to nine
+//! kernel does, with no band limiting of the wavetables and no plucked
+//! (Karplus-Strong) operators. The filters' waveshapers are FL's kernels
+//! over the baked curve (section 8 of the doc), and the chorus, the three
+//! delays, the reverb and the EQ after the voices are FL's chain on its
+//! send bus (`sytrus/fx.rs`, section 9). The unison is FL's: up to nine
 //! voices a note and nine more an octave down, detuned, panned, phased and
 //! stretched by `TriggerVoice`'s tables, alone or sharing one set of
 //! filters (section 7 of the doc). A state
@@ -21,8 +22,8 @@
 //! `ProcessParam` has them (section 6 of the doc): the main volume, LFO
 //! level and pitch, the quick ADSR, Mod X and Mod Y, which the voices
 //! glide to, the operators' and filters' wheels and every articulator's
-//! knobs are heard, and the unison's; the chorus, delay, EQ and portamento
-//! ones are kept and read back.
+//! knobs are heard, and the unison's, the chorus's, the delays' and the
+//! EQ's; the portamento switch is kept and read back.
 
 // The kernels index their rows and operators on purpose: the workspace
 // tests build unoptimised, and an index loop is what FL's kernel does.
@@ -30,6 +31,8 @@
 
 use crate::menvelope::{Class, Lfo, LfoRun, MEnvelope, Reader, Run, Track};
 use crate::parts::glide;
+
+mod fx;
 use crate::three_osc::pan_law;
 use crate::{Fidelity, Generator, NoteOn, StateError, knob_gain};
 use dsp::biquad::{Biquad64, Coefficients64};
@@ -1048,8 +1051,10 @@ struct State {
     operators: Vec<Operator>,
     filters: Vec<Filter>,
     main: Vec<Articulator>,
-    /// A delay, the reverb, the chorus or the EQ is on.
-    effects: bool,
+    /// What the effects keep that is not a REC parameter.
+    fx: fx::Saved,
+    /// Some sounding row sends to the effects (u8 0x632c).
+    send_on: bool,
 
     /// Which rows sound: they reach the output themselves or through a
     /// filter or a modulation.
@@ -1137,7 +1142,8 @@ impl State {
             operators,
             filters,
             main: articulators(2),
-            effects: false,
+            fx: fx::Saved::default(),
+            send_on: false,
             active: [false; ROWS],
             // Room for every target, so that routing anew allocates
             // nothing.
@@ -1206,7 +1212,7 @@ impl State {
         for knob in &mut main {
             *knob = reader.i32()?;
         }
-        let _send_target = reader.i32()?;
+        state.fx.send_target = reader.i32()?;
         state.mod_x = reader.i32()?;
         state.mod_y = reader.i32()?;
         let _smoothing = reader.f32()?;
@@ -1259,7 +1265,7 @@ impl State {
             state.unison_shared = reader.u8()? != 0;
         }
         if version > 6 {
-            reader.u8()?;
+            state.fx.high_pass = reader.u8()? != 0;
         }
         if version > 12 {
             reader.u8()?;
@@ -1280,36 +1286,39 @@ impl State {
                 state.unison_kind = *kind;
             }
         }
-        let mut effects = false;
         for unit in 0..3 {
             let delay = reader.bytes(23)?;
-            effects |= delay[20] != 0;
             for (j, word) in delay[..20].as_chunks::<4>().0.iter().enumerate() {
                 state.params[param_index(9, 9 + 5 * unit + j)] = i32::from_le_bytes(*word);
             }
+            state.fx.delay_flags[unit] = [delay[20], delay[21], delay[22]];
         }
         if version >= 10 {
             let reverb = reader.bytes(if version == 10 { 37 } else { 38 })?;
-            effects |= reverb[36] != 0;
+            for (k, word) in reverb[..36].as_chunks::<4>().0.iter().enumerate() {
+                state.fx.reverb[k] = i32::from_le_bytes(*word);
+            }
+            state.fx.reverb_on = reverb[36] != 0;
+            state.fx.reverb_tempo = reverb.get(37).is_some_and(|b| *b != 0);
         }
         if version > 2 {
-            let eq = reader.i32()?;
-            effects |= eq != 0;
+            state.fx.eq_mode = reader.i32()?;
             let size = if version < 14 { 12 } else { 16 };
             let bands = reader.bytes(3 * size)?;
             // Level, frequency and width of each band: REC 587 + 3 field
-            // + band.
+            // + band; then its type, from version 14.
+            let word = |at: usize| {
+                i32::from_le_bytes([bands[at], bands[at + 1], bands[at + 2], bands[at + 3]])
+            };
             for band in 0..3 {
                 for field in 0..3 {
-                    let at = band * size + 4 * field;
-                    let word = [bands[at], bands[at + 1], bands[at + 2], bands[at + 3]];
-                    state.params[LATE_PARAM + 3 * field + band] = i32::from_le_bytes(word);
+                    state.params[LATE_PARAM + 3 * field + band] = word(band * size + 4 * field);
+                }
+                if size == 16 {
+                    state.fx.eq_types[band] = word(band * size + 12);
                 }
             }
         }
-        // The chorus is on with an order above 0.
-        effects |= main[1] > 0;
-        state.effects = effects;
         if version < 23 {
             let len = reader.i32()?;
             let len = usize::try_from(len).map_err(|_| StateError::Length {
@@ -1490,6 +1499,7 @@ impl State {
             }
         }
         self.active = active;
+        self.send_on = (0..ROWS).any(|row| active[row] && self.send[row] != 0.0);
         for modulator in 0..OPERATORS {
             self.fm_targets[modulator].clear();
             self.rm_targets[modulator].clear();
@@ -1617,10 +1627,18 @@ impl State {
                 }
             }
             Param::Wheel { k: 8, .. } => self.fx_send = level(value, 128.0),
-            // The unison's wheels are taken by the voices (`Sytrus`), and
-            // the chorus, the delays, the EQ and portamento are kept but
-            // not built.
+            // The unison's and the effects' wheels are taken by `Sytrus`,
+            // and portamento is kept but not built.
             _ => {}
+        }
+    }
+
+    /// The REC parameters the effects read.
+    fn wheels(&self) -> fx::Wheels<'_> {
+        fx::Wheels {
+            main: &self.params[MAIN_PARAM..MAIN_PARAM + 9],
+            delays: &self.params[MAIN_PARAM + 9..MAIN_PARAM + MAIN_WHEELS],
+            eq: &self.params[LATE_PARAM..LATE_PARAM + 9],
         }
     }
 
@@ -1753,9 +1771,10 @@ struct Voice {
     operators: [OpRun; OPERATORS],
     filters: [FilterRun; FILTERS],
     articulators: [ArtRun; PARTS * ARTICULATORS],
-    /// Every row's gain into the left and the right, and the steps.
-    gains: [[f32; 2]; ROWS],
-    gain_steps: [[f32; 2]; ROWS],
+    /// Every row's gain into the left and the right output and the left
+    /// and the right send, and the steps.
+    gains: [[f32; 4]; ROWS],
+    gain_steps: [[f32; 4]; ROWS],
     released: bool,
     /// The fade of a note with no envelope, from 1 to 0 after its release.
     fade: f32,
@@ -2088,8 +2107,8 @@ impl Voice {
             operators,
             filters: [FilterRun::rest(); FILTERS],
             articulators,
-            gains: [[0.0; 2]; ROWS],
-            gain_steps: [[0.0; 2]; ROWS],
+            gains: [[0.0; 4]; ROWS],
+            gain_steps: [[0.0; 4]; ROWS],
             released: false,
             fade: 1.0,
             over: false,
@@ -2209,16 +2228,17 @@ impl Voice {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
             }
+            // The output and the send to the effects (`0x872290`): the
+            // send also takes the send pan wheel (0x61e4) and the main
+            // part's pan and volume articulators.
             let pan = self.pan * 0.5 + self.unison.pan + state.pan[row] + value(row, 0);
-            let pan = (pan * 2.0 - 1.0).clamp(-1.0, 1.0);
-            // What goes to the effects comes back dry here, at half, for
-            // the effects' own returns.
-            let gain = self.velocity
-                * state.main_volume
-                * self.unison.gain
-                * (state.out[row] + state.send[row] * state.fx_send * 0.5);
-            let aim = pan_law(pan, gain);
-            for side in 0..2 {
+            let gain = self.velocity * state.main_volume * self.unison.gain;
+            let send_pan = pan + state.params[MAIN_PARAM] as f32 * (1.0 / 256.0) + value(ROWS, 0);
+            let send = gain * state.send[row] * value(ROWS, 1);
+            let [l, r] = pan_law((pan * 2.0 - 1.0).clamp(-1.0, 1.0), gain * state.out[row]);
+            let [sl, sr] = pan_law((send_pan * 2.0 - 1.0).clamp(-1.0, 1.0), send);
+            let aim = [l, r, sl, sr];
+            for side in 0..4 {
                 if snap {
                     self.gains[row][side] = aim[side];
                     self.gain_steps[row][side] = 0.0;
@@ -2250,15 +2270,17 @@ impl Voice {
 
     /// Render `len` frames into `scratch`, a block of [`CHUNK`] a row, and
     /// add them to the output.
+    /// Render the next frames into `scratch`, a block of [`CHUNK`] a row,
+    /// and add them to the buses: dry left and right, send left and right,
+    /// as many frames as they hold.
     fn render(
         &mut self,
         state: &State,
         timing: Timing,
         scratch: &mut [f32],
-        left: &mut [f32],
-        right: &mut [f32],
+        buses: &mut [&mut [f32]; 4],
     ) {
-        let len = left.len().min(right.len()).min(CHUNK);
+        let len = buses[0].len().min(CHUNK);
         let fading = self.released && !state.any_envelope();
         for i in 0..len {
             for op in 0..OPERATORS {
@@ -2380,20 +2402,26 @@ impl Voice {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
             }
-            let [mut l, mut r] = self.gains[row];
-            let [ls, rs] = self.gain_steps[row];
+            let mut gains = self.gains[row];
+            let steps = self.gain_steps[row];
+            let sends = state.send[row] != 0.0;
             fade = self.fade;
             for i in 0..len {
                 let sample = scratch[row * CHUNK + i] * fade;
-                left[i] += sample * l;
-                right[i] += sample * r;
-                l += ls;
-                r += rs;
+                buses[0][i] += sample * gains[0];
+                buses[1][i] += sample * gains[1];
+                if sends {
+                    buses[2][i] += sample * gains[2];
+                    buses[3][i] += sample * gains[3];
+                }
+                for (gain, step) in gains.iter_mut().zip(&steps) {
+                    *gain += step;
+                }
                 if fading {
                     fade = (fade - timing.fade_step).max(0.0);
                 }
             }
-            self.gains[row] = [l, r];
+            self.gains[row] = gains;
         }
         if fading {
             self.fade = fade;
@@ -2411,6 +2439,8 @@ pub struct Sytrus {
     voices: Vec<Voice>,
     /// The notes started, which names each note's voices.
     notes: u32,
+    /// The chorus, delays, reverb and EQ after the voices.
+    fx: fx::Effects,
     to_tick: usize,
     tick_part: f64,
     scratch: Vec<f32>,
@@ -2426,6 +2456,7 @@ impl Default for Sytrus {
             ppq: PPQ,
             voices: Vec::with_capacity(ROOM),
             notes: 0,
+            fx: fx::Effects::default(),
             to_tick: 0,
             tick_part: 0.0,
             scratch: vec![0.0; (ROWS + OPERATORS) * CHUNK],
@@ -2435,6 +2466,13 @@ impl Default for Sytrus {
 }
 
 impl Sytrus {
+    /// Make the effects' memory for the state at the rate. This allocates.
+    fn build_effects(&mut self) {
+        let state = &self.state;
+        self.fx
+            .build(&state.fx, &state.wheels(), self.rate, self.tempo);
+    }
+
     /// Let the slaves of a master that has ended go. This allocates
     /// nothing.
     fn drop_orphans(&mut self) {
@@ -2480,18 +2518,23 @@ impl Generator for Sytrus {
     fn set_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
         self.state = State::read(bytes)?;
         self.voices.clear();
+        self.build_effects();
         Ok(())
     }
 
     fn set_sample_rate(&mut self, hz: f32) {
         if hz.is_finite() && hz > 0.0 {
             self.rate = hz;
+            self.build_effects();
         }
     }
 
+    /// The delays and the reverb's predelay that count in beats follow.
     fn set_tempo(&mut self, bpm: f64) {
         if bpm.is_finite() && bpm > 0.0 {
             self.tempo = bpm;
+            let state = &self.state;
+            self.fx.configure(&state.fx, &state.wheels(), bpm);
         }
     }
 
@@ -2569,6 +2612,8 @@ impl Generator for Sytrus {
             let (state, scratch, to_tick) = (&self.state, &mut self.scratch[..], self.to_tick);
             let block = at..at + run;
             let mut ended = false;
+            let sounding = self.voices.len();
+            let mut buses = self.fx.buses(run);
             self.voices.retain_mut(|voice| {
                 if voice.ticked {
                     voice.tick(state, timing, to_tick);
@@ -2579,13 +2624,14 @@ impl Generator for Sytrus {
                     ended |= voice.unison.role == Role::Master;
                     return false;
                 }
-                let (l, r) = (&mut left[block.clone()], &mut right[block.clone()]);
-                voice.render(state, timing, scratch, l, r);
+                voice.render(state, timing, scratch, &mut buses);
                 true
             });
             if ended {
                 self.drop_orphans();
             }
+            let (l, r) = (&mut left[block.clone()], &mut right[block]);
+            self.fx.run(sounding, self.state.send_on, l, r);
             at += run;
             self.to_tick -= run;
         }
@@ -2616,11 +2662,20 @@ impl Generator for Sytrus {
                 voice.pitch = f32::NAN;
             }
         }
+        // The chorus and delay wheels (`0x869a80`, `0x869540`) and the EQ
+        // bands (`0x86a440`).
+        if (MAIN_PARAM + 1..MAIN_PARAM + MAIN_WHEELS).contains(&index)
+            || (LATE_PARAM..PARAMS - 1).contains(&index)
+        {
+            let state = &self.state;
+            self.fx.configure(&state.fx, &state.wheels(), self.tempo);
+        }
     }
 
     fn reset(&mut self) {
         self.voices.clear();
         (self.to_tick, self.tick_part) = (0, 0.0);
+        self.fx.reset(&self.state.fx, &self.state.wheels());
     }
 
     /// The longest release among the envelopes that are on, and the fade
@@ -2638,7 +2693,7 @@ impl Generator for Sytrus {
             }
         }
         let frames = ticks.min(1e6) * timing.tick;
-        frames.ceil() as usize + (FADE * f64::from(self.rate)).ceil() as usize + 1
+        frames.ceil() as usize + (FADE * f64::from(self.rate)).ceil() as usize + 1 + self.fx.tail()
     }
 
     fn fidelity(&self) -> Fidelity {
@@ -2652,8 +2707,10 @@ impl Generator for Sytrus {
             .any(|f| matches!(state.filters[f].kind, COMB | PHASER))
         {
             Fidelity::Approximate("Sytrus comb or phaser filter")
-        } else if state.effects && state.send.iter().any(|s| *s != 0.0) {
-            Fidelity::Approximate("Sytrus effects")
+        } else if state.send_on && state.fx.send_target != -1 {
+            // The send to a mixer track (`Gen_Render`'s GetInBuffer) has no
+            // way out of a generator here.
+            Fidelity::Approximate("Sytrus FX send")
         } else {
             Fidelity::Approximate("Sytrus operators")
         }
