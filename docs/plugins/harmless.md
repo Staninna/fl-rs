@@ -681,11 +681,27 @@ phases are random (`ippsRandUniform_Direct_64f`) up to `0x5b8^2`.
 ## 8. The post chain (closed: setters `FUN_00789570`, `FUN_00789080`, `FUN_00789280`, `FUN_0077f170`)
 
 Order in `Gen_Render` (`FUN_007886b0`): stereo tremolo on each voice,
-then on the sum the chorus, the delay, the reverb and the compression.
+then on the sum of the voices (`FUN_00788620`, the list from its end) the chorus, the delay, the reverb and the compression.
 
-- Tremolo: `ippsTone_Direct_32fc` at `0x7a4 = 2.5 / SR` with magnitude 1.25,
-  `|.| - 1`, smoothed by `FUN_00604a90` with the depth `Trem/1000`, `+ 1`:
-  the left follows `|cos|`, the right `|sin|`.
+- Tremolo (`Gen_Render` ahead of the voices, `FUN_00604a90`, the voice's
+  tail). When the depth `0x79c = (f32)Trem * 0.001f` or its glide `0x7a0`
+  is not 0: with no voices in the list `0x7a0 = 0x79c` and nothing more;
+  else into set 0 +0x30 (`0x7b0`) go `ippsTone_Direct_32fc` of magnitude
+  1.25 (`DAT_00788fb0`) at `0x7a4 = 2.5 / SR` turns a sample from the
+  phase `(f32)(2 pi frac((f32)counter * 0x7a4))` (the sample counter
+  0x330, less 2 pi when it reaches it), `ippsAbs_32f`, `+ -1`
+  (`DAT_00788fb4`), times the depth `0x7a0` glided to `0x79c` by
+  `FUN_00612db0` with the host's cap (both 0: zero, 1: as is, else a
+  constant, a ramp through `FUN_00611550` in the lanes of section 7), `+
+  1` (`DAT_00788fb8`): the left follows `1 + d (1.25 |cos| - 1)`, the right
+  the same of `|sin|`, so each side swings from `1 - d` to `1 + d/4`. Each
+  voice multiplies its stereo block by it (`FUN_00784a10`), fading it in
+  over `0x7ac = Round(0.1 SR)` frames from its start (`voice+0x80`, set
+  by `TriggerVoice`): `r = min(1 - count 0x7a8 + i 0x7a8, 1)` with `0x7a8
+  = 1/(0x7ac + 1)` (`ippsVectorSlope_32f`, `ippsThreshold_GT_32f_I`), gain
+  `(1 - r) + r trem`, then `count -= n`; at count 0 and below it is the
+  plain product. The rate and fade are set by the rate setter
+  `FUN_0077f170` (`DAT_0077f470 = 2.5`, `DAT_0077f440 = 0.1`).
 The three effects are FL's shared classes, the same code Harmor links in;
 `docs/plugins/fl-fx.md` maps them and `crates/plugins/src/fl_fx.rs` is
 their port. What Harmless adds is the front end below. The setters run on
@@ -748,7 +764,8 @@ self-oscillation, the partial count and the bank's frequency weights, the
 sine bank and its 10 ms level glide, the LFO shapes, the vibrato and pitch
 LFO, the unison spreads, the attack, decay and release with their
 declick, legato and portamento with their glides, the host's volume and
-pan gains and their capped ramp, and the compression through `maximus.rs`.
+pan gains and their capped ramp, the stereo tremolo with its depth glide
+and fade in, and the compression through `maximus.rs`.
 
 The chorus, delay and reverb are FL's classes from `fl_fx.rs` behind the
 front end of section 8, told a block of 256 frames (the chunk the plugin
@@ -762,8 +779,8 @@ corpus is of the first): the colour groups, the colours that turn the
 boxes round and the filter notes of the 16th are not built. A `NoteOn`
 marked porta glides as `PortaBox` does.
 
-Approximated: the tremolo's smoothing; phaser type 9 and resonance type 8
-(played as plain curves).
+Approximated: phaser type 9 and resonance type 8 (played as plain
+curves).
 
 Left to the host: slide notes, which FL plays by sliding the host levels
 (`FinalLevels`) of the voices that sound and which fl-rs does not send a

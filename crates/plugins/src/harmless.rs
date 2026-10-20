@@ -37,8 +37,8 @@
 //! summed. Unison makes up to nine voices of a note with their own pitch,
 //! pan, phase and attack.
 //!
-//! After the voices: stereo tremolo, chorus, delay, reverb and the
-//! compression, which is a Maximus loaded from
+//! Each voice then takes the stereo tremolo; after the voices come the
+//! chorus, delay, reverb and the compression, which is a Maximus loaded from
 //! `Harmless/Data/Compression/<n>.fst` under the directory
 //! [`Generator::set_resource_dir`] is handed. The chorus, delay and reverb
 //! are FL's own classes from [`crate::fl_fx`], set from Harmless's tables.
@@ -48,8 +48,6 @@
 //! - The effects are told a host block of 256 frames, which sets when
 //!   they sleep after the last voice. The delay keeps its time down to 20
 //!   BPM and is only made when the state loads with it on.
-//! - The stereo tremolo's shape is read from its setter, its smoothing is
-//!   not.
 //! - Every note is of FL's first colour: the colour groups of legato and
 //!   portamento, the colours that turn them round and the filter notes are
 //!   not built.
@@ -853,7 +851,11 @@ struct Derived {
     vib_attack: f32,
     pluck_rate: f64,
     pluck_start: i64,
-    tremolo_rate: f64,
+    /// The tremolo's rate in turns a sample (0x7a4), the frames a new
+    /// voice fades it in over (0x7ac) and the fade's step (0x7a8).
+    tremolo_rate: f32,
+    tremolo_fade: i32,
+    tremolo_fade_step: f32,
     /// The most a host gain moves a frame (`TAudioRenderer` +0x34).
     ramp_cap: f32,
 }
@@ -974,6 +976,8 @@ impl Derived {
             pluck_rate: 0.0,
             pluck_start: 0,
             tremolo_rate: 0.0,
+            tremolo_fade: 0,
+            tremolo_fade_step: 0.0,
             ramp_cap: 0.001,
         }
     }
@@ -1097,6 +1101,8 @@ struct Voice {
     slide_step: [f32; 6],
     slide_ticks: i32,
     slide_coef: f32,
+    /// The frames left of the tremolo's fade in (`voice+0x80`).
+    trem_fade: i32,
     phase_offset: f32,
     pan_offset: f32,
     pitch_offset: f32,
@@ -1161,6 +1167,7 @@ impl Voice {
             slide_step: [0.0; 6],
             slide_ticks: 0,
             slide_coef: 1.0,
+            trem_fade: 0,
             phase_offset: 0.5,
             pan_offset: 0.0,
             pitch_offset: 0.0,
@@ -1368,6 +1375,10 @@ pub struct Harmless {
     lead: Option<u32>,
     lead_age: u64,
     last: Option<[f32; 6]>,
+    /// The tremolo's depth as it glides to the wheel's (0x7a0), and its
+    /// gains for the block, left and right side by side (set 0 +0x30).
+    trem_depth: f32,
+    trem: [f32; 2 * CHUNK],
     compression: Option<Box<Maximus>>,
     compression_states: [Option<Vec<u8>>; 4],
     missing_compression: bool,
@@ -1400,6 +1411,8 @@ impl Default for Harmless {
             lead: None,
             lead_age: 0,
             last: None,
+            trem_depth: 0.0,
+            trem: [0.0; 2 * CHUNK],
             compression: None,
             compression_states: [None, None, None, None],
             missing_compression: false,
@@ -1525,7 +1538,7 @@ impl Harmless {
         }
         d.mask_mix = k(p[23]) as f32;
         d.mask_lfo = k(p[24]) as f32;
-        d.tremolo = k(p[25]) as f32;
+        d.tremolo = p[25] as f32 * 0.001f32;
         d.attack = sr * (((k(p[26]) * 101f64.ln()).exp() - 1.0) as f32 as f64) * 0.05;
         d.decay = if p[27] < 1000 {
             sr * (((k(p[27]) * 1001f64.ln()).exp() - 1.0) as f32 as f64 * 0.11995 + 0.05)
@@ -1635,7 +1648,10 @@ impl Harmless {
         d.vib_attack = (3.0 / sr) as f32;
         d.pluck_rate = 0.01f64.ln() * d.tick as f64 / sr;
         d.pluck_start = 1 - round(sr * 0.002 / d.tick as f64) as i64;
-        d.tremolo_rate = 2.5 / sr;
+        // `FUN_0077f170`.
+        d.tremolo_rate = (2.5 / sr.round()) as f32;
+        d.tremolo_fade = round(sr.round() * 0.1) as i32;
+        d.tremolo_fade_step = (1.0 / f64::from(d.tremolo_fade + 1)) as f32;
         d.ramp_cap = (0.001 * 44_100.0 / sr) as f32;
 
         self.set_effects();
@@ -1832,6 +1848,7 @@ impl Harmless {
             voice.slide = [0.0; 6];
             voice.slide_step = [0.0; 6];
             voice.slide_ticks = 0;
+            voice.trem_fade = d.tremolo_fade;
             if n == 1 {
                 voice.phase_offset = 0.5;
                 voice.pan_offset = 0.0;
@@ -2401,7 +2418,7 @@ impl Harmless {
     }
 
     /// Render one chunk of a voice into the stereo sum.
-    fn render_voice(&self, voice: &mut Voice, left: &mut [f32], right: &mut [f32]) {
+    fn render_voice(&self, voice: &mut Voice, left: &mut [f32], right: &mut [f32], trem: bool) {
         let d = &*self.d;
         let len = left.len();
         // The host's gains for the block, from the note's levels as the
@@ -2437,21 +2454,49 @@ impl Harmless {
         // than the host's cap a frame, in FL's lanes.
         let (start_l, step_l) = parts::glide(&mut voice.gains[0], aim[0], d.ramp_cap, len);
         let (start_r, step_r) = parts::glide(&mut voice.gains[1], aim[1], d.ramp_cap, len);
-        if step_l == 0.0 && step_r == 0.0 {
-            if start_l != 0.0 || start_r != 0.0 {
-                for i in 0..len {
-                    left[i] += voice.mono[i] * start_l;
-                    right[i] += voice.mono[i] * start_r;
+        let mut ramp_l = Ramp::new(start_l, step_l, len);
+        let mut ramp_r = Ramp::new(start_r, step_r, len);
+        // The tremolo on the voice (`FUN_00784a10`, tail): a new voice
+        // fades it in over 0.1 s, `(1 - r) + r * trem`, r rising from
+        // 1 / (frames + 1) a frame to 1.
+        let fading = trem && voice.trem_fade >= 1;
+        let fade_start = 1.0 - voice.trem_fade as f32 * d.tremolo_fade_step;
+        if fading {
+            voice.trem_fade -= len as i32;
+        }
+        let still = step_l == 0.0 && step_r == 0.0;
+        if still && start_l == 0.0 && start_r == 0.0 {
+            return self.end_voice(voice, len);
+        }
+        for i in 0..len {
+            let (gl, gr) = if still {
+                (start_l, start_r)
+            } else {
+                (ramp_l.next(i), ramp_r.next(i))
+            };
+            let mut sl = voice.mono[i] * gl;
+            let mut sr = voice.mono[i] * gr;
+            if trem {
+                let (tl, tr) = (self.trem[2 * i], self.trem[2 * i + 1]);
+                if fading {
+                    let r = ((f64::from(fade_start) + f64::from(d.tremolo_fade_step) * i as f64)
+                        as f32)
+                        .min(1.0);
+                    sl *= (1.0 - r) + r * tl;
+                    sr *= (1.0 - r) + r * tr;
+                } else {
+                    sl *= tl;
+                    sr *= tr;
                 }
             }
-        } else {
-            let mut ramp_l = Ramp::new(start_l, step_l, len);
-            let mut ramp_r = Ramp::new(start_r, step_r, len);
-            for i in 0..len {
-                left[i] += voice.mono[i] * ramp_l.next(i);
-                right[i] += voice.mono[i] * ramp_r.next(i);
-            }
+            left[i] += sl;
+            right[i] += sr;
         }
+        self.end_voice(voice, len);
+    }
+
+    /// Whether a voice is over after its block.
+    fn end_voice(&self, voice: &mut Voice, len: usize) {
         // A voice past its attack whose envelope is under -80 dB is over
         // (`FUN_00783ac0` from the voice renderer), but for the note that
         // answers for the notes: legato may hand it on yet.
@@ -2507,20 +2552,61 @@ impl Harmless {
         }
     }
 
-    /// The stereo tremolo, chorus, delay, reverb and compression.
+    /// The stereo tremolo's gains for a block (`Gen_Render`, ahead of the
+    /// voices), when there are voices for it: a tone of magnitude 1.25 at
+    /// 2.5 Hz from the sample counter, `|cos| - 1` on the left and
+    /// `|sin| - 1` on the right, times the depth as it glides to the wheel's by
+    /// the host's cap (`FUN_00604a90`), plus 1. With no voices the depth
+    /// jumps to the wheel's.
+    fn tremolo(&mut self, len: usize, voices: usize) -> bool {
+        let d = &*self.d;
+        if d.tremolo == 0.0 && self.trem_depth == 0.0 {
+            return false;
+        }
+        if voices < 1 {
+            self.trem_depth = d.tremolo;
+            return false;
+        }
+        let tau = TAU as f32;
+        let mut phase =
+            (frac(f64::from(self.sample_count as f32 * d.tremolo_rate)) * f64::from(tau)) as f32;
+        if phase >= tau {
+            phase -= tau;
+        }
+        let w = TAU * f64::from(d.tremolo_rate);
+        let trem = &mut self.trem[..2 * len];
+        for i in 0..len {
+            let a = f64::from(phase) + w * i as f64;
+            trem[2 * i] = (1.25 * a.cos()).abs() as f32 + -1.0;
+            trem[2 * i + 1] = (1.25 * a.sin()).abs() as f32 + -1.0;
+        }
+        let (start, step) = parts::glide(&mut self.trem_depth, d.tremolo, d.ramp_cap, len);
+        if step == 0.0 {
+            if start == 0.0 {
+                trem.fill(0.0);
+            } else if start != 1.0 {
+                for x in trem.iter_mut() {
+                    *x *= start;
+                }
+            }
+        } else {
+            let mut ramp = Ramp::new(start, step, len);
+            for i in 0..len {
+                let g = ramp.next(i);
+                trem[2 * i] *= g;
+                trem[2 * i + 1] *= g;
+            }
+        }
+        for x in trem.iter_mut() {
+            *x += 1.0;
+        }
+        true
+    }
+
+    /// The chorus, delay, reverb and compression.
     fn effects(&mut self, voices: usize, left: &mut [f32], right: &mut [f32]) {
         let len = left.len();
         let d = &*self.d;
-        if d.tremolo > 0.0 {
-            for i in 0..len {
-                let t = (self.sample_count + i as u64) as f64 * d.tremolo_rate;
-                let a = t * TAU;
-                let gl = 1.0 + d.tremolo * ((1.25 * a.cos().abs()).min(1.0) as f32 - 1.0);
-                let gr = 1.0 + d.tremolo * ((1.25 * a.sin().abs()).min(1.0) as f32 - 1.0);
-                left[i] *= gl;
-                right[i] *= gr;
-            }
-        }
         let fx = &mut *self.fx;
         // The voices keep the classes awake: with none left, the
         // countdown runs out a block at a time.
@@ -2806,9 +2892,11 @@ impl Generator for Harmless {
             l[..len].fill(0.0);
             r[..len].fill(0.0);
             let mut voices = std::mem::take(&mut self.voices);
-            let sounding = voices.iter().filter(|v| v.active).count();
+            // FL's voice list: what sounds and the held notes.
+            let sounding = voices.iter().filter(|v| v.active).count() + self.held_len;
+            let trem = self.tremolo(len, sounding);
             for voice in voices.iter_mut().filter(|v| v.active) {
-                self.render_voice(voice, &mut l[..len], &mut r[..len]);
+                self.render_voice(voice, &mut l[..len], &mut r[..len], trem);
             }
             self.voices = voices;
             self.effects(sounding, &mut l[..len], &mut r[..len]);
@@ -2896,8 +2984,6 @@ impl Generator for Harmless {
         let p = &self.state.params;
         if self.missing_compression {
             Fidelity::Approximate("Harmless without its compression preset")
-        } else if p[25] > 0 {
-            Fidelity::Approximate("Harmless tremolo")
         } else if (p[71] > 0 && self.state.selectors[2] == 9)
             || (p[59] > 0 && self.state.selectors[1] == 8)
         {
@@ -3186,6 +3272,50 @@ mod tests {
     }
 
     #[test]
+    fn the_tremolo_swings_each_side_from_nothing_to_a_quarter_over() {
+        let mut plugin = with_state(&[(25, 1000)]);
+        // No voices: the depth goes straight to the wheel's.
+        assert!(!plugin.tremolo(256, 0));
+        assert_eq!(plugin.trem_depth, 1.0);
+        // A turn of the 2.5 Hz tone: 1.25 |cos| on the left, 1.25 |sin|
+        // on the right.
+        assert!(plugin.tremolo(CHUNK, 1));
+        assert_eq!(plugin.trem[0], 1.25);
+        assert!(plugin.trem[1].abs() < 1e-6);
+        let w = TAU * 2.5 / 44_100.0;
+        for i in 0..CHUNK {
+            let a = w * i as f64;
+            assert!((f64::from(plugin.trem[2 * i]) - 1.25 * a.cos().abs()).abs() < 1e-6);
+            assert!((f64::from(plugin.trem[2 * i + 1]) - 1.25 * a.sin().abs()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_tremolo_depth_glides_while_voices_sound() {
+        let mut plugin = with_state(&[(25, 500)]);
+        plugin.trem_depth = 0.0;
+        assert!(plugin.tremolo(256, 1));
+        // At most 0.001 a frame at 44.1 kHz.
+        assert!((plugin.trem_depth - 0.256).abs() < 1e-5);
+        // At sample 0 the left starts at 1 + depth (1.25 - 1) = 1, as the
+        // depth starts at 0.
+        assert_eq!(plugin.trem[0], 1.0);
+    }
+
+    #[test]
+    fn a_new_voice_fades_the_tremolo_in_over_a_tenth_of_a_second() {
+        let mut plugin = with_state(&[(25, 1000)]);
+        assert_eq!(plugin.d.tremolo_fade, 4410);
+        assert_eq!(plugin.d.tremolo_fade_step, (1.0f64 / 4411.0) as f32);
+        plugin.note_on(note(60));
+        render(&mut plugin, 512);
+        let voice = sounding(&plugin)[0];
+        assert_eq!(voice.trem_fade, 4410 - 512);
+        render(&mut plugin, 4096);
+        assert!(sounding(&plugin)[0].trem_fade < 1);
+    }
+
+    #[test]
     fn portamento_falls_to_a_hundredth_in_its_time() {
         let mut plugin = with_state(&[(43, 1), (45, 400)]);
         let ticks = plugin.d.porta;
@@ -3247,7 +3377,11 @@ mod tests {
         assert_eq!(voices.len(), 3);
         assert!(voices.iter().all(|v| v.id == 1 && v.state < 6));
         // From where the glide had got to, so less than the fifth.
-        assert!((300.0..700.0).contains(&voices[0].slide[2]), "{}", voices[0].slide[2]);
+        assert!(
+            (300.0..700.0).contains(&voices[0].slide[2]),
+            "{}",
+            voices[0].slide[2]
+        );
         // Which then lets go.
         plugin.note_off(1);
         assert!(sounding(&plugin).iter().all(|v| v.state == 6));
