@@ -206,19 +206,63 @@ exactly 0 dB keeps processing for SR/5 samples, then switches its sections off
 and clears them (`FUN_006ef120`, tail counter), which is why toggling a band's
 level between 0 and 0.01 dB changes the CPU load but not the sound.
 
-New HQ mode (`0x360 == 1`, the default in version 8 states): the plugin does
-not use the cookbook. `FUN_006f1c80` calls the engine's `dispatch(kind, out,
-Hz/SR * 2, Q, gainDB)` with kind codes LP 2, HP 3, LoShelf 5, Peak 6, HiShelf
-8, BP 9, Notch 10, and stores the returned b0, b1, b2, a1, a2. The Q and gain
-arguments per kind: LP/HP pass `Q_i * sqrt 0.5` (`0x006ef0c0`) and the band
-dB (unused); BP/Notch pass `Q = 1 / (2 sinh(ln2/2 BW))`; peaks pass the same Q
-from `BW_i` and the per-section dB; shelves pass `1 / sqrt((A + 1/A)(1/S - 1)
-+ 2)` and `dB / n`. The engine routine (`FUN_1801de630` in `fs_engine_x64.dll`, 1359
-decompiled lines) is a matched second-order design: poles by impulse
-invariance from `exp(-w0 / (2Q))`, numerator fitted so the digital magnitude
-equals the analog prototype at DC, w0 and Nyquist. It needs no oversampling
-and reports zero latency. Tag `inferred` for the method; the code is there but
-was not reduced to closed form in this pass.
+New HQ mode (`0x360 == 1` with the HQ button, `FUN_006f1c60`; the default in
+version 8 states): the plugin does not use the cookbook. For each section the
+designer `FUN_006ee6e0` calls `FUN_006f1c80`, which calls the engine's
+`dispatch` (`0x1801e0d90`) as `dispatch(kind, out, float(Hz / SR * 2),
+float(Q), float(dB))` and stores the returned b0, b1, b2, a1, a2. The section
+kind codes map LP 1 -> 2, BP 2 -> 9, Notch 3 -> 10, HP 4 -> 3, LoShelf 6 -> 5,
+Peak 7 -> 6, HiShelf 8 -> 8. The frequency is not clamped. The arguments per
+kind (`asm`):
+
+| kind | Hz | Q | dB |
+|---|---|---|---|
+| LP, HP | band Hz | `Q_i * sqrt(0.5)`: `Q_i` as for the cookbook, pow'd and steep-scaled | band level (unused) |
+| BP, Notch | band Hz | `1 / (2 sinh(ln2/2 BW))`, `BW` with the `0.7079 sqrt n` spread | band level (unused) |
+| Peak | band Hz, or the steep centre `Hz 2^(TO BW / n)` unrounded | the same Q from `BW_i` | twice the amplitude dB: `2 dB / 2n`, or `2 dB TG'` when steep |
+| shelves | band Hz | `1 / sqrt((A + 1/A)(1/S_i - 1) + 2)`, `A` the cookbook's float | `float(dB * (1/n))` |
+
+The engine routine (`FUN_1801de630`, cases by `kind`, jump table at
+`0x1801e0d38`) was transcribed instruction by instruction and checked against
+the DLL's own code run under an emulator (unicorn) on 21,000 random calls:
+with the DLL's `sin`/`cos`/`exp`/`cosh`/`log`/`pow` (`0x1801f1580`,
+`0x1801ed000`, `0x1801edf20`, `0x1801eda80`, `0x1801ee600`, `0x1801ef010`)
+in place of Rust's it is the same to the bit; with Rust's libm it is within
+1e-11 relative (one ill-conditioned band pass at Q 0.08: 2e-9). Every design
+works in `f` = frequency over Nyquist; `g = 10^(dB/20)`.
+
+- Band pass (9) and notch (10): poles by impulse invariance,
+  `e = exp(-f pi/2 / Q)`, `a1 = -2 e cos(pi f sqrt(1 - 1/4Q^2))` (`cosh` for
+  Q <= 0.5), `a2 = e^2`. Notch zeros on the circle at `f`, scaled for unity
+  at DC. Band pass by Vicanek's matched form (`phi1 = sin^2(pi f/2)`,
+  `A0 = (1 + a1 + a2)^2`, `A1 = (1 - a1 + a2)^2`, `A2 = -4 a2`; `R2`, `B2`,
+  `B1`, then `b1 = -sqrt(B1)/2`, `b0 = (sqrt(B2 + B1/4) - b1)/2`,
+  `b2 = -b0 - b1`).
+- Low pass (2), high pass (3), peak (6) and both shelves (5, 8) do not use
+  impulse invariance. They fit the squared magnitude of the analog prototype
+  at DC, at Nyquist (`f^4 / ((f^2 - 1)^2 + f^2/Q^2)` for the low pass) and
+  at one more point (`sin^2(pi x/2)` for `x` = the prototype's peak, `0.5`, or
+  a point scaled by `sqrt(1 - 1/2Q^2)`), as three sums `P` (poles), `Z`
+  (zeros) and two products, and factor them all the same way:
+  `pole = (sqrt P + 1)/2`, `norm = 1 / (pole + sqrt(pole^2 + Dp))`,
+  `a1 = norm (1 - sqrt P)`, `a2 = -norm^2 Dp`, `zero = (sqrt Z + 1)/2`,
+  `b0 = norm (zero + sqrt(zero^2 + Dz))`, `b1 = norm (1 - sqrt Z)`,
+  `b2 = -norm Dz / (zero + sqrt(zero^2 + Dz))` (the low shelf scales the
+  b's by `g` too). Low pass: three branches by `1/Q^2` against 2 (clamped
+  to 1.99 just under it) and `(1 - 1/2Q^2) f^2` against 1. High pass: three
+  branches the same way, the middle one a blend by `min(((f^2 - 1) +
+  1/2Q^2) Q, 1)`. Peak: `|g - 1| < 0.001` is a wire; `f >= 1` its own
+  branch. Shelves: `|g - 1| < 0.001` is a wire; `Q^2 <= 0.6` takes poles
+  by impulse invariance at the prototype's corner `sqrt(den) pi/2` and fits
+  the zeros at DC, Nyquist and `min(.., 0.2)`; otherwise the corner `c =
+  -(r^2 + 1)/((1/Q^2 - 2) r) - sqrt(..)` (`r = sqrt(max(g, 1/g))`) picks one
+  of three branches by where `fp = f' sqrt(r c)` falls (under `c`, under 1,
+  past it), the middle one through `pow(fp, log(x)/log(c))`. The high shelf
+  is the low one with its ends swapped and its own roundings
+  (`f / g^(1/4)` against `g^(1/4) f`).
+
+So the matched filters follow the analog EQ curve up to Nyquist instead of
+cramping towards it, with no oversampling and no latency.
 
 Display (`FUN_006efda0`): level and main `%.2f dB`, freq `Round(Hz) Hz`,
 width `Round(w01 * 100) %`, type and order by name. Typed-in values
@@ -227,7 +271,7 @@ width `Round(w01 * 100) %`, type and order by name. Typed-in values
 ## 3. Signal chain (`Eff_Render` @ 0x006f0da0)
 
 ```
-FUN_006eddc0: report latency (0x1e): 44 when oversampling, 3N/4 when linear phase, else 0;
+FUN_006eddc0: report latency (0x1e): 3N/4 when linear phase, else 44 when oversampling by the engine (0x37c), else 0;
               rebuild the linear-phase kernel if a band changed (below)
 if monitor == 1: scope(Source)
 silent = every |sample| < 1e-6 (FUN_005f1500, 0x006f1614)
@@ -244,7 +288,9 @@ if tail > -Length:
         else: FUN_006f0790: per frame: smoother tick, redesign dirty bands, run every section for one frame
         if 0x37c: engine op 0xc per 2 frames (FIR decimate) else TPolyphase down (FUN_006ea2c0)
     else: engine op 4 per frame on Dest (FFT convolver, context 0x20c0)
-else: copy Source -> Dest if needed; tick smoother; clear band states once; tail = asleep
+else: copy Source -> Dest if needed; tick smoother; once (FUN_006edbf0): clear the states of the bands
+      still counting down (tail > 0; a band at -1 keeps its states), clear both TPolyphase halves,
+      flag the main gain to jump to its target on waking, engine op 0xd (linear phase only); tail = asleep
 if monitor == 2: scope(Dest)
 ```
 
@@ -269,16 +315,39 @@ path), coefficients from the 13 doubles at `0x0074e290` (copied pairwise into
 stage is `y = y1 + (x - x1) * c` on L and R together (SSE2 doubles). Up:
 one input frame produces two outputs, path A then path B. Down: path A takes
 the even sample, path B the odd, output `(A + B) * 0.5`. State 0xc0 bytes per
-stage set. The 44-sample latency reported in this mode comes from the engine
-FIR, not from this filter; with `0x37c == 0` the report is still 44.
+stage set. This path reports no latency: `FUN_006eddc0` (`0x006ee493`)
+reports 0x2c only when `0x37c` is set too.
 
-### Engine resampler (`mydispatcher` ops 7/9/10/11/12)
+### Engine resampler (`mydispatcher` @ `0x1801e1e50`, ops 7/9/10/11/12)
 
-Op 9 is zero-stuffing with a gain of 2 (`out = {2x, 0}`); op 10 builds a
-176-float windowed-sinc low pass (`sin(pi (i - 89)/2) / (pi (i - 89)/2) *
-0.5`, then a raised-cosine window), op 0xc pushes two samples into a 256-entry
-ring and returns one filtered sample. Half the FIR length is the 44 samples of
-latency (`0x2c` in `FUN_006eddc0`).
+Read from the disassembly and checked by running the DLL's code under an
+emulator (unicorn, outside the repo).
+
+- Up, op 9 (`0x1801e2080`), per frame and side: `{x, _} -> {x + x, 0}` in
+  floats; `x` is also kept in the 4-byte context op 7 made, and nothing
+  reads it. There is no filter on the way up: the bands see the
+  zero-stuffed signal with its image, and the low pass on the way down
+  takes the image out. `Eff_Render` (`0x006f11a7`) lays the wide buffer out
+  as `2L, 2R, 0, 0` per frame.
+- Op 10 (`0x1801e20a0`) builds the low pass: `h[i] = float(0.5 sin(x) / x)`
+  with `x = (i - 89) pi/2` (`0.5` at `x = 0`), `i = 0..175`, then
+  `h[i] = float(h[i] * sin(i pi/176))` by the vector sine at `0x1801eb080`
+  over pairs. Its small-angle branch and its odd symmetry show a sine, not a
+  raised cosine. The context holds a 256-float ring (`+0`), the write index
+  (`+0x20`, from 0), the tap offset (`+0x24`, 0) and the tap count (`+0x28`,
+  176). The taps an even way from 89 are not 0 but what is left of
+  `sin(k pi)`, about 1e-17.
+- Down, op 0xc (`0x1801e224c`), per frame and side with `{even, odd}`:
+  `ring[at] = even; at = (at - 1) & 255; ring[at] = odd;` then
+  `y = sum_j h[j] ring[(at + j) & 255]` in two runs either side of the wrap,
+  each by `FUN_1801e0fe0`: four float lanes over the whole groups of four,
+  added to the running sum lane by lane, then the rest one at a time; then
+  `at = (at - 1) & 255`. So `y[n] = sum_k 2 x[k] h[2n + 1 - 2k]`, and only
+  `h[89]` is on the odd taps: a click comes out as `2 h[89] = 0.99996` 44
+  frames later. That is the 44 (`0x2c`) the plugin reports. The rings are
+  never cleared while the plugin runs, not even when it sleeps.
+- The taps sum to 0.99984; the pass band holds to 18 kHz at 44.1 kHz
+  within 0.01 dB.
 
 ### Linear phase (`FUN_006eddc0`, engine ops 0, 2, 3, 4, 5, 6, 0xd, 0xe)
 
@@ -291,9 +360,14 @@ kernel[N/2] = kernel[N/2 - 1]
 engine: op 5 = SR, op 6 = window[0x374], op 2 = N, op 3 = kernel          // under the host lock
 ```
 
-The engine (`FUN_1801c8a70`) runs two overlapped FFT convolvers and
-crossfades between them over `N * window` samples when a new kernel arrives.
-So linear phase is "the minimum-phase IIR design, made zero-phase": the
+The engine (`FUN_1801c8a70`, op 4 per frame) runs two FFT convolvers and
+crossfades between them linearly over `SR * window` frames when a new
+kernel arrives, the new one primed with the last N frames. Each convolver
+(`FUN_1801e2c90`) takes the zero-phase impulse of the magnitudes, keeps the
+N/2 taps from N/4 under a half sine window (`sinf(i pi / (N/2 - 1))`), and
+convolves by IPP complex FFTs made with `IPP_FFT_NODIV_BY_ANY` (neither
+direction scales) in blocks of N/2. `.scratch/notes/fruity-parametric-eq-2.md`
+has the addresses and what is left to read for a rebuild. So linear phase is "the minimum-phase IIR design, made zero-phase": the
 magnitude is identical to the IIR path, the latency is 3N/4 samples (1536 at
 44.1 kHz with the default step 2).
 
@@ -306,19 +380,19 @@ or 10 ms (`FUN_006f1f30` with `0x006f2088`), the band is redesigned every
 sample while any triple is live, and the triple is dropped once it is within
 `0x0074e600` of its target. Linear phase disables the smoother.
 
-Re-implementation note: for the default (version 8, HQ 3) path you need the
-engine's matched designer or a stand-in such as Vicanek's matched biquads;
-for legacy HQ (flags 1) the RBJ formulas above plus the polyphase half-band
-reproduce the output, and for HQ off the RBJ cascade alone does. Keep the
+Re-implementation note: the default (version 8, HQ 3) path needs the
+engine's matched designer (section 2); legacy HQ (flags 1) is the RBJ
+formulas above at twice the rate between the halves of the polyphase
+half-band or the engine resampler, and HQ off is the RBJ cascade alone. Keep the
 double-precision DF1 and the per-section gain split, and apply the main gain
 first.
 
 ## 4. What stays unknown
 
-- The closed form of the engine's matched designer (`FUN_1801de630`); only its
-  interface and structure were read.
-- The 13 polyphase coefficients at `0x0074e290` were not transcribed; read
-  them with `pe.py g 0x74e290 13`.
+- The IPP calls of the linear phase convolver (`FUN_1801e1960`,
+  `FUN_1801e2ad0`), the 2^x polynomial and clamps of the kernel builder,
+  and what sets the band flag at `+0x1371` that snaps a bin to a band's
+  centre.
 - `0x364`, `0x2078`, `0x20e8..0x20ea`, `0x212c`, `0x20ec`: saved GUI state,
   values constant in the corpus.
 - What distinguishes state version 7 from 8 (same bytes).
@@ -330,4 +404,8 @@ first.
 
 - Sizes accepted: 305, 309, 326, 330, 350, 354 (versions 2 to 8); the corpus holds 1,138 states, not 1,117.
 - The steep peak width table and the polyphase coefficients are not transcribed; steep peak sections clamp at 0.8π. The allpass is `y = x1 + (x − y1)·c`.
-- Approximated in the corpus: HQ "matched" designer (59 slots, run as 1× cookbook), linear phase (8, run minimum phase), the engine FIR resampler (204, run as the built-in polyphase). 867 slots are exact.
+- The engine resampler is in `crates/plugins/src/parametric_eq_2_engine.rs`. Rust's `sin` gives the DLL's taps to the bit, and the dot product keeps the DLL's four lanes. The plugin reports 44 frames of latency with it.
+- A band counts its 0 dB tail down once a block, after the whole block, as FL does. Going to sleep empties only the bands still counting down and the built-in polyphase, and the main level jumps to its target on waking.
+- The matched designer is `matched` in `crates/plugins/src/parametric_eq_2_engine.rs`, in the DLL's order of operations. Its tests hold a table of 32 calls to the DLL's `dispatch` (every branch of every kind), run under an emulator.
+- `Delphi`'s `sinh` (`FUN_0045d8d0`), used for the octave Q, is taken as Rust's `sinh`; they may be an ulp apart.
+- Approximated in the corpus: linear phase (8 states, run minimum phase). 1,130 slots are exact.
