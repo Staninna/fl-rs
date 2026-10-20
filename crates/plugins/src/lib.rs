@@ -40,7 +40,9 @@ pub mod blood_overdrive;
 pub mod boobass;
 pub mod chorus;
 pub mod compressor;
+pub mod control_surface;
 pub mod convolver;
+pub mod db_meter;
 pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
@@ -66,6 +68,7 @@ pub mod harmor;
 mod harmor_art;
 mod harmor_fx;
 mod harmor_state;
+pub mod html_notebook;
 pub mod hyper_chorus;
 pub mod limiter;
 pub mod love_philter;
@@ -73,14 +76,18 @@ pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
 pub mod multiband_compressor;
+pub mod notebook;
+pub mod notebook_2;
 pub mod ogun;
 pub mod panomatic;
 pub mod parametric_eq_2;
 mod parts;
+pub mod pass_through;
 pub mod peak_controller;
 pub mod pitch_shifter;
 pub mod pitcher;
 pub mod port;
+pub mod razer_chroma;
 pub mod reeverb_2;
 mod sampler;
 pub mod slicex;
@@ -97,7 +104,10 @@ mod testing;
 pub mod three_osc;
 pub mod transient_processor;
 pub mod vocodex;
+pub mod wave_candy;
 pub mod waveshaper;
+pub mod wrapper;
+pub mod xy_controller;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
@@ -287,6 +297,9 @@ pub enum StateError {
     /// The state starts with a version newer than the plugin reads. FL
     /// leaves such a state alone too.
     Version { found: i32 },
+    /// The state holds another plugin, one this crate does not host, as a
+    /// Fruity Wrapper's can.
+    Unhosted,
 }
 
 impl fmt::Display for StateError {
@@ -301,11 +314,22 @@ impl fmt::Display for StateError {
             StateError::Version { found } => {
                 write!(f, "the state is of version {found}, which is too new")
             }
+            StateError::Unhosted => write!(f, "the state holds a plugin that is not hosted"),
         }
     }
 }
 
 impl std::error::Error for StateError {}
+
+/// The effects that leave the sound as it is, by their event 201 names.
+const PASS_THROUGH: [&str; 6] = [
+    db_meter::NAME,
+    html_notebook::NAME,
+    notebook::NAME,
+    notebook_2::NAME,
+    razer_chroma::NAME,
+    wave_candy::NAME,
+];
 
 /// The effect FL loads under this event 201 name, set to its defaults.
 /// `None` for a plugin that is not built yet.
@@ -387,6 +411,16 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(vocodex::Vocodex::default()))
     } else if is(waveshaper::NAME) {
         Some(Box::new(waveshaper::WaveShaper::default()))
+    } else if PASS_THROUGH.iter().any(|known| is(known)) {
+        Some(Box::new(pass_through::PassThrough::new()))
+    } else if is(control_surface::NAME) {
+        let left_out = control_surface::LEFT_OUT;
+        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+    } else if is(xy_controller::NAME) {
+        let left_out = xy_controller::LEFT_OUT;
+        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+    } else if is(wrapper::NAME) {
+        Some(Box::new(wrapper::Wrapper::default()))
     } else {
         None
     }
@@ -630,8 +664,12 @@ mod tests {
             let Some(mut effect) = by_name(&saved.plugin) else {
                 continue;
             };
-            if let Err(error) = effect.set_state(&saved.state) {
-                panic!("{} in {}: {error}", saved.plugin, saved.file);
+            match effect.set_state(&saved.state) {
+                // A wrapper of an effect not built yet, which
+                // `wrapper::tests` counts.
+                Err(StateError::Unhosted) if saved.plugin == wrapper::NAME => continue,
+                Err(error) => panic!("{} in {}: {error}", saved.plugin, saved.file),
+                Ok(()) => {}
             }
             let plugin = saved.plugin.to_ascii_lowercase();
             *loaded.entry((plugin, saved.state.len())).or_insert(0) += 1;
@@ -707,10 +745,18 @@ mod tests {
             "maximus",
             "soundgoodizer",
             "vocodex",
+            // Counted in `wrapper::tests`.
+            "fruity wrapper",
         ];
+        // Any state does for an effect that leaves the sound alone.
+        let controllers = [control_surface::NAME, xy_controller::NAME];
+        let passes = |plugin: &str| {
+            let mut passing = PASS_THROUGH.iter().chain(&controllers);
+            passing.any(|n| n.eq_ignore_ascii_case(plugin))
+        };
         let lengths = loaded
             .keys()
-            .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
+            .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
         assert_eq!(lengths.count(), 37);
         let shapers = loaded
             .iter()

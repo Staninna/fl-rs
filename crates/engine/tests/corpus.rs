@@ -477,7 +477,7 @@ fn the_transient_multiband_and_delay_bank_render_tests_play_through_the_plugin()
 /// it does what FL's does, and the output has sound and no NaN.
 ///
 /// The render test for Fruity Chorus has its chorus inside a Fruity
-/// Wrapper, which the engine does not host, so it is not here.
+/// Wrapper, which hosts it under the wrapper's name, so it is not here.
 #[test]
 fn the_flangus_overdrive_and_spreader_render_tests_play_through_the_plugin() {
     let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
