@@ -30,6 +30,9 @@
 //! leaves out, mod X and Y, the arpeggiator, the time stretch, the
 //! envelopes and a clip's own LFO, have no part in it to drive.
 //!
+//! An ID of an insert's own control that names a slot as well drives the
+//! insert's control, as FL's dispatcher reads it ([`dispatched`]).
+//!
 //! A plugin's parameter `n` is control `0x8000 + n` of its slot, or of its
 //! channel for a generator. The clip's
 //! 0 to 1 covers the part of the parameter's range that the channel's 219
@@ -54,8 +57,8 @@
 //! (`docs/plugins/fruity-peak-controller.md`, section 4). The plugin works
 //! its outputs out once a tick of the song, and where one has moved, every
 //! link from it sets its control: the output's 0 to 1 goes through the
-//! link's formula when it has one, and then covers the whole of the
-//! control's range in a straight line. That is FL's REC dispatcher taking a
+//! link's formula when it has one ([`crate::formula`]), and then covers the
+//! whole of the control's range in a straight line. That is FL's REC dispatcher taking a
 //! value in 2^30ths, as it does for a clip. The Peak Controller counts in
 //! 2^30ths already, so the 16384 that FL's host multiplies an older
 //! controller's value by is not on it.
@@ -749,18 +752,19 @@ impl Automation {
             // A clip whose 234 did not decode has no curve to play.
             let curve = channel.automation.as_ref().map(|d| Curve::new(&d.envelope));
             for binding in bound.clone() {
+                let target = dispatched(binding.target);
                 // A control of a slot that holds no plugin changes nothing:
                 // the slot passes its input on whatever it is set to.
                 if let RecTarget::Insert {
                     index,
                     slot: Some(slot),
                     ..
-                } = binding.target
+                } = target
                     && empty_slot(project, index, slot)
                 {
                     continue;
                 }
-                let lane = automation.lane(project, binding, tempo);
+                let lane = automation.lane(project, binding, target, tempo);
                 match (lane, curve.is_some()) {
                     (Some((lane, min, max)), true) => {
                         let clip = automation.clips.len();
@@ -768,8 +772,7 @@ impl Automation {
                             .sources
                             .push(Source { clip, min, max });
                         placed.plays = true;
-                        let slot =
-                            matches!(binding.target, RecTarget::Insert { slot: Some(_), .. });
+                        let slot = matches!(target, RecTarget::Insert { slot: Some(_), .. });
                         placed.slots += usize::from(slot);
                     }
                     _ => placed.unsupported += 1,
@@ -809,10 +812,10 @@ impl Automation {
                 Some(text) => Formula::compile(text).map(Some),
                 None => Some(None),
             };
-            let driven = formula.and_then(|formula| {
-                let target = project.link_target(ids.target);
+            let target = dispatched(project.link_target(ids.target));
+            let driven = formula.as_ref().and_then(|formula| {
                 let (control, _, range) = self.control(project, target, tempo)?;
-                (control != Control::Tempo).then_some((control, range, formula))
+                (control != Control::Tempo).then_some((control, range, formula.clone()))
             });
             let Some((control, (low, high), formula)) = driven else {
                 self.unsupported_controller_targets += 1;
@@ -991,16 +994,20 @@ impl Automation {
     /// The place in `lanes` of the control a binding drives, with the
     /// control's raw value at the clip's 0 and 1. Makes the lane when the
     /// control has none. `None` for a control the engine does not play.
+    /// `target` is the binding's as [`dispatched`] reads it.
     fn lane(
         &mut self,
         project: &Project,
         binding: &Binding,
+        target: RecTarget,
         tempo: f64,
     ) -> Option<(usize, f64, f64)> {
-        let (found, initial, (low, high)) = self.control(project, binding.target, tempo)?;
+        let (found, initial, (low, high)) = self.control(project, target, tempo)?;
         // The model has the two ends for the controls it knows the range
-        // of. A slot's are worked out here the same way.
-        let (min, max) = match binding.min_raw.zip(binding.max_raw) {
+        // of. A slot's are worked out here the same way, and so are those
+        // of an insert's control whose ID names a slot.
+        let ends = binding.min_raw.zip(binding.max_raw);
+        let (min, max) = match ends.filter(|_| target == binding.target) {
             Some(ends) => ends,
             None => {
                 let (min, max) = project.channel(binding.channel)?.automation_range();
@@ -1217,6 +1224,32 @@ impl Automation {
 /// the width is taken in f64.
 fn raw_at(low: i32, high: i32, part: i32) -> f64 {
     f64::from(low) + f64::from(part) / 12_800.0 * (f64::from(high) - f64::from(low))
+}
+
+/// A target as FL's REC dispatcher reads it (`FUN_01046a70`, the mixer
+/// branch at 0x104aac7). It takes the slot bits of a mixer ID for a slot's
+/// switch (0x1F00), its mix level (0x1F01) and its plugin's parameters
+/// (0x8000 on) alone. An insert's volume, pan, separation, EQ and sends are
+/// the insert's whatever slot the ID names, so a link to one of them with
+/// slot bits set drives the insert's control. The model keeps the slot
+/// such an ID names, and this takes it off. Corpus: 11 clips in `Bombs
+/// Away ft KARRA - I'm Awake.flp` drive an EQ band's frequency through
+/// slot 9.
+fn dispatched(target: RecTarget) -> RecTarget {
+    match target {
+        RecTarget::Insert {
+            index,
+            slot: Some(_),
+            control,
+        } if !matches!(control, control::SLOT_ENABLED | control::SLOT_MIX) && control < PARAM => {
+            RecTarget::Insert {
+                index,
+                slot: None,
+                control,
+            }
+        }
+        other => other,
+    }
 }
 
 /// Whether a slot of an insert holds no plugin.
