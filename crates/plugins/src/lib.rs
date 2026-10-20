@@ -67,10 +67,12 @@ pub mod equo;
 pub mod fast_dist;
 pub mod fast_lp;
 pub mod filter;
+mod fl_formula;
 pub mod fl_fx;
 pub mod fl_keys;
 pub mod flanger;
 pub mod flangus;
+pub mod formula_controller;
 pub mod fpc;
 pub mod free_filter;
 pub mod frequency_shifter;
@@ -415,6 +417,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(vintage_phaser::VintagePhaser::default()))
     } else if is(phaser::NAME) {
         Some(Box::new(phaser::Phaser::default()))
+    } else if is(formula_controller::NAME) {
+        Some(Box::new(formula_controller::FormulaController::default()))
     } else if is(free_filter::NAME) {
         Some(Box::new(free_filter::FreeFilter::default()))
     } else if is(bass_boost::NAME) {
