@@ -83,6 +83,7 @@ pub mod pitcher;
 pub mod port;
 pub mod reeverb_2;
 mod sampler;
+pub mod send;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
@@ -371,6 +372,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(pitcher::Pitcher::default()))
     } else if is(reeverb_2::NAME) {
         Some(Box::new(reeverb_2::Reeverb2::default()))
+    } else if is(send::NAME) {
+        Some(Box::new(send::Send::default()))
     } else if is(soft_clipper::NAME) {
         Some(Box::new(soft_clipper::SoftClipper::default()))
     } else if is(soundgoodizer::NAME) {
@@ -664,6 +667,7 @@ mod tests {
             ("fruity peak controller", 42, 36),
             ("fruity reeverb 2", 58, 62),
             ("fruity reeverb 2", 66, 271),
+            ("fruity send", 16, 2),
             ("fruity soft clipper", 8, 28),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
@@ -711,7 +715,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 37);
+        assert_eq!(lengths.count(), 38);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
