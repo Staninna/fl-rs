@@ -643,10 +643,13 @@ sums in their order, a radix-2 float FFT for IPP's) and
 `LinearSetting::magnitudes` in `maximus.rs`. What is not FL's to the bit:
 the FFT's rounding (IPP's path depends on the CPU), the window's
 `rcpps` and vector `sinf` last bits, and the libm `ln` / `exp` of the
-wheels. Inferred: the implementation sends new magnitudes whenever what
-they are made of changes; FL sets the flags on load, rate, the
-frequencies and the slopes (`0x842933`, `0x842960`), so a moved low cut
-or band mode in linear-phase mode waits there for one of those. Four
+wheels. FL sets the flags (`FUN_00848930`) on a state load (`0x840189`), in
+the constructor, on the linear-phase button (`0x84aa2c`), the precision,
+speed and oversampling menus (`0x83e23b`, `0x83deab`, `0x83e9b7`) and on
+globals 0 to 3 (`0x842933`, `0x842960`); a moved low cut or band mode in
+linear-phase mode is read with the next of those, and the implementation
+does the same. Inferred: it also sets them after a new rate, which
+reaches the same reset as a load. Four
 corpus states (three in "Astes - Bien Duro", one in "LollieVox & Lezina
 J") have the flag.
 
@@ -709,13 +712,15 @@ the corpus projects.
   Frequency Splitter's engine draws, with Maximus's own quick log2 and
   2^x in doubles.
 
-Known and left as they were (each would move every state's sound a
-little, so they wait for a decision):
-
 - `FUN_008415c0` takes the attack, release 2 and release times as
   `t * SR * os` without rounding; only the delay and the detector window
-  are rounded. The implementation rounds all of them to whole frames
-  (`limiter::frames`) before making the stage coefficients.
-- Moving a slope (globals 1 and 3) calls `FUN_008485d0`, which remakes
-  the oversamplers and flushes the plugin (`FUN_00846280`); the
-  implementation only redesigns the crossover.
+  are rounded (then times `os`). The time is
+  `float(exp(double(float(v) * 1e-4f) * ln 501) - 1) * 2 ms`, and the
+  attack's 0.8 is a single (0.800000011920929). The implementation used
+  to round every time with `limiter::frames`; it now works them as FL
+  does (`wheel_frames`).
+- Moving a slope (globals 1 and 3; `ProcessParam` `0x8428b0`, globals 0
+  and 2 go to `0x842907`) calls `FUN_008485d0`, which remakes the
+  oversamplers and flushes the plugin (`FUN_00846280`), leaving it
+  asleep (0x788 = 0xc0000001) until a block has sound. The
+  implementation now does the same.

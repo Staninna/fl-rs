@@ -62,7 +62,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::limiter::NAME, Port::Exact),
     (crate::love_philter::NAME, Port::Gaps),
     (crate::luxeverb::NAME, Port::Gaps),
-    (crate::maximus::NAME, Port::Gaps),
+    (crate::maximus::NAME, Port::Exact),
     (crate::multiband_compressor::NAME, Port::Exact),
     (crate::notebook::NAME, Port::Exact),
     (crate::notebook_2::NAME, Port::Exact),
