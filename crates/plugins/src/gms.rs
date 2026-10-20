@@ -601,7 +601,9 @@ impl Default for Gms {
             amp_now: Box::new([0.0; BLOCK]),
             lfo_now: [Box::new([0.0; BLOCK]), Box::new([0.0; BLOCK])],
         };
-        gms.restart();
+        // FL's constructor kills each voice once; the host's first rate
+        // kills them again.
+        gms.chain.set_rate(44_100.0);
         gms
     }
 }
@@ -1355,7 +1357,6 @@ impl Generator for Gms {
         let velocity = velocity_level(note.velocity);
         if velocity == 0.0 {
             self.held[key] = None;
-            self.velocity = 0.0;
             self.release(key);
             return;
         }
