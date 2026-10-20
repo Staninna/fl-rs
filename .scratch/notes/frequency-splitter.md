@@ -39,9 +39,7 @@
 
 ## Guessed, not confirmed
 
-- The window is a sine. It is computed by `FUN_1801f1af0`, a libm routine that was not identified.
-- The IPP FFT scaling is guessed. My FIR is normalised to unity, because the IPP flags and lost-argument calls were not resolved.
-- The overlap-save alignment is assumed to be exactly N/2 frames late.
+- Settled since (2026-10-20): the window is the half sine, the FFTs scale neither way, and a filter is overlap-added in blocks of N/2. The filters are now the shared convolver in `crates/plugins/src/linear_phase.rs` (`docs/plugins/maximus.md` section 5.8).
 - Main gains are assumed to start at 0 and glide in, because the engine object comes from operator new and those fields are never initialised.
 - FTZ/DAZ are not reproduced. libm sin, cos, tan and powf may differ by an ulp.
 
@@ -52,7 +50,7 @@ The engine cannot carry these sends, but no corpus state needs them. The plugin 
 1. A list of second outputs per plugin.
 2. Addressing by absolute insert index, with that insert reached and ordered after the source.
 
-The plugin reports `Fidelity::Approximate` when a target is set. Linear phase also reports Approximate.
+The plugin reports `Fidelity::Approximate` when a target is set.
 
 ## Next steps
 

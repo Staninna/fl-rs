@@ -4333,9 +4333,20 @@ fn a_controller_drives_a_parameter_of_a_hosted_plugin() {
     let plain = render(&kick_and_bare_tone(&dir), &dir);
     assert!(out.left == plain.left);
     assert!(out.right[..KICK + TICK] == plain.right[..KICK + TICK]);
-    // PanOMatic ramps to where its volume is put over the block, which is
-    // the tick, so the tone is gone a tick after the fader went down.
-    let down = &out.right[KICK + 2 * TICK..KICK + 10 * TICK];
+    // PanOMatic ramps to where its volume is put by no more than
+    // `0.001 * 44100 / 48000` a frame, so the tone takes 1089 frames,
+    // four ticks and a half, to go, and is gone after that.
+    let cap = 0.001 * 44_100.0 / 48_000.0;
+    let fading = &out.right[KICK + TICK..KICK + 5 * TICK];
+    let first = KICK + TICK;
+    for (n, v) in fading.iter().enumerate() {
+        let floor = (1.0 - cap * (n + 1) as f32).max(0.0);
+        assert!(
+            v.abs() >= (floor * plain.right[first + n]).abs() - 1e-4,
+            "{n}"
+        );
+    }
+    let down = &out.right[KICK + 6 * TICK..KICK + 10 * TICK];
     assert!(down.iter().all(|v| *v == 0.0));
     assert!(out.right[KICK + 34 * TICK..24_000] == plain.right[KICK + 34 * TICK..24_000]);
 }
@@ -4368,14 +4379,12 @@ fn panomatic_pans_and_scales_what_plays_into_its_insert() {
     assert!((db(out.left[0]) + 12.7).abs() < 0.05 && out.left[0] == out.right[0]);
     assert!(out.approximated_slots.is_empty());
 
-    // With its LFO on, the plugin says its rate is FL's formula as read,
-    // which the render's 48 kHz puts off the wheel's.
+    // With its LFO on at the render's 48 kHz, its rate is FL's too.
     let mut moving = one_click();
     let auto_pan = params(&[128, 256, 1, 1, 87, 45_614]);
     add_effect(&mut moving, 1, 0, "Fruity PanOMatic", &auto_pan);
     let out = render(&moving, &dir);
-    let said: Vec<_> = out.approximated_slots.iter().collect();
-    assert_eq!(said, [(&"PanOMatic LFO rate at non-44.1k", &1)]);
+    assert!(out.approximated_slots.is_empty());
 }
 
 #[test]
