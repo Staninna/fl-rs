@@ -461,7 +461,7 @@ presets of versions 5..7, 229 in that directory and 252 across `Data`, are
 refused with a `Version` error, their articulator stream is another
 format). Of the 1012 states that load, 1000 are heard within the first
 2048 frames of three notes; the rest start with a silent attack. Renders operators with
-the kernel above over a 2048-sample table without band limiting, the FM
+the kernel above over a 16384-sample table (section 10) without band limiting, the FM
 and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
 law and the output levels; the send path goes through the effects
@@ -757,6 +757,27 @@ the host's rate whatever the oversampling, the FX send to a mixer track
 left out (its target is -1 in every corpus state; `fidelity` names it),
 and the classes as `fl_fx.rs` has them (the chorus there is the x87
 renderer).
+
+## 10. The control tick and the wavetable size
+
+The control tick is set with the rate (`0x8629d0` -> `0x8657b0`): `p =
+0x8fc9c4[i]` with `i` the i32 at 0x430 while playing (DQEnvBtn) or 0x434
+while rendering (RQEnvBtn), the table being 96, 8; then `0x62d0 = p x SR /
+44100`, the tick `0x62cc = max(4, round(0x62d0 / 4) x 4)` samples, and
+`0x62d0 = tick x 44100 / (SR x 96)`. `0x8656a0` gives every articulator
+`seconds = 0x62d0 x 96 / 44100` a tick: `2 x seconds` half seconds and
+`seconds x tempo / 60` beats (what the implementation had), and Mod X / Y
+glide by `0.01^(0x62d0 / 96)` a tick. Each voice counts its own ticks from
+its start (`voice+0x14 = -0x62cc` in `0x86af20`): the first tick moves the
+envelopes and LFOs by 0 (`0x8736d4`), the others by 1 (`0x8736d8`), and
+the levels ramp over the whole tick. The implementation ticked every
+voice together at the tempo's PPQ; it now does as FL does, with the
+playing switch.
+
+The operator wavetable is `2^14 = 16384` samples (`0x848980(14, 12)` from
+the constructor's `0x848a50` sets `0x911b90` and the two FFTs, orders 14
+and 12, the second for the band-limited copies). The implementation had
+2048.
 
 ## Corrections
 
