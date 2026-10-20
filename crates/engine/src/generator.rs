@@ -143,13 +143,14 @@ impl Rack {
     /// for one that is switched off, which is not.
     ///
     /// `timing` is the rate in Hz, the tempo in BPM and the PPQ the
-    /// generator is made at, and `adjust` the channel's [`voice::adjust`].
+    /// generator is made at, and `adjusts` the channel's [`voice::adjust`]
+    /// and [`voice::pan_offset`].
     pub fn place(
         &mut self,
         channel: &Channel,
         insert: u16,
         timing: (u32, f64, u16),
-        adjust: i32,
+        adjusts: (i32, i32),
         curves: &dyn Curves,
     ) -> Option<usize> {
         if channel.enabled == Some(false) || self.passed.contains(&channel.index) {
@@ -172,7 +173,13 @@ impl Rack {
             channel: channel.index,
             insert,
             generator,
-            gains: voice::gains(volume, pan, curves.volume_adjust_gain(adjust), 0.0, curves),
+            gains: voice::gains(
+                volume,
+                pan as i32 + adjusts.1,
+                curves.volume_adjust_gain(adjusts.0),
+                0.0,
+                curves,
+            ),
         });
         Some(self.hosted.len() - 1)
     }
@@ -272,7 +279,7 @@ mod tests {
         };
         let mut rack = Rack::default();
         let place = rack
-            .place(&channel, 0, (48_000, 120.0, 96), 12_800, curves)
+            .place(&channel, 0, (48_000, 120.0, 96), (12_800, 0), curves)
             .unwrap();
         let played = Played {
             tick: 0,

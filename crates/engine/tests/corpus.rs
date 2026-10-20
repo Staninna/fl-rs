@@ -276,7 +276,7 @@ fn every_project_renders_its_first_10_seconds() {
     );
     eprintln!(
         "corpus automation: {automation} clips evaluated, {bindings} bindings resolved \
-         ({playable} of them to a volume, a pan, a send level or the tempo), \
+         ({playable} of them to a volume, a pan, a send level, the tempo or a channel's level), \
          {slot_targets} targets on a hosted effect slot played, {unsupported_targets} unsupported \
          targets"
     );
