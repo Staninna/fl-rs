@@ -2,12 +2,22 @@
 
 The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed and CI is green on Linux, macOS and Windows. fmt, clippy and `cargo test -p plugins` with the corpus pass at `20f0570`, where a release corpus render hears 112 of 165 projects and 33 play in full. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
 
+## Plugin parameters for automation, 2026-10-20
+
+The corpus automates generator parameters the engine could not play. Three commits:
+
+- 3x Osc: FL numbers the instrument tab's parameters from 23 (`0x73ad35` hands 23 to `0x72c440`): five blocks of 17 words at 23..107, cutoff 110, resonance 111, type 113; 21, 22, 108, 109, 112 are nobody's. Parameter 110 in the corpus is the tab's cutoff and plays. `docs/plugins/3x-osc.md` section 2.
+- Sytrus: all 597 REC parameters, decoded as `0x868c90` walks the parts, ranged by their controls, and applied as `0x867930` and its recomputes do. Mod X / Mod Y glide to the wheel per control tick when ModSmoothBtn is on (1 % left after 0.209 s, `0x8658b7`); the main pitch retunes sounding notes. Unison, chorus, delay, EQ and portamento parameters are stored only. `docs/plugins/sytrus.md` section 6.
+- Harmor: articulator knobs (95..342) read and write the envelope / LFO knobs as FL does, smoothing 0..1001, and the 53 globals have FL's ranges (`harmor_state::GLOBAL_RANGES`).
+
+The corpus summary's "unsupported targets" (clips in the first 10 s) went from 140 to 133, clips evaluated from 187 to 194; across whole songs every Sytrus 0x8000+ and 3x Osc 0x8000+ binding now resolves. What is left is engine work, not plugin work: raw channel controls 4 (channel pitch, -4800..4800 cents, 36 bindings on 3x Osc channels and more on samplers), 17 (90 on Sytrus channels, unknown), 16, 0x600/0x604, and 0x2000 + n on Sytrus channels (0x2012, 0x2013, 0x2000, 0x2226, in `Synth_dfr - Overcome - Sytrus` and `nucleon - Housework`), which look like an older numbering of plugin parameters but are not confirmed from FL's REC dispatcher (`FUN_01046a70` in FLEngine). MiniSynth and FLEX are not built.
+
 ## Perf work, 2026-10-19
 
 Heavy demo projects dropped out in the app. Done so far, each measured with `crates/engine/examples/profile.rs` (README, Tests):
 
 - Dev builds optimise `dsp`, `engine` and `plugins` (`c4dbd55`). Unoptimised, Ookay - Thief played at 0.4x realtime.
-- An automation range is taken in f64 (`6df1664`). Harmor leaves part parameter 106 and globals 772 and 774 unbounded, so their range read back as the whole i32 and `high - low` overflowed in five projects. Harmor should clamp them to FL's ranges, read from its binary; not done.
+- An automation range is taken in f64 (`6df1664`). Harmor left part parameter 106 and globals 772 and 774 unbounded, so their range read back as the whole i32 and `high - low` overflowed in five projects. Harmor now clamps every parameter to FL's ranges (see "Plugin parameters for automation" below).
 - The `profile` feature on `engine` times each generator and slot per call (`af47740`); the harness prints the six costliest per project with `--features profile`.
 - Fruity Convolver's 128-tap direct filter sums 16 frames side by side (`976e553`) and the sine bank runs 8 partials side by side (`7d196fb`). Both keep all 165 harness hashes. On one core, Stroll Up went from 0.9x to 1.3x realtime and Harmless Galactic from 1.9x to 2.6x.
 
