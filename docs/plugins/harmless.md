@@ -411,19 +411,52 @@ harmonizer's strided add `dst[j * step] += src[j] * gain`.
 The bank (`FUN_00746320` render, groups of 8 partials of 0x100 bytes:
 level, two recursion states, `2 cos w`, target level, smoothing, flags):
 
-- Each partial is `s[n] = 2 cos(2 pi f) s[n-1] - s[n-2]`, started from its
-  phase in turns (`f64`, bank `+0xb0`) at `sin(2 pi (phase - f))` and
-  `sin(2 pi (phase - 2f))` so its first value is `sin(2 pi phase)`
-  (`FUN_00745730`, `FUN_00745680`); f is in turns a sample (bank `+0xb8`,
-  f64). A partial restarts from its phase every `Round(f * C)` samples and
-  whenever its frequency changes. The SSE kernel is `FUN_007459a0` (first
-  group) / `FUN_00745ad0` (the rest), 4 lanes summed by `FUN_00746270`.
-- The output is `s * level`, then `level = (level - target) * k + target`
-  a sample, `k = 0x5f8 = 0.01^(1 / (0.01 SR))` (`FUN_007452b0` puts it in
-  every group): a 10 ms glide to 40 dB below the step. A new voice copies
-  its targets to its levels.
-- Partials with level and target under 2^-24 drop out of the groups
-  (`FUN_00745d40`, `FUN_00745f70`, `FUN_00745de0`).
+- Each partial is `s[n] = 2 cos(2 pi f) s[n-1] - s[n-2]`; f is in turns a
+  sample (bank `+0xb8`, f64) and the phase in turns (`+0xb0`, f64, never
+  wrapped: `FUN_00746160` adds `f * n` after every call, SSE2 `mulpd` then
+  `addpd`). The recursion runs on from call to call in the group.
+- A partial starts again from its phase when its countdown (`+0x30`, i32
+  a partial) runs out: before each call it drops by the call's length
+  (`FUN_00745730`), and one at 0 or below starts at `sin(2 pi (phase - f))`
+  and `sin(2 pi (phase - 2f))` (the second as `(phase - f) - f`), so its
+  first value is `sin(2 pi phase)`. When its frequency was set since
+  (`+0x38` flag), `2 cos w` is redone as `2 sin(2 pi (f + 0.25))`
+  (`DAT_007d0508` is 0.25 as a float, the 2 is `DAT_007e9edc`). The
+  countdown goes back to `Round(float(f) * 8192)` (`DAT_007e9ee0`,
+  `FUN_007457c0`), so low partials start again nearly every call and high
+  ones every few thousand samples. Each argument is the fraction from the
+  nearest whole turn, times 2 pi in x87, stored as f32 (`FUN_00745630`),
+  and its sine is IPP's f32 sine. The voice (`FUN_00784a10`) sets the
+  countdown to 0 and the flag for partials 1 up whenever it sets their
+  frequencies, and for partial 0 only when its frequency moved. A partial
+  that joins the sounding ones (`FUN_00745ec0`) gets level and recursion 0
+  and countdown 0.
+- The groups: 8 slots of 0x100 bytes (level `+0x00`, s1 `+0x20`, s2
+  `+0x40`, `2 cos w` `+0x60`, target `+0x80`, smoothing `+0xa0`, sounding
+  mask `+0xc0`, partial `+0xe0`), with a partial-to-slot map at bank
+  `+0x40`. `FUN_00746c20` picks the kernels once: `FUN_00745c00` (first
+  group) / `FUN_00745ca0` (the rest) when the processor has AVX (CPUID 1
+  ECX bits 27 and 28 and XGETBV bits 1 and 2, `FUN_005a3790`, flag
+  `0x40000`), else the SSE `FUN_007459a0` / `FUN_00745ad0`. The AVX kernel
+  keeps `d = level - target` for the call: per sample `s = s1 * c - s2`,
+  `p = s * (d + target)`, `d *= k`; the level is `d + target` after. The
+  SSE one updates `level = (level - target) * k + target` a sample instead.
+  Both add slot `j` and slot `j + 4` of a group into sum `j` of four, the
+  first group as `low + high` and the rest as `(low + sum) + high`, and
+  `FUN_00746270` writes `((s0 + s1) + s2) + s3` per sample.
+- `k = 0x5f8 = 0.01^(1 / (0.01 SR))` (`FUN_007452b0` puts it in every
+  slot): a 10 ms glide to 40 dB below the step. A new voice copies its
+  targets to its levels (`+0x78`).
+- Every 512 samples (`+0x80`) the slots whose level and target are both
+  under 2^-24 drop out (`FUN_00745d40`), each swapped with the last
+  sounding slot (`FUN_00745f70`, `FUN_00745de0`), and a partial whose
+  target comes up to 2^-24 is swapped in at the end (`FUN_007454b0`,
+  `FUN_00745ec0`).
+- `crates/dsp/src/additive.rs` runs the AVX kernel's arithmetic, sums and
+  restart schedule, with libm's sine for IPP's. It makes its groups
+  afresh every call from the partials that sound, in partial order, where
+  FL keeps its slot order and drops partials every 512 samples, so after
+  a partial falls silent a group can hold other partials than FL's.
 - `FUN_007453c0(bank, 32, 16, 16000, 17000 Hz)` (from `TriggerVoice`) sets
   the weight the voice puts on each partial by its frequency: 0 under 16 Hz,
   `(1 - (32 - f)/16)^2` to 32 Hz, 1 to 16 kHz, `(1 - (f - 16000)/1000)^2` to
