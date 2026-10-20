@@ -161,6 +161,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::bassdrum::NAME, || {
         Box::new(crate::bassdrum::BassDrum::default())
     }),
+    (crate::beepmap::NAME, || {
+        Box::new(crate::beepmap::BeepMap::default())
+    }),
     (crate::boobass::NAME, || {
         Box::new(crate::boobass::BooBass::default())
     }),
