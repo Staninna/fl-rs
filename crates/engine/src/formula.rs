@@ -38,9 +38,9 @@ enum Step {
 
 /// FL's `Tension(x, t)` (`FUN_00f81d60`): `x` bent by `t`. 0 is the
 /// straight line, a `t` below 0 bends it down as `((1 + |t|)^x - 1) / |t|`
-/// and one above 0 up, its mirror image. Both go through 0 at 0 and 1 at
-/// 1. FL works the power out in f32, as `exp(x * ln(t + 1))`, and so does
-/// this.
+/// and one above 0 up, its mirror image. Both go through 0 at 0 and
+/// through 1 at 1. FL works the power out in f32, as `exp(x * ln(t + 1))`,
+/// and so does this.
 pub(crate) fn tension(x: f64, t: f64) -> f64 {
     let bent = |x: f64, size: f64| {
         let ln = f64::from(size as f32 + 1.0).ln();
