@@ -746,7 +746,7 @@ impl Automation {
                 None => Some(None),
             };
             let driven = formula.and_then(|formula| {
-                let target = project.rec_target(ids.target);
+                let target = project.link_target(ids.target);
                 let (control, _, range) = self.control(project, target, tempo)?;
                 (control != Control::Tempo).then_some((control, range, formula))
             });
