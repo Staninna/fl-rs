@@ -468,8 +468,79 @@ law and the output levels, and the send path folded into the output at
 half, dry. Left out, each named in `fidelity`: unison sub-voices, plucked
 operators, the waveshaper, the comb and the phaser, the delays, chorus,
 reverb and EQ, the shape morph articulator, the harmonics filter wheel,
-the 597 REC parameters (`param_count` is 0), the arpeggiator and
-portamento. Every state reports `Approximate`.
+the arpeggiator and portamento. Every state reports `Approximate`. The 597
+REC parameters are the host's (section 6).
+
+## 6. The REC parameters as a host moves them
+
+Read from `ProcessParam` (`0x867930`), its decoder (`0x868c90`) and the
+functions it calls after a store; implementation `State::set_param` in
+`crates/plugins/src/sytrus.rs`.
+
+Under REC_FromMIDI (flag 0x20) the value becomes `Min + round(v x 2^-30 x
+(Max - Min))` with the control's Min (+0x3a8) and Max (+0x3ac): the global
+controls from `form+0x1050 + 8 i`, a part's wheels from `part+0x8f8[k]`, the
+articulator knobs from `form+0x1260 + 8 j` (the envelope editor's
+`EnvAttWheel` .. `LFOPWWheel`, Tags 0..7), the late globals from
+`form+0x10d8 + 8 k` and portamento from `form+0xb08`. So a parameter's range
+is its wheel's (the DFM ranges in section 2; `FOrderSelect` has six rows,
+0..5; `DelModeSelect` three, 0..2; the knobs 0..256 attack, decay and
+release, -128..128 sustain, 512..65536 LFO speed, -128..128 tension and
+skew, -112..112 pulse width).
+
+What a store does:
+
+```
+global 0..2   0x12c + 4 i, then 0x86a1d0: 0x6310 = level(main volume / 128); 0x6314 = level(LFO level / 128)
+              with its sign, written into every articulator's LFO amount (+0x28); 0x6318 = main pitch x 100
+global 3..10  0x3c0 + 4 (i - 3): stored only; the quick ADSR is applied when a voice starts
+global 11..17 0x3e0 + 4 (i - 11), then 0x871fd0 (unison)
+global 18, 19 0x424 / 0x428, then 0x86a3e0: 0x6324 / 0x6328 = v / 512, and the snap flag 0x6337 when 0x6334 is clear
+late 40..48   0x6018 + 0x90 band + 4 field (band = (k - 40) mod 3, field = (k - 40) div 3), then 0x86a440(band)
+late 49       u8 0x4f8 = v > 0; off resets 0x62e0 to 0x7fffffff
+operator k    header k (part+4 k); k = 0: 0x86a730 (phase, ratio and offset), else 0x869e30:
+              part+0x86c = 2 header[2] x C (pitch range), part+0x870 = header[1] / 256 (volume)
+filter k      header k, then 0x869e80: cutoff articulator amount = header[1] / 128 and its LFO amount that
+              times 0x6314; +0x884 / +0x888 = header[2] / 256, header[3] / 256 (cutoff, resonance);
+              +0x898..+0x8a0 = level(header[4..6] / 128); +0x8c8 / +0x8c4 = header[7] / 128, header[8] / 128
+              (waveshaper pre-amp and mix); +0x8a4 = level(header[9] / 256) with its sign; k = 9 also 0x865120 (routing)
+main k < 9    0x3fc + 4 k, then 0x86a130 (chorus, the mask at 0x8681bc) or 0x869a80
+main k >= 9   delay unit e = (k - 9) / 5: 0x5f0c + 0x38 e + 4 (k - 5 e), then 0x869540
+knob j        j < 4: TMEnvelope+0x98 + 4 j, then 0x789de0 (scale j = knob / 128; +0xb8 the sustain scale
+              when the loop end is set); j >= 4: TMLFO+0xd0 + 4 (j - 4), then the LFO's vmt+0x40
+```
+
+Every store runs under the host lock (vtable +0x100 / +0x108). A read
+(flag 2) returns the stored int, the knob from its `TMEnvelope` or `TMLFO`.
+
+The voice side (`0x872290`, read for this):
+
+- Mod X and Mod Y are taken each control tick: with `ModSmoothBtn` (u8
+  0x440, saved in the main block, 1 in a new plugin) the voice's value
+  (+0x80 / +0x84) moves to the wheel as `wheel + (value - wheel) x c`, else
+  it is the wheel; the table place is `round(value + FinalLevels.FCut /
+  FRes x 256)` clamped to 0..512. `c` is `0x42c`, set with the sample rate
+  (`0x8657b0`): `exp(ln 0.01 x T / (r x 96 x 96))` for a tick of T samples
+  and r = rate / 44100, so 1 % is left 0.209 s on. The voice record comes
+  from GetMem (`0x416280`) and +0x80 is not set when a voice starts, so FL
+  glides from whatever the memory held; here a voice starts at the wheel.
+- The main pitch: when `FinalLevels.Pitch + 0x6318` changes, every
+  operator's increment is worked out again (`0x872210`), so a note that
+  sounds is retuned. The main volume is taken every block (voice+0x48 =
+  `FinalLevels.Vol x 0x6310`).
+
+Implemented: every index reads back and stores inside its range; the main
+volume, the LFO level, the main pitch, the quick ADSR (on the envelopes it
+covers, for the voices that start after it), Mod X and Mod Y with their
+glide, the operators' phase, volume and pitch range, every filter wheel
+but the waveshaper's pre-amp, the "to next" wheel with the routing, the FX
+send level and every articulator knob. Kept but not heard, as the parts
+they move are not built: the unison, the chorus, the delays, the EQ,
+portamento and the waveshaper's pre-amp. FL's saved LFO amounts differ
+from `level` by up to a bit of the f32 in some states (0.5633213 against
+0.56332123 for 101), and an f32 port of `0x86a1d0` misses others, so the
+LFO level is worked out with `level` and the state's own amounts stand
+until the host moves it.
 
 ## Corrections
 
