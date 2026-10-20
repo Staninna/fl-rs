@@ -27,6 +27,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::chorus::NAME, Port::Exact),
     (crate::compressor::NAME, Port::Exact),
     (crate::convolver::NAME, Port::Gaps),
+    (crate::delay::NAME, Port::Exact),
     (crate::delay_2::NAME, Port::Exact),
     (crate::delay_3::NAME, Port::Exact),
     (crate::delay_bank::NAME, Port::Gaps),

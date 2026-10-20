@@ -93,7 +93,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Wave Traveller | 4369 | yes | 2 | |
 | Effect | Emphasizer | 3688 |  | 1 | |
 | Effect | Fruity Bass Boost | 3664 | yes | 1 | |
-| Effect | Fruity Delay | 3685 |  | 1 | |
+| Effect | Fruity Delay | 3685 |  | 1 | implemented in crates/plugins (exact: tempo-synced ring, the three modes, the feedback low pass in f64 as FL's SSE loops keep it, both ramps with the renderer's cap; the input-add routine is taken to be Balance's; no render test, unit tests only), docs/plugins/fruity-delay.md |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
 | Effect | Fruity HTML NoteBook | 3835 |  | 1 | |
 | Effect | Fruity Reeverb | 3627 | yes | 1 | |
