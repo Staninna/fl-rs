@@ -170,6 +170,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::drumpad::NAME, || {
         Box::new(crate::drumpad::Drumpad::default())
     }),
+    (crate::drumsynth_live::NAME, || {
+        Box::new(crate::drumsynth_live::DrumSynthLive::default())
+    }),
     (crate::dx10::NAME, || Box::new(crate::dx10::Dx10::default())),
     (crate::fl_keys::NAME, || {
         Box::new(crate::fl_keys::FlKeys::default())
@@ -186,6 +189,9 @@ const GENERATORS: &[(&str, Make)] = &[
     }),
     (crate::harmor::NAME, || {
         Box::new(crate::harmor::Harmor::default())
+    }),
+    (crate::kepler::NAME, || {
+        Box::new(crate::kepler::Kepler::default())
     }),
     (crate::ogun::NAME, || Box::new(crate::ogun::Ogun::default())),
     (crate::three_osc::NAME, || {
