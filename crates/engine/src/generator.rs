@@ -33,7 +33,9 @@
 //!
 //! FL puts the channel's volume and pan into `FinalLevels` as well. Here
 //! they go on what the generator puts out, so that automation can move
-//! them under a sounding note.
+//! them under a sounding note, and the generator hears the volume's gain
+//! with [`Generator::set_channel_volume`] for a plugin that does more with
+//! `FinalLevels.Vol` than multiply by it.
 //!
 //! # Pitch that moves under a note
 //!
@@ -322,7 +324,7 @@ impl Rack {
         if let Some(place) = self.hosted.iter().position(made) {
             return Some(place);
         }
-        let Some(generator) = hosted(channel, Some(timing), self.plugin_dir.as_deref()) else {
+        let Some(mut generator) = hosted(channel, Some(timing), self.plugin_dir.as_deref()) else {
             self.passed.insert(channel.index);
             let name = channel.plugin_name.as_deref().filter(|n| !n.is_empty());
             if let Some(name) = name {
@@ -331,6 +333,8 @@ impl Rack {
             return None;
         };
         let (volume, pan) = voice::levels(channel);
+        generator
+            .set_channel_volume(curves.volume_adjust_gain(adjusts.0) * curves.volume_gain(volume));
         self.hosted.push(Hosted {
             bend: None,
             channel: channel.index,

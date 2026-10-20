@@ -1389,6 +1389,15 @@ impl Mixer {
         }
     }
 
+    /// Tell a plugin channel's generator the gain its channel's volume
+    /// makes, as [`plugins::Generator::set_channel_volume`] takes it.
+    pub fn set_channel_volume(&mut self, channel: u16, volume: f32) {
+        let hosted = self.generators.iter_mut();
+        for hosted in hosted.filter(|hosted| hosted.channel == channel) {
+            hosted.generator.set_channel_volume(volume);
+        }
+    }
+
     /// Set a parameter of a channel's generator, in the plugin's own
     /// units. A parameter that is there already is left alone.
     pub fn set_channel_param(&mut self, channel: u16, index: usize, value: f32) {
