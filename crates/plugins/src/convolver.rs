@@ -35,11 +35,15 @@
 //!
 //! 1. With normalize on, the impulse is scaled so that the loudest 300 ms
 //!    of it has an RMS of 0.05, over both sides.
-//! 2. It is resampled to the song's rate times the stretch, which is
-//!    `2^(v / 1000)`.
-//! 3. A level equaliser curve at `y` scales it by `(3^(2y) - 1) / 2`, which
+//! 2. With self-convolution at `a = v / 1000`, each side becomes
+//!    `(1 - a/2) x + (a/2) (x * x) / |x|`, the convolution cut to the
+//!    impulse's length and `|x|` the louder side's L2 norm.
+//! 3. It is resampled to the song's rate times the stretch, which is
+//!    `2^(v / 1000)`, by FL's interpolator at its 256-point quality
+//!    ([`dsp::interpolator`]).
+//! 4. A level equaliser curve at `y` scales it by `(3^(2y) - 1) / 2`, which
 //!    is 1 at the half it starts at.
-//! 4. What is under 2^-24 at its end is cut off, and what is under it at
+//! 5. What is under 2^-24 at its end is cut off, and what is under it at
 //!    its start counts as delay, with the pre-delay: `(7^(v / 1000) - 1) /
 //!    12` seconds.
 //!
@@ -61,14 +65,14 @@
 //!
 //! - An impulse whose file is not found, or is a kind of file that is not
 //!   decoded, leaves the plugin out: its input passes as it is.
-//! - The four layers, the self-convolution and an equaliser curve that is
-//!   not level are left out.
-//! - FL's resampler is not read. This one is a windowed sinc.
+//! - The four layers and an equaliser curve that is not level are left
+//!   out.
 //! - FL sleeps after as much silence as the impulse is long.
 
 use crate::menvelope::{Class, MEnvelope, Reader};
 use crate::parts::{glide, stereo_gains};
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value};
+use dsp::interpolator;
 use std::f64::consts::PI;
 use std::path::{Component, Path, PathBuf};
 
@@ -87,6 +91,10 @@ const IMPULSES: &str = "Patches/Impulses";
 
 /// The most frames [`Convolver::process`] takes through at once.
 const CHUNK: usize = 512;
+
+/// The interpolator's quality the impulse is resampled at: mode 9 of
+/// `FUN_0062b090`, 256 points.
+const QUALITY: u32 = 256;
 
 /// FL's "too small to keep": 2^-24.
 const SILENT: f32 = 5.960_464_5e-8;
@@ -622,49 +630,60 @@ enum Source {
     Loaded(Impulse),
 }
 
-/// Resample by `ratio`, which is the new rate over the old: a sinc under a
-/// Hann window, 16 zero crossings a side, and wider for a lower rate.
-fn resample(source: &[f32], ratio: f64) -> Vec<f32> {
-    let len = (source.len() as f64 * ratio).round() as usize;
-    let cutoff = ratio.min(1.0);
-    let reach = (16.0 / cutoff).ceil();
-    let (turn, window) = (PI * cutoff, PI / reach);
-    let (turn_sin, turn_cos) = turn.sin_cos();
-    let (window_sin, window_cos) = window.sin_cos();
-    let mut out = Vec::with_capacity(len);
-    let taps = 2 * reach as i64;
-    for i in 0..len {
-        let place = i as f64 / ratio;
-        let first = place.floor() as i64 - reach as i64 + 1;
-        // The taps that are inside the source.
-        let from = (-first).clamp(0, taps);
-        let to = (source.len() as i64 - first).clamp(from, taps);
-        // How far a tap is from the place, and the sines there, which
-        // turn by one step from a tap to the next.
-        let mut x = (first + from) as f64 - place;
-        let (mut sin, mut cos) = (turn * x).sin_cos();
-        let (mut wide_sin, mut wide_cos) = (window * x).sin_cos();
-        let mut sum = 0.0;
-        for tap in from..to {
-            let sinc = if x.abs() < 1e-9 {
-                cutoff
-            } else {
-                sin / (PI * x)
-            };
-            sum += f64::from(source[(first + tap) as usize]) * sinc * (0.5 + 0.5 * wide_cos);
-            x += 1.0;
-            (sin, cos) = (
-                sin * turn_cos + cos * turn_sin,
-                cos * turn_cos - sin * turn_sin,
-            );
-            (wide_sin, wide_cos) = (
-                wide_sin * window_cos + wide_cos * window_sin,
-                wide_cos * window_cos - wide_sin * window_sin,
-            );
-        }
-        out.push(sum as f32);
+/// Mix an impulse with itself convolved (`FUN_0087b670`): FL's sample
+/// convolver (`FUN_00624000`) takes the impulse as its own kernel, scaled
+/// to unit energy by the louder side's (`FUN_006241b0`, mode 0), and mixes
+/// the convolution, cut to the impulse's length, back in at `amount / 2`
+/// over the impulse at `1 - amount / 2` (`FUN_00625690`). Each side is
+/// convolved with itself. FL trims the kernel's silent ends and aligns its
+/// output to undo the trim, which leaves the convolution as it is in a
+/// textbook; FL works it out by overlap-save through IPP's float FFT, and
+/// this through one float FFT of both sides at once.
+fn self_convolve(left: &mut [f32], right: &mut [f32], amount: f32) {
+    let len = left.len().min(right.len());
+    if len == 0 {
+        return;
     }
-    out
+    let energy = |side: &[f32]| {
+        side.iter()
+            .map(|v| f64::from(*v) * f64::from(*v))
+            .sum::<f64>()
+    };
+    let loudest = energy(&left[..len]).max(energy(&right[..len])).sqrt();
+    let unit = if loudest == 0.0 {
+        1.0
+    } else {
+        (1.0 / loudest) as f32
+    };
+    let half = amount * 0.5;
+    let (wet, dry) = (half * unit, 1.0 - half);
+
+    // The left side in the real part and the right in the imaginary: the
+    // spectrum of each is half the sum or the difference of the spectrum
+    // and its mirror, and the square of each goes back the same way.
+    let size = (2 * len).next_power_of_two();
+    let fft = Fft::new(size);
+    let (mut re, mut im) = (vec![0f32; size], vec![0f32; size]);
+    re[..len].copy_from_slice(&left[..len]);
+    im[..len].copy_from_slice(&right[..len]);
+    fft.run(&mut re, &mut im, false);
+    let (mut out_re, mut out_im) = (vec![0f32; size], vec![0f32; size]);
+    for k in 0..size {
+        let mirror = (size - k) % size;
+        let (zr, zi, mr, mi) = (re[k], im[k], re[mirror], -im[mirror]);
+        let (lr, li) = ((zr + mr) * 0.5, (zi + mi) * 0.5);
+        let (rr, ri) = ((zi - mi) * 0.5, -(zr - mr) * 0.5);
+        let (l2r, l2i) = (lr * lr - li * li, 2.0 * lr * li);
+        let (r2r, r2i) = (rr * rr - ri * ri, 2.0 * rr * ri);
+        out_re[k] = l2r - r2i;
+        out_im[k] = l2i + r2r;
+    }
+    fft.run(&mut out_re, &mut out_im, true);
+    let scale = 1.0 / size as f32;
+    for t in 0..len {
+        left[t] = left[t] * dry + out_re[t] * scale * wet;
+        right[t] = right[t] * dry + out_im[t] * scale * wet;
+    }
 }
 
 /// The loudest RMS of both sides of an impulse over a window of 300 ms,
@@ -710,8 +729,6 @@ pub struct Convolver {
     /// FL's `Data` directory.
     data: Option<PathBuf>,
     source: Source,
-    /// The impulse was resampled.
-    resampled: bool,
     engine: Engine,
     /// The frames the input waits before it is convolved, and the line
     /// they wait in, one side each.
@@ -745,7 +762,6 @@ impl Default for Convolver {
             hz: 44_100.0,
             data: None,
             source: Source::Missing,
-            resampled: false,
             engine: Engine::new(&[], &[]),
             lead: 0,
             line: [Vec::new(), Vec::new()],
@@ -779,7 +795,6 @@ impl Convolver {
 
     /// Make the impulse ready for the rate and build the engine.
     fn build(&mut self) {
-        self.resampled = false;
         self.lead = 0;
         let Source::Loaded(impulse) = &self.source else {
             self.engine = Engine::new(&[], &[]);
@@ -796,16 +811,17 @@ impl Convolver {
         let stretch = (f64::from(self.stretch as f32 / 1000.0) * 2f64.ln()).exp() as f32;
         let target = f64::from(self.hz as f32 * stretch);
         let ratio = target / f64::from(impulse.rate);
-        self.resampled = (ratio - 1.0).abs() > 1e-9;
-        let ready = |side: &[f32]| -> Vec<f32> {
-            let scaled: Vec<f32> = side.iter().map(|v| v * gain).collect();
-            if self.resampled {
-                resample(&scaled, ratio)
-            } else {
-                scaled
-            }
-        };
-        let (mut left, mut right) = (ready(&impulse.left), ready(&impulse.right));
+        let resampled = (ratio - 1.0).abs() > 1e-9;
+        let scaled = |side: &[f32]| -> Vec<f32> { side.iter().map(|v| v * gain).collect() };
+        let (mut left, mut right) = (scaled(&impulse.left), scaled(&impulse.right));
+        if self.self_convolution != 0 {
+            let amount = self.self_convolution as f32 / 1000.0;
+            self_convolve(&mut left, &mut right, amount);
+        }
+        if resampled {
+            left = interpolator::resample(&left, ratio, QUALITY);
+            right = interpolator::resample(&right, ratio, QUALITY);
+        }
         // A level equaliser curve is a gain: 1 at a half and 4 at the top.
         if let Some(level) = self.equaliser {
             let x = level * 2.0;
@@ -1057,14 +1073,8 @@ impl Effect for Convolver {
             }
             Source::Loaded(_) => {}
         }
-        if !self.layers_flat || self.self_convolution != 0 || self.equaliser.is_none() {
-            Fidelity::Approximate(
-                "Convolver's envelope layers, self-convolution and equaliser curve are left out",
-            )
-        } else if self.resampled {
-            Fidelity::Approximate(
-                "Convolver's impulse is resampled by a windowed sinc and not by FL's resampler",
-            )
+        if !self.layers_flat || self.equaliser.is_none() {
+            Fidelity::Approximate("Convolver's envelope layers and equaliser curve are left out")
         } else {
             Fidelity::Exact
         }
@@ -1366,7 +1376,7 @@ mod tests {
         let mut long = Saved::new(wav_file(44_100, &tone));
         long.wheels[2] = 1000;
         let mut convolver = long.load();
-        assert!(matches!(convolver.fidelity(), Fidelity::Approximate(_)));
+        assert!(matches!(convolver.fidelity(), Fidelity::Exact));
         let heard = click(&mut convolver, 4000);
         assert!((partial(&heard[400..3600], 0.025) - 1.0).abs() < 0.02);
 
@@ -1401,18 +1411,63 @@ mod tests {
     }
 
     #[test]
+    fn self_convolution_mixes_in_the_impulse_convolved_with_itself_at_unit_energy() {
+        let left: Vec<f32> = (0..300)
+            .map(|n| ((n * 37 % 101) as f32 - 50.0) / 60.0)
+            .collect();
+        let right: Vec<f32> = (0..300)
+            .map(|n| ((n * 53 % 89) as f32 - 44.0) / 70.0)
+            .collect();
+        let energy = |side: &[f32]| side.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+        let norm = energy(&left).max(energy(&right)).sqrt();
+        let amount = 0.6;
+        let (mut l, mut r) = (left.clone(), right.clone());
+        self_convolve(&mut l, &mut r, amount);
+        for (got, side) in [(&l, &left), (&r, &right)] {
+            for t in [0, 1, 50, 299] {
+                let conv: f64 = (0..=t)
+                    .map(|j| f64::from(side[j]) * f64::from(side[t - j]))
+                    .sum();
+                let want = f64::from(side[t]) * (1.0 - 0.3) + 0.3 * conv / norm;
+                assert!(
+                    (f64::from(got[t]) - want).abs() < 1e-4,
+                    "{t}: {} {want}",
+                    got[t]
+                );
+            }
+        }
+        // A state with it plays exactly.
+        let mut saved = Saved::new(wav_file(44_100, &[0.5, 0.25]));
+        saved.wheels[1] = 500;
+        let mut convolver = saved.load();
+        assert_eq!(convolver.fidelity(), Fidelity::Exact);
+        // 0.5 and 0.25 over a norm of sqrt(0.3125): 0.75 of the impulse
+        // and a quarter of its square.
+        let unit = 0.25 / 0.3125f32.sqrt();
+        let heard = click(&mut convolver, 4);
+        assert!(
+            (heard[0] - (0.5 * 0.75 + 0.25 * unit)).abs() < 1e-5,
+            "{heard:?}"
+        );
+        assert!(
+            (heard[1] - (0.25 * 0.75 + 0.25 * unit)).abs() < 1e-5,
+            "{heard:?}"
+        );
+    }
+
+    #[test]
     fn a_resampled_tone_keeps_its_pitch_and_its_level() {
         let tone = sine(0.02, 4000);
-        let up = resample(&tone, 48_000.0 / 44_100.0);
+        let up = interpolator::resample(&tone, 48_000.0 / 44_100.0, QUALITY);
         assert_eq!(up.len(), 4354);
         let turns = 0.02 * 44_100.0 / 48_000.0;
         let whole = (1.0 / turns * 40.0f64).round() as usize;
         assert!((partial(&up[500..500 + whole], 40.0 / whole as f64) - 1.0).abs() < 1e-2);
         // Down to half the rate, a tone above the new band is gone.
         let high = sine(0.4, 4000);
-        let down = resample(&high, 0.5);
+        let down = interpolator::resample(&high, 0.5, QUALITY);
         assert!(down[200..1800].iter().all(|v| v.abs() < 0.01));
-        let low = resample(&tone, 0.5);
+        let low = interpolator::resample(&tone, 0.5, QUALITY);
         assert!((partial(&low[500..1500], 0.04) - 1.0).abs() < 1e-2);
     }
 
