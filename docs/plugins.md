@@ -57,7 +57,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity NoteBook 2 | 3528 |  | 6 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
 | Generator | Fruity DX10 | 4230 | yes | 6 | implemented in crates/plugins (mda DX10 with a second modulator, all 74 shipped states exact; the instrument tab and the mod X/Y filter not built), docs/plugins/fruity-dx10.md |
 | Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), docs/plugins/ogun.md |
-| Effect | Emphasis | 4045 | yes | 5 | |
+| Effect | Emphasis | 4045 | yes | 5 | implemented in crates/plugins (the limiter of Shared/ildsp_x64.dll: slow adaptive stage, oversampled brickwall, M/S and true-peak stages, halfbands, lookaheads, delta, level matching, bypass and rebuild fades exact; Versatile and Loud follow the input once a 512-sample block where FL uses its own blocks; meters left out), docs/plugins/emphasis.md |
 | Effect | Vintage Chorus | 3849 | yes | 5 | implemented in crates/plugins (the engine_x64.dll chorus exact; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-chorus.md |
 | Generator | Fruity Slicer | 4483 | yes | 5 | |
 | Generator | GMS | 1516 | yes | 5 | |
