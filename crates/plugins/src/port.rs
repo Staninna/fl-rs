@@ -106,6 +106,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::wrapper::NAME, Port::Gaps),
     (crate::xy_controller::NAME, Port::Gaps),
     (crate::zgameeditor::NAME, Port::Gaps),
+    (crate::wave_traveller::NAME, Port::Gaps),
 ];
 
 /// The port of a plugin by its event 201 name, in any case.

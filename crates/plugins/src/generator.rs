@@ -264,6 +264,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::sytrus::NAME, || {
         Box::new(crate::sytrus::Sytrus::default())
     }),
+    (crate::wave_traveller::NAME, || {
+        Box::new(crate::wave_traveller::WaveTraveller::default())
+    }),
     #[cfg(any(test, feature = "test-generators"))]
     (crate::test_sine::NAME, || {
         Box::new(crate::test_sine::TestSine::default())
