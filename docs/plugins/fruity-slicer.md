@@ -131,8 +131,13 @@ frames, `len` the slice's length or, with play to end, the sample's end
 less the start. Voice pitch offset `(60 - key) * 100`, so
 `FUN_007685f0` -> `FUN_005fe560`: speed = `2^((FinalLevels.Pitch + offset) /
 1200) * TSample.rate * (1 / output rate)`: the file's own pitch moved by the
-note's fine pitch. `FUN_005feed0` reads with FL's interpolator (kernel size
-from the host's quality setting, `FUN_005fde70`), not rebuilt.
+note's fine pitch. `FUN_005feed0` reads with FL's interpolator
+(`docs/plugins/fl-interpolator.md`; constructor `FUN_005fdb80` and region
+setter `FUN_005fe7f0` are Slicex's and Fruity Convolver's class). The voice
+gives it the slice's data from its start and frames `0 ..= max(len - 1,
+1)`, so the kernel's taps past the slice's ends hold the slice's own end
+frames; it sets `+0x77` and no quality, so the unit's, which the host sets
+through `FPD_ProcessMode`, applies (`FUN_005fde70`), as in FPC.
 
 The articulation unit (`InstrVoice`, `FUN_00757080` a voice): each
 `Gen_Render` it ticks the envelopes when the host's tick flag is set
@@ -168,6 +173,7 @@ the volume envelope off goes straight to it (`FUN_007579d0` ->
 `crates/plugins/src/fruity_slicer.rs`: all of sections 1 and 2 but
 Elastique and the gap filler (a stretched slice is the old one cut or padded
 with silence to its new length), and section 3 with the release and the
-declick per frame rather than per tick and block ramp, and a Hermite curve
-for FL's interpolator. The other envelopes and the LFOs are read and not
+declick per frame rather than per tick and block ramp, and FL's interpolator
+at its default render quality, 16 taps a side (inferred, see
+`docs/plugins/fpc.md`). The other envelopes and the LFOs are read and not
 run; fidelity says so when a state has them on.
