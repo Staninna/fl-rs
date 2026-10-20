@@ -26,17 +26,26 @@
 //! the channel's pitch again on every tick, the engine reads the clip on
 //! the pitch of a plugin channel on every tick and tells the generator of
 //! each note it moves ([`plugins::Generator::set_note_pitch`],
-//! [`Automation::pitch_shift`]). The others the engine
-//! leaves out, mod X and Y, the arpeggiator, the time stretch, the
-//! envelopes and a clip's own LFO, have no part in it to drive.
+//! `Automation::pitch_shift`).
+//!
+//! Mod X and mod Y of a sampler or audio clip channel, and their offsets,
+//! are the cutoff and the resonance of the filter FL's host runs on every
+//! voice of such a channel (the engine's `channel_filter` module). A voice on a
+//! channel that has one of the four automated runs that filter, and
+//! follows it where the controls are read. A channel whose filter nothing
+//! drives plays unfiltered, as it did before the filter was built, whatever
+//! its mod X and Y are. On a plugin channel the two are the plugin's, and a
+//! clip on them is not played. The others the engine leaves out, the
+//! arpeggiator, the time stretch, the envelopes and an LFO that is on in a
+//! clip, have no part in it to drive.
 //!
 //! A few controls FL keeps without anything it plays reading them, and a
-//! clip or a link on one is played by setting nothing ([`unheard`]): the
+//! clip or a link on one is played by setting nothing (`unheard`): the
 //! level, speed and shape of the LFO of a clip whose LFO is off, and the
 //! parameters of a plugin whose sound none of them moves, as ZGameEditor
 //! Visualizer's. An ID of an insert's own control that names a slot as
 //! well drives the insert's control, as FL's dispatcher reads it
-//! ([`dispatched`]).
+//! (`dispatched`).
 //!
 //! A plugin's parameter `n` is control `0x8000 + n` of its slot, or of its
 //! channel for a generator. The clip's
@@ -62,7 +71,7 @@
 //! (`docs/plugins/fruity-peak-controller.md`, section 4). The plugin works
 //! its outputs out once a tick of the song, and where one has moved, every
 //! link from it sets its control: the output's 0 to 1 goes through the
-//! link's formula when it has one ([`crate::formula`]), and then covers the
+//! link's formula when it has one (the engine's `formula` module), and then covers the
 //! whole of the control's range in a straight line. That is FL's REC dispatcher taking a
 //! value in 2^30ths, as it does for a clip. The Peak Controller counts in
 //! 2^30ths already, so the 16384 that FL's host multiplies an older
@@ -81,7 +90,7 @@ use crate::generator;
 use crate::levels;
 use crate::mix::{self, BLOCK, Mixer};
 use crate::sequence::Song;
-use crate::voice::{self, Follow, Voice};
+use crate::voice::{self, Filtered, Follow, Voice};
 use crate::{Curves, clock::Clock};
 use flp::event::layout::Point;
 use model::rec::{ControllerOutput, control};
@@ -493,6 +502,13 @@ enum Level {
     PanOffset,
     /// 229 @4, 12800 at unity.
     VolumeMultiplier,
+    /// Mod X and mod Y, 219 @12 and @16, from 0 to 256: the cutoff and the
+    /// resonance of the channel's filter.
+    ModX,
+    ModY,
+    /// 229 @12 and @16, from -256 to 256, which add to them.
+    ModXOffset,
+    ModYOffset,
 }
 
 /// The control number of the first parameter of a slot's plugin, and of a
@@ -619,6 +635,10 @@ fn set(control: Control, raw: f64, levels: &mut [Levels], mixer: &mut Mixer, cur
                 Level::Pitch => levels.pitch = raw as i32,
                 Level::PanOffset => levels.pan_offset = raw as i32,
                 Level::VolumeMultiplier => levels.adjust = raw as i32,
+                Level::ModX => levels.mods[0] = raw as i32,
+                Level::ModY => levels.mods[1] = raw as i32,
+                Level::ModXOffset => levels.mods[2] = raw as i32,
+                Level::ModYOffset => levels.mods[3] = raw as i32,
             }
         }
         Control::Tempo => {}
@@ -653,12 +673,28 @@ struct Levels {
     /// channel's voices were made with.
     pitch: i32,
     knob: i32,
+    /// Mod X and mod Y, 219 @12 and @16, and their offsets, 229 @12 and
+    /// @16.
+    mods: [i32; 4],
+    /// The type of the channel's filter, 219 @20, when a clip or a link
+    /// drives mod X, mod Y or an offset of them, and the channel's voices
+    /// run the filter.
+    filter: Option<i32>,
 }
 
 impl Levels {
     /// The pan [`voice::gains`] takes: the pan and the pan offset.
     fn pan(&self) -> i32 {
         self.pan as i32 + self.pan_offset
+    }
+
+    /// The channel's side of `FinalLevels.FCut` and `FRes`, as
+    /// `FUN_00fea140` works it out for a sampler or an audio clip channel:
+    /// `(219 @12 + 229 @12) / 256` and the same of @16, in f32.
+    fn filter_mods(&self) -> (f32, f32) {
+        let [x, y, x_offset, y_offset] = self.mods;
+        let per = 1.0f32 / 256.0;
+        ((x + x_offset) as f32 * per, (y + y_offset) as f32 * per)
     }
 }
 
@@ -973,13 +1009,21 @@ impl Automation {
                 (Control::ChannelParam { channel, index }, initial, range)
             }
             RecTarget::Channel { index, control } => {
-                let range = target.raw_range()?;
                 let channel = project.channel(index)?;
                 let played = [ChannelKind::Sampler, ChannelKind::AudioClip];
+                let sampled = channel.kind.is_some_and(|kind| played.contains(&kind));
                 let hosted = || generator::hosted(channel, None, None).is_some();
-                if !channel.kind.is_some_and(|kind| played.contains(&kind)) && !hosted() {
+                if !sampled && !hosted() {
                     return None;
                 }
+                // Mod X and Y and their offsets are the filter's of a
+                // channel FL plays itself, and those the engine plays.
+                let filter = sampled.then(|| MODS.iter().position(|m| *m == control));
+                let range = match filter.flatten() {
+                    Some(0 | 1) => (0, 256),
+                    Some(_) => (-256, 256),
+                    None => target.raw_range()?,
+                };
                 let (volume, pan) = voice::levels(channel);
                 let levels = Levels {
                     channel: index,
@@ -989,6 +1033,8 @@ impl Automation {
                     adjust: voice::adjust(project, channel),
                     pitch: levels::knob(channel),
                     knob: levels::knob(channel),
+                    mods: mods(channel),
+                    filter: None,
                 };
                 let (level, initial) = match control {
                     control::CHANNEL_VOLUME => (Level::Volume, volume as i32),
@@ -996,10 +1042,26 @@ impl Automation {
                     control::CHANNEL_PITCH => (Level::Pitch, levels.knob),
                     control::CHANNEL_PAN_OFFSET => (Level::PanOffset, levels.pan_offset),
                     control::CHANNEL_VOLUME_MULTIPLIER => (Level::VolumeMultiplier, levels.adjust),
-                    _ => return None,
+                    _ => {
+                        let at = filter.flatten()?;
+                        let level = [
+                            Level::ModX,
+                            Level::ModY,
+                            Level::ModXOffset,
+                            Level::ModYOffset,
+                        ];
+                        (level[at], levels.mods[at])
+                    }
                 };
                 if !self.levels.iter().any(|l| l.channel == index) {
                     self.levels.push(levels);
+                }
+                if filter.flatten().is_some() {
+                    let kind = channel
+                        .levels
+                        .map_or(0, |l| i32::from_le_bytes(l.unknown_20));
+                    let found = self.levels.iter_mut().find(|l| l.channel == index);
+                    found.expect("pushed above").filter = Some(kind);
                 }
                 let channel = index;
                 (Control::Channel { channel, level }, initial, range)
@@ -1109,15 +1171,18 @@ impl Automation {
     }
 
     /// What a voice on this channel needs to follow its automation, when
-    /// a clip drives the channel's volume, pan, pitch, pan offset or volume
-    /// multiplier. `level` and `pan` are the voice's own, as
-    /// [`voice::gains`] takes them, the level without the channel's volume
-    /// multiplier.
+    /// a clip drives the channel's volume, pan, pitch, pan offset, volume
+    /// multiplier, mod X or mod Y. `level` and `pan` are the voice's own,
+    /// as [`voice::gains`] takes them, the level without the channel's
+    /// volume multiplier. `mods` are the voice's own mod X and mod Y, as
+    /// [`voice::Filtered`] has them, and `rate` the output rate, for a
+    /// channel whose filter the voice runs.
     pub fn following(
         &self,
         channel: u16,
-        level: f32,
-        pan: f32,
+        (level, pan): (f32, f32),
+        mods: (f32, f32),
+        rate: u32,
         curves: &dyn Curves,
     ) -> Option<Follow> {
         let levels = self.levels.iter().find(|l| l.channel == channel)?;
@@ -1130,11 +1195,13 @@ impl Automation {
                 .max(lane.range.0);
             curves.pitch_ratio((lowest.round() - f64::from(levels.knob)) / 100.0)
         });
+        let filter = levels.filter.map(|kind| Filtered { kind, rate, mods });
         Some(Follow {
             channel,
             level,
             pan,
             slowest,
+            filter,
         })
     }
 
@@ -1234,6 +1301,10 @@ impl Automation {
                     let cents = f64::from(levels.pitch - levels.knob);
                     voice.set_pitch(curves.pitch_ratio(cents / 100.0));
                 }
+                if own.filter.is_some() {
+                    let (cut, res) = levels.filter_mods();
+                    voice.set_filter(cut, res);
+                }
             }
         }
     }
@@ -1245,6 +1316,25 @@ impl Automation {
 /// the width is taken in f64.
 fn raw_at(low: i32, high: i32, part: i32) -> f64 {
     f64::from(low) + f64::from(part) / 12_800.0 * (f64::from(high) - f64::from(low))
+}
+
+/// The channel controls of mod X, mod Y and their offsets, in the order
+/// [`Levels::mods`] keeps them (`docs/rec-channel.md`).
+const MODS: [u16; 4] = [2, 3, 0x13, 0x14];
+
+/// Mod X and mod Y of a channel, 219 @12 and @16, 256 and 0 for a channel
+/// without a 219, and their offsets, 229 @12 and @16.
+fn mods(channel: &model::Channel) -> [i32; 4] {
+    let (x, y) = channel
+        .levels
+        .map_or((256, 0), |l| (l.mod_x as i32, l.mod_y as i32));
+    let word = |at: usize| {
+        let adjusts = channel.level_adjusts.map(|a| a.unknown_8);
+        adjusts.map_or(0, |b| {
+            i32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+        })
+    };
+    [x, y, word(4), word(8)]
 }
 
 /// A target as FL's REC dispatcher reads it (`FUN_01046a70`, the mixer

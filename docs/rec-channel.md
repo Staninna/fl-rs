@@ -41,10 +41,10 @@ multiplies @0 and @4 by 100 for writers below 5.3.7).
 |---|---|---|---|---|---|---|
 | 0 | volume | 219 @4, `chan+0x170` | 0..12800, default 10000 (`VolWheel`); fixed in the dispatcher | `FUN_00fe9d20` | plays | loader, dfm |
 | 1 | pan | 219 @0, `chan+0x16c` | 0..12800, 6400 centre (`PanWheel`) | `FUN_00fe9bf0` | plays | loader, dfm |
-| 2 | mod X (filter cutoff) | 219 @12, `chan+0x178` | 0..256, default 256 (`FCutWheel`) | `FUN_00fea140` | no | loader, dfm |
-| 3 | mod Y (filter resonance) | 219 @16, `chan+0x17c` | 0..256, default 0 (`FResWheel`) | `FUN_00fea140` | no | loader, dfm |
+| 2 | mod X (filter cutoff) | 219 @12, `chan+0x178` | 0..256, default 256 (`FCutWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
+| 3 | mod Y (filter resonance) | 219 @16, `chan+0x17c` | 0..256, default 0 (`FResWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
 | 4 | pitch knob, cents | 219 @8, `chan+0x174` | -4800..4800 fixed (`FUN_01046a30(v, -4800, 4800)`); the knob itself shows the pitch range, `PitchRangeSelect` 1..48 semitones, default 2 | VMT +0x128 = `FUN_00ff86f0` | plays | loader, dfm, corpus |
-| 5 | 219 @20 | `chan+0x180` | knob at `form+0xa80` | `FUN_007a0940` | no | loader (meaning unknown) |
+| 5 | filter type, 0..7 (below) | 219 @20, `chan+0x180` | `FTypeSelect` at `form+0xa88`, tag 5, whose `FTypeSelectChange` (`FUN_00f62640`) sends control 5 | `FUN_007a0940` | read for the filter, not automated | loader, dfm |
 | 6 | portamento time | `chan+0x1f0` | 0..1660 (`PolySlideWheel`) | `FUN_00fea220` | no | loader, dfm |
 | 7 | mute | byte `chan+0x32e` | on above 2^29 | `FUN_00ffa730` | no | loader |
 | 8 | target mixer track | `chan+0x258` | 0..insert count - 2 | | no | loader, dfm |
@@ -58,8 +58,8 @@ multiplies @0 and @4 by 100 for writers below 5.3.7).
 | 0x10 | pan offset | 229 @0, `chan+0x184` | -6400..6400 (`PanOfsWheel`) | `FUN_00fe9bf0` | plays | loader, dfm, corpus |
 | 0x11 | volume multiplier | 229 @4, `chan+0x188` | 0..25600, 12800 unity (`VolOfsWheel`) | `FUN_00fe9d20` | plays | loader, dfm, corpus |
 | 0x12 | 229 @8 | `chan+0x18c` | no knob in the form | `FUN_00fea140` (reads nothing of it) | no | loader |
-| 0x13 | mod X offset | 229 @12, `chan+0x190` | -256..256 (`FCutOfsWheel`) | `FUN_00fea140` | no | loader, dfm |
-| 0x14 | mod Y offset | 229 @16, `chan+0x194` | -256..256 (`FResOfsWheel`) | `FUN_00fea140` | no | loader, dfm |
+| 0x13 | mod X offset | 229 @12, `chan+0x190` | -256..256 (`FCutOfsWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
+| 0x14 | mod Y offset | 229 @16, `chan+0x194` | -256..256 (`FResOfsWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
 | 0x103..0x125 | TS404 parameters | `*(chan+0x358) + 8 + 4n` | per knob | | no | loader, dfm |
 | 0x200..0x207 | echo delay: 0x200 feedback, 0x201 pan, 0x202 pitch, 0x203 echoes, 0x204 time, 0x205 mod Y, 0x206 mod X | `chan+0x200 + 4n` | per knob (`Delay*Wheel`, tags 512..518) | | no | loader, dfm |
 | 0x300..0x3FF | arpeggiator: 0x301 range, 0x303 time (450..1447), 0x304 gate (0..48), 0x305 repeat | `chan+0x2ac + 4n` (0x302 stored less 2, 0x305 at `chan+0x2e0`) | per knob (`Arp*`, tags 769..773) | | no | loader, dfm |
@@ -121,11 +121,16 @@ parameters 0, 0x12, 0x13 and 0x226).
 
 Left out, and why:
 
-- Mod X and Y (2, 3) and their offsets (0x13, 0x14). On a sampler or a
-  native generator such as 3x Osc they drive the channel's own filter,
-  which the engine does not have. A plugin reads them as
-  `FinalLevels.FCut`/`FRes`, which `NoteOn` carries only as the note's own
-  mods.
+- Mod X and Y (2, 3) and their offsets (0x13, 0x14) of a plugin channel.
+  `chan+0x164`, which the kind setter `FUN_00ff7850` sets to 0 for a
+  sampler (kind 0) and an audio clip channel (kind 4), 3 for a layer and 4
+  for an automation clip, decides what `FUN_00fea140` makes of them: below
+  2 the channel's levels are `(219 + 229) / 256`, at 2 and 3 the 229
+  offsets alone, so for a plugin that takes mod X and Y as its own filter's
+  (3x Osc answers `FPD_UseVoiceLevels` with 2) a clip on 219 @12 reaches
+  no level. Where a plugin channel's `+0x164` is set was not found, so the
+  engine plays none of the four on a plugin channel: `Square a Saw -
+  Oxygen` channel 51 (3x Osc) keeps its two clips on mod X unsupported.
 - Arpeggiator (0x303, 0x304), time stretch and formant (14, 15), the
   instrument envelopes (0x1000..), tracking, delay, TS404: the engine plays
   none of these parts of a channel.
@@ -180,3 +185,56 @@ to one of them by setting nothing when the clip's LFO is off, and counts
 it unsupported when it is on. Corpus: `SFX transitions.flp` drives 0x600
 and 0x604 of six clips, all with the LFO off, which are 12 bindings that
 now play.
+
+## The filter of a sampler or audio clip channel (crates/engine/src/channel_filter.rs)
+
+FL's host plays the voices of a sampler and an audio clip channel itself
+and runs them through a filter, the same unit 3x Osc carries a copy of
+(`docs/plugins/3x-osc.md`, section 3.3). Read from `FLEngine_x64.dll`:
+
+- Voice set-up (`0xd2795c`): the filter type is `chan+0x180`, 219 @20, and
+  the table at 0x1510e40 gives a kind and whether it runs twice: 0 Fast LP,
+  1 to 4 the low-pass, band-pass, high-pass and notch biquads, 5 the
+  low-pass twice, 6 the state-variable low-pass, 7 it twice. `rec+0x234`,
+  the filter's switch, is on for every kind but the Fast LP; `FUN_006a05a0`
+  clears the state.
+- Coefficients (`FUN_00d24650`, run where a tick starts and as a voice
+  starts): the cutoff is `FinalLevels.FCut + rec+0x110` and the resonance
+  `FinalLevels.FRes + rec+0x134`, the two `+0x110` and `+0x134` being what
+  the mod X and mod Y envelopes and LFOs add. `FUN_00981df0` (Fast LP),
+  `FUN_00981c50` (biquads, through the RBJ design `FUN_009815f0`) and
+  `FUN_00981f20` (state-variable) make them, with `ln 601`, `ln 51`, `ln 51
+  * 80 / 128` and `ln 26` worked out in f64 and kept as f32 (`0x6a690b`,
+  `0x9823e8`). A Fast LP switches itself on for good once its coefficients
+  leave 1 and 0, and its speed moves to the new one over the tick, by no
+  more than `limit` a sample (`FUN_006a3810`), except on the voice's first
+  block, where it starts there.
+- The sample-rate code at 0x6a0230 sets `s = 44100 / rate` (`0x13ec894`)
+  and `limit = s * 0.001` (`0x13ec898`).
+- Running (`FUN_00d247a0`, every block, before the gains): the Fast LP
+  kernel at 0x6a5eb0 keeps its level and speed in f64 and steps its own
+  speed in f32; the biquad (0x982020) and state-variable (0x982140) kernels
+  are f32. The twice low-pass runs the biquad again on its own output and
+  multiplies the voice's gains by `1 - q (3.2 - w) * 0.046875` (`0xd24886`);
+  the twice state-variable filter runs the second stage with the damping
+  `q + (1 - q) * 0.25` (`0xd2490b`). The kernels zero what is left in their
+  state under 2^-24 after each block.
+- `FUN_00d24ae0`, the voice's render, calls the coefficients at a tick and
+  the filter on every block, between the generator's render and the
+  gains.
+
+What the engine plays: a voice on a sampler or audio clip channel whose
+mod X, mod Y or one of their offsets a clip or a link drives runs this
+filter with the cutoff and resonance of its note (its mod X and Y and
+tracking) and of its channel. It works the coefficients out where it reads
+its controls, every 512th sample and where a voice starts, and moves the
+Fast LP over 512 samples rather than a tick. It leaves out the mod X and
+mod Y envelopes and LFOs, and the zeroing under 2^-24, which would make a
+voice depend on where its blocks fall. A channel whose filter nothing
+drives plays unfiltered, as before: 85 of the corpus's 1,277 sampler and
+audio clip channels have a filter that is not wide open, and playing it on
+all of them would change projects no clip touches.
+
+Corpus: `Square a Saw - Oxygen` channel 14, a sampler with type 5 (the
+low-pass twice) and mod Y at 114, and `Bombs Away ft KARRA - I'm Awake`
+channels 227 and 228, audio clip channels with a clip on the mod X offset.

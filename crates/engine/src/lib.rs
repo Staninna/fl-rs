@@ -107,6 +107,7 @@
 //! host gets from a note to the levels a voice plays by.
 
 pub mod automation;
+mod channel_filter;
 mod clock;
 mod curves;
 mod engine;
