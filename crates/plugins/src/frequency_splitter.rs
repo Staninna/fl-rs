@@ -42,7 +42,7 @@
 //! the old filters.
 
 use crate::linear_phase::{self, Convolver, Fft};
-use crate::{Effect, Fidelity, StateError, knob_value, state_version};
+use crate::{Effect, Fidelity, Output, StateError, knob_value, state_version};
 use std::f64::consts::{LOG2_E, PI, TAU};
 use std::ops::{Add, Mul, Sub};
 
@@ -79,8 +79,14 @@ const LINEAR: usize = 4;
 const BANDS: usize = 5;
 const QUALITY: usize = 6;
 const SPEED: usize = 7;
-/// The first of the three main output levels.
+/// The first of the three send levels and of the three main output
+/// levels.
+const SEND_LEVEL: usize = 8;
 const MAIN_LEVEL: usize = 11;
+
+/// How many frames of each band's send there is room for from the start.
+/// A longer block asks for more, once.
+const SEND_ROOM: usize = 4096;
 
 /// The newest version FL reads, and the highest target mixer track.
 const VERSION: i32 = 4;
@@ -741,6 +747,14 @@ pub struct FrequencySplitter {
     gain_to: [f32; 3],
     gain: [f32; 3],
     glide: f32,
+    /// The send levels, as the main ones, and each band's send of the
+    /// last block, kept while a target is set.
+    send_to: [f32; 3],
+    send: [f32; 3],
+    sends: [[Vec<f32>; 2]; 3],
+    /// The host takes the sends where the targets say, as FL's Patcher
+    /// does.
+    routed: bool,
     crossovers: [Crossover; 3],
     linear: LinearPhase,
 }
@@ -767,6 +781,12 @@ impl Default for FrequencySplitter {
             gain_to: [0.0; 3],
             gain: [0.0; 3],
             glide: 1.0,
+            send_to: [0.0; 3],
+            send: [0.0; 3],
+            sends: std::array::from_fn(|_| {
+                [Vec::with_capacity(SEND_ROOM), Vec::with_capacity(SEND_ROOM)]
+            }),
+            routed: false,
             crossovers: [Crossover::default(); 3],
             linear: LinearPhase::new(fft_size(5, rate)),
         };
@@ -804,8 +824,7 @@ impl FrequencySplitter {
                 setting.fade_seconds = 10f32.powf(p + p) * f32::from_bits(0x3b03_126f);
             }
             MAIN_LEVEL.. => self.main_gain(index - MAIN_LEVEL),
-            // The send levels go with the sends.
-            _ => {}
+            SEND_LEVEL.. => self.send_gain(index - SEND_LEVEL),
         }
         self.setting = setting;
         let filters = Setting {
@@ -830,6 +849,17 @@ impl FrequencySplitter {
             1.0
         };
         self.gain_to[band] = level * on;
+    }
+
+    /// Where a send's level goes: its wheel, or nothing when its mute is
+    /// on. The engine's sends are taken to glide as its main outputs do.
+    fn send_gain(&mut self, band: usize) {
+        let level = level(share(
+            self.params[SEND_LEVEL + band],
+            RANGES[SEND_LEVEL + band],
+        ));
+        let on = if self.mutes[band] { 0.0 } else { 1.0 };
+        self.send_to[band] = level * on;
     }
 
     /// The filters for the setting, `FUN_1801e8190` on each crossover the
@@ -933,8 +963,20 @@ impl Effect for FrequencySplitter {
             self.tune();
             self.dirty = false;
         }
-        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        let sends = self.targets.map(|target| target > 0);
+        for (band, send) in self.sends.iter_mut().enumerate() {
+            send[0].clear();
+            send[1].clear();
+            if sends[band] {
+                send[0].resize(left.len(), 0.0);
+                send[1].resize(left.len(), 0.0);
+            }
+        }
+        for (frame, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
             for (gain, to) in self.gain.iter_mut().zip(&self.gain_to) {
+                *gain += (to - *gain) * self.glide;
+            }
+            for (gain, to) in self.send.iter_mut().zip(&self.send_to) {
                 *gain += (to - *gain) * self.glide;
             }
             let bands = if self.setting.linear {
@@ -948,6 +990,13 @@ impl Effect for FrequencySplitter {
             } else {
                 self.split(*l, *r)
             };
+            for (band, value) in bands.iter().enumerate() {
+                if sends[band] {
+                    let gain = self.send[band];
+                    self.sends[band][0][frame] = value.re * gain;
+                    self.sends[band][1][frame] = value.im * gain;
+                }
+            }
             let [low, mid, high] = bands;
             let [g0, g1, g2] = self.gain;
             *l = low.re * g0 + mid.re * g1 + high.re * g2;
@@ -977,8 +1026,23 @@ impl Effect for FrequencySplitter {
         self.linear.clear();
     }
 
+    /// Each band whose target is set, at its send level, to the output
+    /// the target numbers.
+    fn outputs(&self, each: &mut Output<'_>) {
+        for (band, target) in self.targets.iter().enumerate() {
+            if *target > 0 {
+                let [left, right] = &self.sends[band];
+                each(*target as usize, left, right);
+            }
+        }
+    }
+
+    fn route_outputs(&mut self) {
+        self.routed = true;
+    }
+
     fn fidelity(&self) -> Fidelity {
-        if self.targets.iter().any(|target| *target > 0) {
+        if !self.routed && self.targets.iter().any(|target| *target > 0) {
             Fidelity::Approximate("Frequency Splitter's bands to other mixer tracks are not routed")
         } else {
             Fidelity::Exact

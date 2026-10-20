@@ -923,11 +923,17 @@ fn effects(
             continue;
         };
         match plugin(slot, Some(told)) {
-            Some(effect) => hosted.push(Hosted {
-                enabled,
-                mix: curves.slot_mix(mix),
-                ..Hosted::new(index, effect)
-            }),
+            Some(effect) => {
+                // The plugins a Patcher passes through count as passed.
+                for inner in effect.unhosted() {
+                    *unhosted.entry(inner.clone()).or_default() += 1;
+                }
+                hosted.push(Hosted {
+                    enabled,
+                    mix: curves.slot_mix(mix),
+                    ..Hosted::new(index, effect)
+                });
+            }
             None => *unhosted.entry(name.to_owned()).or_default() += 1,
         }
     }
