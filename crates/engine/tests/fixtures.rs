@@ -4498,12 +4498,7 @@ fn a_link_the_engine_cannot_play_is_counted() {
     // and with a formula the engine does not read.
     link(&mut project, (1, 0, PEAK), TEMPO, None);
     let volume = insert_control(3, VOLUME);
-    link(
-        &mut project,
-        (1, 0, LFO),
-        volume,
-        Some("Tension(Input, 0.5)"),
-    );
+    link(&mut project, (1, 0, LFO), volume, Some("Sin(Input)"));
     // To a control of a plugin the engine does not host.
     add_effect(&mut project, 2, 1, "ZGameEditor Visualizer", &[]);
     link(
@@ -4535,6 +4530,42 @@ fn a_link_the_engine_cannot_play_is_counted() {
     midi.controller_links[0].kind = LinkKind::Midi;
     midi.controller_links[0].order[0].item = Item::Field(Id::ControllerMIDI);
     assert_eq!(linked(&render(&midi, &dir)), (0, 0, 0));
+}
+
+#[test]
+fn a_tension_formula_bends_what_a_controller_opens_a_send_by() {
+    let dir = Dir::new("controller-tension");
+    dir.tone(3 * 96_000);
+    // The square of `gated_tone` on the send from insert 1, which the
+    // tone plays into, to insert 2, the way to the master, at level 0 in
+    // the project.
+    let gate = |formula: &str| {
+        let mut project = gated_tone();
+        project.controller_links.clear();
+        route(&mut project, 1, &[2]);
+        set(&mut project, 1, SEND + 2, 0);
+        link(
+            &mut project,
+            (3, 0, LFO),
+            insert_control(1, SEND + 2),
+            Some(formula),
+        );
+        project
+    };
+    let plain = render(&gate("Input"), &dir);
+    assert_eq!(linked(&plain), (1, 1, 0));
+    assert!(plain.left[..48 * TICK].iter().all(|v| *v != 0.0));
+    assert!(plain.left[49 * TICK..96 * TICK].iter().all(|v| *v == 0.0));
+    // `Tension(x, 10)` keeps 0 at 0 and 1 at 1, which is all a square
+    // gives, so the send opens and shuts as it does without it.
+    let bent = render(&gate("Tension(Input,10)"), &dir);
+    assert_eq!(linked(&bent), (1, 1, 0));
+    assert!(bent.left == plain.left && bent.right == plain.right);
+    // Upside down, it is open where the other was shut.
+    let turned = render(&gate("Tension(1-Input,10)"), &dir);
+    assert_eq!(linked(&turned), (1, 1, 0));
+    assert!(turned.left[..48 * TICK].iter().all(|v| *v == 0.0));
+    assert!(turned.left[49 * TICK..96 * TICK].iter().all(|v| *v != 0.0));
 }
 
 #[test]

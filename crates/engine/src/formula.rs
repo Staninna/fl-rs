@@ -3,16 +3,17 @@
 //!
 //! `docs/plugins/fruity-peak-controller.md`, section 4, has the frame: the
 //! value comes in as `Input`, from 0 to 1, and what the formula makes of it
-//! is kept inside 0 to 1 and scaled onto the control's range. The doc names
-//! one more thing a formula can say, `Tension(x, t)`, and not what it
-//! works out.
+//! is kept inside 0 to 1 and scaled onto the control's range.
 //!
-//! So this reads the arithmetic and nothing else: numbers, `Input` in any
-//! case, `+`, `-`, `*`, `/`, a sign in front and brackets. That is every
-//! formula on a Peak Controller link in FL's own projects, which are
-//! `1-Input`, `Input*1`, `Input*0.6`, `1-Input*1.6` and `1-Input*0.5-0.5`.
-//! A formula with anything else in it does not compile, and its link is
-//! one the engine does not play.
+//! This reads the arithmetic, numbers, `Input` in any case, `+`, `-`, `*`,
+//! `/`, a sign in front and brackets, and the one function FL's formula
+//! compiler (`FUN_00f81f70`) adds to its parser, `Tension(x, t)`
+//! (`FUN_00f81d60`, [`tension`]). That is every formula on a controller
+//! link in FL's own projects: `1-Input`, `Input*1`, `Input*0.6`,
+//! `1-Input*1.6` and `1-Input*0.5-0.5` on the Peak Controller links, and
+//! `Tension(Input,10)` and `Tension(1-Input,10)` in `Surround mix.flp`. A
+//! formula with anything else in it does not compile, and its link is one
+//! the engine does not play.
 
 /// A formula, ready to work out. [`Formula::compile`] allocates and
 /// [`Formula::at`] does not.
@@ -31,6 +32,27 @@ enum Step {
     Multiply,
     Divide,
     Negate,
+    /// [`tension`] of the two values on top, `x` below `t`.
+    Tension,
+}
+
+/// FL's `Tension(x, t)` (`FUN_00f81d60`): `x` bent by `t`. 0 is the
+/// straight line, a `t` below 0 bends it down as `((1 + |t|)^x - 1) / |t|`
+/// and one above 0 up, its mirror image. Both go through 0 at 0 and 1 at
+/// 1. FL works the power out in f32, as `exp(x * ln(t + 1))`, and so does
+/// this.
+pub(crate) fn tension(x: f64, t: f64) -> f64 {
+    let bent = |x: f64, size: f64| {
+        let ln = f64::from(size as f32 + 1.0).ln();
+        f64::from(((f64::from(x as f32) * ln).exp() - 1.0) as f32)
+    };
+    if t == 0.0 {
+        x
+    } else if t < 0.0 {
+        bent(x, -t) / -t
+    } else {
+        (t - bent(1.0 - x, t)) / t
+    }
 }
 
 /// The most values a formula has on its stack at once. One that needs more
@@ -141,6 +163,9 @@ impl Parser<'_> {
         if word.eq_ignore_ascii_case("input") {
             return self.push(Step::Input);
         }
+        if word.eq_ignore_ascii_case("tension") {
+            return self.tension();
+        }
         // Digits with at most one point among them. `parse` alone would
         // take `inf`, `nan` and `1e5`.
         let plain = word
@@ -148,6 +173,19 @@ impl Parser<'_> {
             .all(|byte| byte.is_ascii_digit() || byte == b'.');
         let number: f64 = word.parse().ok().filter(|_| plain)?;
         self.push(Step::Number(number))
+    }
+}
+
+impl Parser<'_> {
+    /// The brackets of `Tension(x, t)`, after its name.
+    fn tension(&mut self) -> Option<()> {
+        self.take(b'(').then_some(())?;
+        self.nested(Self::sum)?;
+        self.take(b',').then_some(())?;
+        self.nested(Self::sum)?;
+        self.take(b')').then_some(())?;
+        self.join(Step::Tension);
+        Some(())
     }
 }
 
@@ -191,6 +229,7 @@ impl Formula {
                         Step::Add => left + right,
                         Step::Subtract => left - right,
                         Step::Multiply => left * right,
+                        Step::Tension => tension(left, right),
                         _ => left / right,
                     };
                 }
@@ -257,6 +296,23 @@ mod tests {
     }
 
     #[test]
+    fn tension_bends_the_input_as_fl_does() {
+        // The Surround mix formulas: 0 and 1 stay where they are.
+        for text in ["Tension(Input,10)", "Tension(1-Input,10)"] {
+            assert!(close(at(text, 0.0) + at(text, 1.0), 1.0), "{text}");
+        }
+        // Up: (10 - (11^(1 - x) - 1)) / 10, so 0.5 gives 1 - (sqrt 11 - 1) / 10.
+        let up = 1.0 - (11f64.sqrt() - 1.0) / 10.0;
+        assert!((at("Tension(Input,10)", 0.5) - up).abs() < 1e-6);
+        assert!((at("Tension(1-Input,10)", 0.5) - up).abs() < 1e-6);
+        // Down is its mirror image, and 0 the line.
+        let down = (11f64.sqrt() - 1.0) / 10.0;
+        assert!((at("Tension(Input, -10)", 0.5) - down).abs() < 1e-6);
+        assert!(close(at("tension(Input, 0)", 0.3), 0.3));
+        assert!(close(at("Tension((Input), 1-1)*0.5", 0.5), 0.25));
+    }
+
+    #[test]
     fn a_formula_with_anything_else_in_it_does_not_compile() {
         for text in [
             "",
@@ -267,7 +323,9 @@ mod tests {
             "1-Input)",
             "Input Input",
             "1 2",
-            "Tension(Input, 0.5)",
+            "Tension(Input)",
+            "Tension(Input, 0.5",
+            "Tension Input",
             "Sin(Input)",
             "Input^2",
             "Inputs",
