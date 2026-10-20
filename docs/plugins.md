@@ -136,9 +136,9 @@ Corpus render at `fd911a4`: 119 of 165 shipped projects have sound with the stoc
 | Generator | FL Studio Mobile | 11857 |  | 0 | |
 | Generator | FL Studio Mobile Rack | 8039 |  | 0 | |
 | Generator | Fruity Dance | 4065 |  | 0 | |
-| Generator | Fruity Slicer 2 | 5791 |  | 0 | |
+| Generator | Fruity Slicer 2 | 5791 |  | 0 | implemented in crates/plugins (its own engine_x64.dll, no code of Fruity Slicer's: state versions 1 to 4 to the last byte, the sample by its path or embedded, up to 128 slices on their keys or played chromatically, play modes forward, to the sample's end, backward and ignoring the note off, cut, 16 voices taking the oldest, the engine's own 4-point Hermite read, pitch and fine tune, tempo resampling, end fade, slice and track state-variable filters, the envelope with its fixed-rate times and curve, velocity and volume curves, pan law and gain smoothing exact; Elastique (stretch mode 2) left out, resampled to the tempo instead; the 128 outputs mixed into one; FL's MIDI volume and pan not read, the track keeps the saved ones; a note's pan, automation and the learn mode not built), docs/plugins/fruity-slicer-2.md |
 | Generator | Fruity Video Player | 4181 |  | 0 | |
-| Generator | Kepler Exo | 4314 |  | 0 | |
+| Generator | Kepler Exo | 4314 |  | 0 | implemented in crates/plugins on Kepler's engine, which is Exo's (Kepler-2 state versions 1 to 4 and Kepler-1 states to the last byte, the 155 parameters and the 8-slot matrix read; Kepler's part of the engine plays as in Kepler: DCO 1, noise, LFO 1, envelope 1, the ladder, highpass, chorus, arpeggiator, volume and pan; approximated: DCO 2 with hard sync, cross modulation and AM, LFO 2, envelope 2, filter FM, slopes and types, the matrix, mono and portamento, hold, chorus noise, EQ, saturation, delay, reverb, hyper chorus and master tune left out, named by fidelity; 2 of 188 presets use none of them), docs/plugins/kepler-exo.md |
 | Generator | Plucked! | 3610 |  | 0 | |
 | Generator | ReWired | 3898 |  | 0 | |
 | Generator | Sawer | 4209 | yes | 0 | |
