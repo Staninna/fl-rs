@@ -193,6 +193,19 @@ fn every_project_renders_its_first_10_seconds() {
             out.latency,
             out.delayed_inserts,
         );
+        // What keeps the project from playing in full, by name.
+        let gaps = [
+            ("passed", format!("{:?}", out.unhosted_slots)),
+            ("silent", format!("{:?}", out.unhosted_generators)),
+            ("approximated", format!("{:?}", out.approximated_slots)),
+            (
+                "approximated generators",
+                format!("{:?}", out.approximated_generators),
+            ),
+        ];
+        for (what, list) in gaps.iter().filter(|(_, list)| list != "{}") {
+            eprintln!("  {what}: {list}");
+        }
         hosted += out.hosted_slots;
         sidechain_routes += out.sidechain_routes;
         sidechain_slots += out.sidechain_slots;
