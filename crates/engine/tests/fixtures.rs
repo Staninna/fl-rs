@@ -2318,9 +2318,10 @@ fn a_clip_bound_to_nothing_the_engine_plays_is_counted() {
     let out = render(&unbound, &dir);
     assert_eq!((out.automation_clips, out.unsupported_targets), (0, 0));
 
-    // Links to a plugin parameter of channel 0, to the mix level of a
-    // slot of insert 1, to insert 1's stereo separation and to the main
-    // volume: four controls the engine does not play.
+    // Links to a plugin parameter of channel 0, to insert 1's stereo
+    // separation and to the main volume: three controls the engine does
+    // not play. The mix level of a slot of insert 1 that holds no plugin
+    // changes nothing, and is not counted.
     let mut bound = base();
     let clip = add_automation(&mut bound, &line, FULL);
     for target in [
@@ -2334,13 +2335,13 @@ fn a_clip_bound_to_nothing_the_engine_plays_is_counted() {
     place(&mut bound, clip, 0, BAR);
     place(&mut bound, clip, BAR, BAR);
     let out = render(&bound, &dir);
-    assert_eq!((out.automation_clips, out.unsupported_targets), (0, 4));
+    assert_eq!((out.automation_clips, out.unsupported_targets), (0, 3));
     assert!(out.left[..96_000] == plain.left[..]);
     // One link the engine plays makes it a clip that plays, and the other
-    // four stay counted.
+    // three stay counted.
     bind(&mut bound, clip, insert_control(1, VOLUME));
     let out = render(&bound, &dir);
-    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 4));
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 3));
     assert_eq!(out.left[0], 0.0);
 
     // The volume of a channel the engine does not play is one more.
