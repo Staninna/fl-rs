@@ -533,8 +533,14 @@ host's rate factor and 88 at 44.1 kHz, from the quality selector 6's
    `env * |amount|` of the way. Each partial is multiplied by the filter
    curve at `log2 Hz * W + centre - fc * W` (`FHzSlope` 0, W = `0x6e8`
    points an octave) or at `Hz * 0.9 W / 2^fc + centre - 0.9 W` (linear),
-   `FUN_0077c540`: nearest point (`FUN_0077c470`) or between the two points
-   either side (`FUN_0077c400`), the end points outside.
+   `FUN_0077c540`, by the table's quality (+8, `FUN_0077c450` from the
+   quality selector 0x320; forced to 2 on a CPU without the SSE flag of
+   `PTR_DAT_007f0870 + 0x12`): under 2 the point below, `(int)` of the
+   place clamped to `[0, N - 1]` (`FUN_0077c470`, `cvttps2dq`), else between
+   the two points either side (`FUN_0077c400`: `i = Round(at - 0.5)`, the
+   fraction `at - i`), the end points outside. The phaser's periodic
+   lookup `FUN_0077c760` is the same with the index masked by `N - 1`
+   (`FUN_0077c690` for the point toward 0).
 9. Resonance: `r = level(clamp(FRes/1000 + ModY/2, 0, 1)) * 0.25`; with `FResMT` times `min((fc - fc_slow)^2, 1)`, `fc_slow` gliding
    by `0x6d8 = 0.01^(tick / (1.25 SR))`. When r > 0 the resonance curve is
    read at `(log2 Hz - fc - offset) * S + centre` (or linear in Hz) with S
@@ -776,8 +782,8 @@ A type of 0 frees the object; the next type above 0 makes a new one.
 
 Exact as read: the state and every version's corrections, the colours, the
 EQ bands, the detune and grit tables, the mask, the 36 shape curves and
-their lookup (interpolated; FL's nearest-point mode is not wired to a
-setting), filter range and cutoff maths, resonance and its motion tracking,
+their lookup (the point below at quality 0 and 1, between the two
+either side at 2), filter range and cutoff maths, resonance and its motion tracking,
 phaser (types 0..8), harmonizer, pluck, protection, subs and
 self-oscillation, the partial count and the bank's frequency weights, the
 sine bank and its 10 ms level glide, the LFO shapes, the vibrato and pitch
@@ -798,10 +804,8 @@ corpus is of the first): the colour groups, the colours that turn the
 boxes round and the filter notes of the 16th are not built. A `NoteOn`
 marked porta glides as `PortaBox` does.
 
-Approximated: the curve lookups at quality 0 and 1, which FL makes to
-the point below (`FUN_0077c470`, `FUN_0077c690`) and `harmless.rs`
-between the two either side. Where FL itself is random (the noise
-resonance, the LFO's per-note value) the draws are from another
+Nothing in the sound is approximated. Where FL itself is random (the
+noise resonance, the LFO's per-note value) the draws are from another
 generator, as FL's are new every run.
 
 Left to the host: slide notes, which FL plays by sliding the host levels
