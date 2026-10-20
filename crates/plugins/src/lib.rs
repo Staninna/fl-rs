@@ -80,6 +80,7 @@ pub mod fruity_slicer;
 mod generator;
 pub mod gms;
 mod gms_fx;
+pub mod granulizer;
 pub mod gross_beat;
 pub mod harmless;
 pub mod harmor;
@@ -127,6 +128,7 @@ pub mod squeeze;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod sytrus;
+mod tab;
 #[cfg(any(test, feature = "test-generators"))]
 pub mod test_sine;
 #[cfg(test)]
