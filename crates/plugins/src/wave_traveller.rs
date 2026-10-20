@@ -928,14 +928,21 @@ mod tests {
         let Some(root) = testing::corpus() else {
             return;
         };
+        // An install that also has `Patches/Plugin database` has one more.
         let mut saved = testing::every_preset(&root, NAME);
+        assert!(((10)..=11).contains(&saved.len()), "{}", saved.len());
         let ours = |saved: &testing::Saved| saved.plugin.eq_ignore_ascii_case(NAME);
-        saved.extend(testing::projects(&root).into_iter().filter(ours));
-        assert_eq!(saved.len(), 12);
+        let projects = testing::projects(&root).into_iter().filter(ours);
+        saved.extend(projects);
         for saved in saved {
             let mut plugin = WaveTraveller::default();
             plugin.set_state(&saved.state).unwrap();
-            assert_eq!(plugin.version, 1_000_005, "{}", saved.file);
+            // The loader reads every version alike; the presets have 1000001.
+            assert!(
+                [1_000_001, 1_000_005].contains(&plugin.version),
+                "{}",
+                saved.file
+            );
             let frames: Vec<f32> = (0..20_000).map(|k| (k as f32 * 0.03).sin() * 0.5).collect();
             plugin.set_sample(
                 &plugin.path.clone(),

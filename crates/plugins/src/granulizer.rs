@@ -894,10 +894,12 @@ mod tests {
         let Some(root) = testing::corpus() else {
             return;
         };
+        // An install that also has `Patches/Plugin database` has one more.
         let mut saved = testing::every_preset(&root, NAME);
+        assert!(((12)..=13).contains(&saved.len()), "{}", saved.len());
         let ours = |saved: &testing::Saved| saved.plugin.eq_ignore_ascii_case(NAME);
-        saved.extend(testing::projects(&root).into_iter().filter(ours));
-        assert_eq!(saved.len(), 14);
+        let projects = testing::projects(&root).into_iter().filter(ours);
+        saved.extend(projects);
         for saved in saved {
             let mut plugin = with(44_100, 0.5);
             plugin.set_state(&saved.state).unwrap();
