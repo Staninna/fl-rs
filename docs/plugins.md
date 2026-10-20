@@ -91,7 +91,7 @@ Corpus render at `fd911a4`: 119 of 165 shipped projects have sound with the stoc
 | Generator | Minisynth | 542 | yes | 2 | implemented in crates/plugins (state, parameters, voice modes and allocation, glide, the 10 oscillator kinds on the 1024 tables built from FL's `oscdata.dat` read at runtime, dithered table reads, the 4096-step ladder and its envelopes, LFO, distortion, delay, phaser and chorus as read; approximated: the drift, dither and noise run on a seed of the instance's own where FL's is process-wide, the song position is counted from the song's start, the per-key slots take the note's pan law, fine pitch and mod X/Y as `FinalLevels` is guessed to give them), docs/plugins/minisynth.md |
 | Generator | Toxic Biohazard | 737 |  | 2 | |
 | Generator | Wave Traveller | 4369 | yes | 2 | |
-| Effect | Emphasizer | 3688 |  | 1 | |
+| Effect | Emphasizer | 3688 |  | 1 | implemented in crates/plugins with gaps (state versions 1 and 2, the six parameters and the values the shell gives its limiter exact; the limiter itself, LimiterLite in Shared/ildsp_x64.dll, left out because that DLL is missing from the install it was read from: the sound passes through), docs/plugins/emphasizer.md |
 | Effect | Fruity Bass Boost | 3664 | yes | 1 | implemented in crates/plugins (exact; a new sample rate works the corner out again where FL keeps it), docs/plugins/fruity-bass-boost.md |
 | Effect | Fruity Delay | 3685 |  | 1 | implemented in crates/plugins (exact: tempo-synced ring, the three modes, the feedback low pass in f64 as FL's SSE loops keep it, both ramps with the renderer's cap; the input-add routine is taken to be Balance's; no render test, unit tests only), docs/plugins/fruity-delay.md |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
