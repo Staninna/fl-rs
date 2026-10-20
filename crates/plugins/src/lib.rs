@@ -19,7 +19,7 @@
 //! [`limiter::Limiter`], [`love_philter::LovePhilter`],
 //! [`maximus::Maximus`],
 //! [`multiband_compressor::MultibandCompressor`], [`panomatic::PanOMatic`],
-//! [`parametric_eq_2::ParametricEq2`],
+//! [`parametric_eq::ParametricEq`], [`parametric_eq_2::ParametricEq2`],
 //! [`peak_controller::PeakController`], [`pitcher::Pitcher`],
 //! [`reeverb_2::Reeverb2`],
 //! [`soft_clipper::SoftClipper`], [`soundgoodizer::Soundgoodizer`],
@@ -75,6 +75,7 @@ mod menvelope;
 pub mod multiband_compressor;
 pub mod ogun;
 pub mod panomatic;
+pub mod parametric_eq;
 pub mod parametric_eq_2;
 mod parametric_eq_2_engine;
 mod parts;
@@ -362,6 +363,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         ))
     } else if is(panomatic::NAME) {
         Some(Box::new(panomatic::PanOMatic::default()))
+    } else if is(parametric_eq::NAME) {
+        Some(Box::new(parametric_eq::ParametricEq::default()))
     } else if is(parametric_eq_2::NAME) {
         Some(Box::new(parametric_eq_2::ParametricEq2::default()))
     } else if is(peak_controller::NAME) {
@@ -658,6 +661,7 @@ mod tests {
             ("fruity limiter", 169, 190),
             ("fruity multiband compressor", 124, 35),
             ("fruity panomatic", 24, 193),
+            ("fruity parametric eq", 116, 9),
             ("fruity parametric eq 2", 305, 21),
             ("fruity parametric eq 2", 309, 328),
             ("fruity parametric eq 2", 350, 199),
@@ -712,7 +716,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 37);
+        assert_eq!(lengths.count(), 38);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
