@@ -41,6 +41,7 @@ pub mod boobass;
 pub mod chorus;
 pub mod compressor;
 pub mod convolver;
+pub mod delay;
 pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
@@ -324,6 +325,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(compressor::Compressor::default()))
     } else if is(convolver::NAME) {
         Some(Box::new(convolver::Convolver::default()))
+    } else if is(delay::NAME) {
+        Some(Box::new(delay::Delay::default()))
     } else if is(delay_2::NAME) {
         Some(Box::new(delay_2::Delay2::default()))
     } else if is(delay_3::NAME) {
@@ -647,6 +650,7 @@ mod tests {
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
             ("fruity compressor", 36, 35),
+            ("fruity delay", 28, 1),
             ("fruity delay 2", 32, 62),
             ("fruity delay 3", 108, 110),
             ("fruity delay bank", 792, 41),
@@ -715,7 +719,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 38);
+        assert_eq!(lengths.count(), 39);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
