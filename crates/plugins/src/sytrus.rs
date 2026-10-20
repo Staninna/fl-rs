@@ -8,8 +8,9 @@
 //! from 8 to 25. The sound is an approximation: the operators, the matrix,
 //! the filters, the envelopes and the output levels follow what the voice
 //! kernel does, with no band limiting of the wavetables, no plucked
-//! (Karplus-Strong) operators, no waveshaper on the filters and no delay,
-//! chorus, reverb or EQ after the voices. The unison is FL's: up to nine
+//! (Karplus-Strong) operators and no delay, chorus, reverb or EQ after the
+//! voices. The filters' waveshapers are FL's kernels over the baked
+//! curve (section 8 of the doc). The unison is FL's: up to nine
 //! voices a note and nine more an octave down, detuned, panned, phased and
 //! stretched by `TriggerVoice`'s tables, alone or sharing one set of
 //! filters (section 7 of the doc). A state
@@ -28,6 +29,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::menvelope::{Class, Lfo, LfoRun, MEnvelope, Reader, Run, Track};
+use crate::parts::glide;
 use crate::three_osc::pan_law;
 use crate::{Fidelity, Generator, NoteOn, StateError, knob_gain};
 use dsp::biquad::{Biquad64, Coefficients64};
@@ -677,6 +679,90 @@ fn tension_of(wheel: i32, top: f64) -> f64 {
     tension(wheel, top)
 }
 
+/// A filter's waveshaper: its curve baked into steps, as `0x874040`
+/// bakes it, and its wheels.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Shaper {
+    /// The steps, one more at either end: step `i` is at `table[i + 1]`.
+    /// Empty when the waveshaper is off.
+    table: Vec<i16>,
+    bipolar: bool,
+    /// The pre-amp and the mix wheels over 128.
+    pre_amp: f32,
+    mix: f32,
+}
+
+/// A unipolar waveshaper's steps (`0x4000`); a bipolar one has twice as
+/// many.
+const SHAPER: usize = 0x4000;
+
+impl Shaper {
+    fn on(&self) -> bool {
+        !self.table.is_empty()
+    }
+
+    /// Bake the curve: `(bipolar + 1) * 0x4000` steps from 0 to 1, each
+    /// the curve's level times 32767 (65535 for a bipolar curve, read from
+    /// its centre) to the nearest, the first and the last once more at
+    /// either end.
+    fn bake(&mut self, curve: &MEnvelope, bipolar: bool) {
+        self.bipolar = bipolar;
+        let (steps, centre, scale) = if bipolar {
+            (2 * SHAPER - 1, 0.5, 65_535.0)
+        } else {
+            (SHAPER - 1, 0.0, 32_767.0)
+        };
+        let step = |level: &f32| {
+            let scaled = f64::from(*level * scale).round_ties_even();
+            scaled.clamp(-32_768.0, 32_767.0) as i16
+        };
+        let levels: Vec<i16> = curve.table(steps, centre).iter().map(step).collect();
+        self.table.clear();
+        self.table.push(levels[0]);
+        self.table.extend(&levels);
+        self.table.push(levels[levels.len() - 1]);
+    }
+
+    /// Shape one sample, as the SSE kernels do: `0x62d980` (unipolar) and
+    /// `0x62e090` (bipolar) take the step under it, `0x62d800` and
+    /// `0x62daa0` read between two steps. A unipolar curve is for an input
+    /// from 0 up, and an input under 0 gets what its size gets, turned
+    /// over.
+    fn shape(&self, x: f32, hq: bool) -> f32 {
+        let table = &self.table;
+        let last = (table.len() - 3) as i32;
+        let at = |i: i32| f32::from(table[(i + 1) as usize]);
+        let lastf = last as f32;
+        let y = if self.bipolar {
+            let place = x * self.pre_amp * lastf * 0.5 + lastf * 0.5;
+            if hq {
+                let whole = place as i32;
+                let i = whole.clamp(0, last);
+                let frac = place - whole as f32;
+                (f64::from(at(i)) * (1.0 - f64::from(frac)) + f64::from(at(i + 1) * frac)) as f32
+            } else {
+                at((f64::from(place).round_ties_even() as i64).clamp(0, i64::from(last)) as i32)
+            }
+        } else if hq {
+            let place = x * self.pre_amp * lastf;
+            let whole = place as i32;
+            let frac = place - whole as f32;
+            if whole >= 0 {
+                let i = whole.min(last);
+                at(i) + (at(i + 1) - at(i)) * frac
+            } else {
+                let i = whole.unsigned_abs().min(last as u32) as i32;
+                -(at(i) - (at(i + 1) - at(i)) * frac)
+            }
+        } else {
+            let place = f64::from(x.abs()) * f64::from(self.pre_amp * lastf);
+            let i = (place as i64).min(i64::from(last)) as i32;
+            if x >= 0.0 { at(i) } else { -at(i) }
+        };
+        y * 3.051_757_8e-5
+    }
+}
+
 /// One filter, as the state has it.
 #[derive(Debug, Clone, PartialEq)]
 struct Filter {
@@ -691,10 +777,8 @@ struct Filter {
     levels: [f32; 3],
     /// The gain slider as a shelf's or a peak's gain.
     gain: f32,
-    /// The waveshaper is on with some mix.
-    shaper: bool,
-    /// The waveshaper's switch, without the mix.
-    shaper_on: bool,
+    /// The waveshaper after the filter.
+    shaper: Shaper,
     to_next: f32,
     articulators: Vec<Articulator>,
 }
@@ -725,7 +809,7 @@ impl Filter {
     /// Take wheel `k` of the header, as `0x869e80` does. The envelope
     /// wheel (1) is the cutoff articulator's amount, and the "to next"
     /// wheel (9) wants the rows routed anew; the waveshaper's pre-amp (7)
-    /// is not built.
+    /// and mix (8) are over 128 (`+0x8c8`, `+0x8c4`).
     fn set_wheel(&mut self, k: usize, value: i32) {
         match k {
             0 => {
@@ -743,7 +827,8 @@ impl Filter {
                     self.gain = (curve(8.0, f64::from(knob)) * 0.125 + 0.125) as f32;
                 }
             }
-            8 => self.shaper = self.shaper_on && value != 0,
+            7 => self.shaper.pre_amp = value as f32 * (1.0 / 128.0),
+            8 => self.shaper.mix = value as f32 * (1.0 / 128.0),
             9 => self.to_next = level(value, 256.0),
             _ => {}
         }
@@ -947,6 +1032,9 @@ struct State {
     mod_y: i32,
     /// Mod X and Mod Y glide to their wheels (`ModSmoothBtn`, u8 0x440).
     mod_smooth: bool,
+    /// The waveshapers read between their steps (u8 0x5f18; FL also does
+    /// while it renders to a file).
+    hq_shaper: bool,
     /// The matrix as levels: `fm[carrier][modulator]` in cycles of the
     /// carrier for a modulator at 1, `rm[carrier][modulator]`, the
     /// operators' sends into each filter, and every row's pan (-0.5 to
@@ -1021,8 +1109,7 @@ impl State {
                 resonance: 0.0,
                 levels: [1.0, 0.0, 0.0],
                 gain: 8.0,
-                shaper: false,
-                shaper_on: false,
+                shaper: Shaper::default(),
                 to_next: 0.0,
                 articulators: articulators(1),
             })
@@ -1040,6 +1127,7 @@ impl State {
             mod_x: 256,
             mod_y: 256,
             mod_smooth: true,
+            hq_shaper: false,
             fm: [[0.0; OPERATORS]; OPERATORS],
             rm: [[0.0; OPERATORS]; OPERATORS],
             to_filter: [[0.0; OPERATORS]; FILTERS],
@@ -1297,11 +1385,15 @@ impl State {
                         .map_or(0, |w| i32::from_le_bytes([w[0], w[1], w[2], w[3]]))
                 };
                 filter.kind = word(0x2c).clamp(0, PHASER);
-                filter.shaper_on = word(0x28) != 0;
-                filter.set_wheel(8, header[8]);
-                let _shaper = MEnvelope::read(reader, Class::Map)?;
-                if version >= 12 {
-                    reader.u8()?;
+                for k in [7, 8] {
+                    filter.set_wheel(k, header[k]);
+                }
+                let curve = MEnvelope::read(reader, Class::Map)?;
+                // The byte after the curve makes it bipolar (`0x781b90`).
+                let bipolar = version >= 12 && reader.u8()? != 0;
+                // The switch is the block's byte +0x28 (`0x874040`).
+                if block.get(0x28).is_some_and(|b| *b != 0) {
+                    filter.shaper.bake(&curve, bipolar);
                 }
             }
             for index in 0..COUNTS[kind] {
@@ -1323,7 +1415,8 @@ impl State {
             reader.u8()?;
         }
         if version > 24 {
-            reader.u8()?;
+            // u8 0x5f18: the waveshapers read between their steps.
+            state.hq_shaper = reader.u8()? != 0;
         }
         state.route();
         Ok(state)
@@ -1573,6 +1666,9 @@ struct FilterRun {
     gains: [f32; 3],
     volume: f32,
     volume_step: f32,
+    /// The waveshaper's mix, and what the tick aims it at.
+    mix: f32,
+    mix_target: f32,
 }
 
 impl FilterRun {
@@ -1585,6 +1681,8 @@ impl FilterRun {
             gains: [0.0; 3],
             volume: 0.0,
             volume_step: 0.0,
+            mix: 0.0,
+            mix_target: 0.0,
         }
     }
 
@@ -1679,6 +1777,9 @@ struct Timing {
     scale: f32,
     /// What a fade loses a sample.
     fade_step: f32,
+    /// The most a waveshaper's mix moves a sample: `TAudioRenderer+0x38`,
+    /// `0.01 * 44100 / rate` (`0x62bcd0`).
+    shaper_cap: f32,
     /// What is left a tick of the way Mod X and Mod Y have to go: 1 % in
     /// 0.209 s (`0x8658b7`).
     mod_glide: f32,
@@ -2097,6 +2198,12 @@ impl Voice {
             } else {
                 run.volume_step = (volume - run.volume) / len;
             }
+            // The waveshaper's mix articulator times its wheel, kept to 0..1
+            // (`0x870820`).
+            run.mix_target = (value(part, 7) * filter.shaper.mix).clamp(0.0, 1.0);
+            if snap {
+                run.mix = run.mix_target;
+            }
         }
         for row in 0..ROWS {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
@@ -2250,6 +2357,23 @@ impl Voice {
                 run.volume += run.volume_step;
                 scratch[part * CHUNK + i] = run.run(x);
             }
+            // The waveshaper after the filter, mixed in by a glide of no
+            // more than `TAudioRenderer+0x38` a sample (`0x62bb20`).
+            let shaper = &state.filters[f].shaper;
+            if shaper.on() && len > 0 {
+                let (mut mix, step) = glide(&mut run.mix, run.mix_target, timing.shaper_cap, len);
+                if step != 0.0 || mix != 0.0 {
+                    for y in &mut scratch[part * CHUNK..part * CHUNK + len] {
+                        let shaped = shaper.shape(*y, state.hq_shaper);
+                        *y = if step == 0.0 && mix == 1.0 {
+                            shaped
+                        } else {
+                            *y * (1.0 - mix) + shaped * mix
+                        };
+                        mix += step;
+                    }
+                }
+            }
         }
         let mut fade = self.fade;
         for row in 0..ROWS {
@@ -2344,6 +2468,7 @@ impl Sytrus {
             rates: [seconds * 2.0, seconds * self.tempo / 60.0],
             scale: (44_100.0 / f64::from(self.rate)) as f32,
             fade_step: (1.0 / (FADE * f64::from(self.rate))) as f32,
+            shaper_cap: ((44_100.0 / f64::from(self.rate) * 0.001) as f32) * 10.0,
             mod_glide: 0.01f64.powf(seconds * 44_100.0 / (96.0 * 96.0)) as f32,
         }
     }
@@ -2522,8 +2647,6 @@ impl Generator for Sytrus {
         let active_filters = (0..FILTERS).filter(|f| state.active[OPERATORS + f]);
         if active_ops.clone().any(|op| state.operators[op].plucked) {
             Fidelity::Approximate("Sytrus plucked operator")
-        } else if active_filters.clone().any(|f| state.filters[f].shaper) {
-            Fidelity::Approximate("Sytrus waveshaper")
         } else if active_filters
             .clone()
             .any(|f| matches!(state.filters[f].kind, COMB | PHASER))
@@ -2847,8 +2970,7 @@ mod tests {
             resonance: 0.0,
             levels: [1.0, 0.0, 0.0],
             gain: 1.0,
-            shaper: false,
-            shaper_on: false,
+            shaper: Shaper::default(),
             to_next: 0.0,
             articulators: Vec::new(),
         };
@@ -3152,6 +3274,102 @@ mod tests {
         // Moving the pan wheel to 0 brings both to the centre.
         sytrus.set_param(12, 0.0);
         assert!(sytrus.voices.iter().all(|v| v.unison.pan == 0.5));
+    }
+
+    /// A waveshaper curve through these points.
+    fn curve(points: &[(f64, f64)]) -> MEnvelope {
+        MEnvelope {
+            points: points.iter().map(|(x, y)| Point::new(*x, *y)).collect(),
+            arp: vec![0; points.len()],
+            active: true,
+            ..idle(3, 0.0, [0; 4])
+        }
+    }
+
+    #[test]
+    fn the_waveshaper_reads_its_baked_curve_as_the_sse_kernels_do() {
+        let line = curve(&[(0.0, 0.0), (1.0, 1.0)]);
+        let mut shaper = Shaper {
+            pre_amp: 1.0,
+            mix: 1.0,
+            ..Shaper::default()
+        };
+        assert!(!shaper.on());
+        shaper.bake(&line, false);
+        assert_eq!(shaper.table.len(), SHAPER + 2);
+        assert_eq!(shaper.table[1], 0);
+        assert_eq!(shaper.table[SHAPER], 32_767);
+        // A straight line passes the input, a step under it without HQ:
+        // the step under 0.5 x 16383 is 8191, 8191 / 16383 of 32767.
+        let low = f32::from(((8191.0f64 / 16383.0) * 32_767.0).round() as i16) / 32_768.0;
+        assert_eq!(shaper.shape(0.5, false), low);
+        assert_eq!(shaper.shape(-0.5, false), -low);
+        // Read between the steps it is the line to within a step.
+        for x in [-0.9f32, -0.3, 0.1, 0.77] {
+            assert!((shaper.shape(x, true) - x).abs() < 1e-4, "{x}");
+        }
+        // Past the end it stays at the last step; the pre-amp at a half
+        // halves what reaches the curve.
+        assert_eq!(shaper.shape(2.0, false), 32_767.0 / 32_768.0);
+        shaper.pre_amp = 0.5;
+        assert!((shaper.shape(0.8, true) - 0.4).abs() < 1e-4);
+
+        // A bipolar line from -1 to 1 passes the input too, to the nearest
+        // step without HQ.
+        let mut bipolar = Shaper {
+            pre_amp: 1.0,
+            ..Shaper::default()
+        };
+        bipolar.bake(&line, true);
+        assert_eq!(bipolar.table.len(), 2 * SHAPER + 2);
+        for x in [-1.0f32, -0.4, 0.0, 0.6, 1.0] {
+            assert!((bipolar.shape(x, false) - x).abs() < 1e-4, "{x}");
+            assert!((bipolar.shape(x, true) - x).abs() < 1e-4, "{x}");
+        }
+        // A flat bipolar curve at the top is full scale, whatever comes
+        // in: 0.5 over the centre, times 65535, kept to 32767.
+        let mut flat = Shaper {
+            pre_amp: 1.0,
+            ..Shaper::default()
+        };
+        flat.bake(&curve(&[(0.0, 1.0), (1.0, 1.0)]), true);
+        assert_eq!(flat.shape(-0.3, false), 32_767.0 / 32_768.0);
+    }
+
+    #[test]
+    fn a_filter_s_waveshaper_mixes_in_by_its_wheel() {
+        // Operator 1 through filter 1, an SVF wide open, then a waveshaper
+        // that squares the wave off: a flat bipolar curve at the top for
+        // inputs above its centre and at the bottom below.
+        let play_with = |mix: i32| {
+            let mut sytrus = blank();
+            let state = &mut sytrus.state;
+            state.out = [0.0; ROWS];
+            state.out[OPERATORS] = 1.0;
+            state.to_filter[0][0] = 1.0;
+            state.filters[0].cutoff = 1.0;
+            let step = curve(&[(0.0, 0.0), (0.4999, 0.0), (0.0002, 1.0), (0.4999, 1.0)]);
+            state.filters[0].shaper.bake(&step, true);
+            state.filters[0].set_wheel(7, 128);
+            state.filters[0].set_wheel(8, mix);
+            state.route();
+            play(&mut sytrus, 60, 16_384)
+        };
+        let dry = play_with(0);
+        let wet = play_with(128);
+        let turns = f64::from(C5 as f32) / f64::from(RATE);
+        // Dry the SVF passes the sine; wet the square has a third harmonic
+        // a third of its first.
+        assert!(partial(&dry[8192..], turns * 3.0) < 0.01);
+        let (first, third) = (
+            partial(&wet[8192..], turns),
+            partial(&wet[8192..], turns * 3.0),
+        );
+        assert!((third / first - 1.0 / 3.0).abs() < 0.05, "{first} {third}");
+        // Half way, half of each.
+        let half = play_with(64);
+        let mid = partial(&half[8192..], turns * 3.0);
+        assert!((mid / third - 0.5).abs() < 0.05, "{mid} {third}");
     }
 
     #[test]
