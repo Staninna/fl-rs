@@ -351,25 +351,65 @@ emulator (unicorn, outside the repo).
 
 ### Linear phase (`FUN_006eddc0`, engine ops 0, 2, 3, 4, 5, 6, 0xd, 0xe)
 
+Read from the disassembly (`0x006eded1..0x006ee3ae`). `FUN_006eddc0` runs at
+the top of every `Eff_Render`; with `0x370` set it reports `3N/4` and, when
+`0x378` (dirty) is set and engine op 0xe says the last crossfade is over,
+sends a new curve:
+
 ```
-N = 512 << step;  if SR >= 44100: N <<= floor(log2(SR / 22050) + eps), max 65536;  else N /= 2     // FUN_006edd00
-for k in 0 .. N/2:  f = max(0.1, k * SR / N) Hz (snapped to a nearby resonant band centre when that band is narrow, flag section+0x1371)
-    |H|^2 = product over active bands and sections of |B(e^jw)|^2 / |A(e^jw)|^2 using the b/a doubles
-    kernel[k] = 10 ^ (clamp(10 log10 |H|^2, -1000, 1000) / 20)          // via a 2^x polynomial, 0x006ee5a0..b8
+N = FUN_006edd00(0x36c, SR): 512 << step; SR < 44100: N / 2;
+    else N << trunc(ln(SR / 44100) / ln 2 + 0.5), at most 65536        // DAT_007615f8 = 1 / ln 2, set at startup
+bin = float(SR) / float(N)                       // f32
+prev = 0
+for k in 0 ..= N/2:
+    f = max(0.1f, float(k) * bin)                 // f32
+    if f > host+0x30 (float(0.4999 SR)): level = 0
+    else:
+        for b in 0..7: if flag[b] and prev < centre[b] <= f: f = centre[b]; break
+        prev = f
+        w = float(double(f) * (host+0x18 (1/SR) * 2 pi))
+        SinCos(w) -> s1, c1;  SinCos(float(w * 2)) -> s2, c2          // FUN_005d1b90, doubles
+        P = 1.0f
+        for b in 0..7 with enabled[b] (0x2114) and section 0's kind code > 0:
+            g = 1.0f
+            for each of the band's sections (b0, b1, b2, a1, a2 doubles at +0x50):
+                num = (b0 c2 + b1 c1 + b2)^2 + (b1 s1 + b0 s2)^2
+                den = (c2 + a1 c1 + a2)^2 + (a1 s1 + s2)^2
+                g = float(double(g) * num / den)
+            P = P * g                                                    // f32
+        level = float(Ln(P) * log10 e * (10/18)), held to [-1000, 1000]   // FUN_005d1a90 = Ln * 0.4342944819032518
+    x = level * 18 (the dB of P)
+    kernel[k] = 0 if x < -100;  Power(2, x / 6) if x > 100;
+                else 2^(x/6) by 2^trunc as float bits times
+                ((t 0.079064658211 + 0.224328091473) t + 0.69659850257) t + 0.999862219597   (t the fraction, doubles),
+                one over it for a negative x, 1 for 0
 kernel[N/2] = kernel[N/2 - 1]
-engine: op 5 = SR, op 6 = window[0x374], op 2 = N, op 3 = kernel          // under the host lock
+under the host lock: op 5 (SR), op 6 (window[0x374]), op 2 (N), op 3 (kernel)
 ```
 
-The engine (`FUN_1801c8a70`, op 4 per frame) runs two FFT convolvers and
-crossfades between them linearly over `SR * window` frames when a new
-kernel arrives, the new one primed with the last N frames. Each convolver
-(`FUN_1801e2c90`) takes the zero-phase impulse of the magnitudes, keeps the
-N/2 taps from N/4 under a half sine window (`sinf(i pi / (N/2 - 1))`), and
-convolves by IPP complex FFTs made with `IPP_FFT_NODIV_BY_ANY` (neither
-direction scales) in blocks of N/2. `.scratch/notes/fruity-parametric-eq-2.md`
-has the addresses and what is left to read for a rebuild. So linear phase is "the minimum-phase IIR design, made zero-phase": the
-magnitude is identical to the IIR path, the latency is 3N/4 samples (1536 at
-44.1 kHz with the default step 2).
+- The `1/6` is a global at `0x0073a2e4` (through the pointer at
+  `0x007500a0`) that nothing writes: the curve is `2^(dB/6)`, FL's six dB to
+  a doubling, so a band's gain in the curve is `|H|^1.0034` of the filter's.
+- The bands' coefficients are the ones the bands run with, so a curve
+  follows the cookbook or the matched design in use, and with HQ at twice
+  the rate the filters designed for `2 SR` are read at `f / SR`.
+- `flag[b]` is `+0x225` of the band's window copy (`0x1371 + b * 0x228`), set
+  by `ProcessParam` (`0x006efbc8`): the width parameter under `0x2000` and the
+  type in the bit set `0x54` of `0x006efd86`, band pass, notch or peak.
+  `centre[b]` is section 0's `freq` (`+0x10` of the band). A narrow band's
+  centre so lands on a bin, and its dip or top is in the curve.
+- `0x378` is set by every `ProcessParam` (`0x006ef8fa`, the main level
+  too), by the state loader (`0x006ecaca`), and by the rate and the linear
+  phase menus.
+
+`Eff_Render` with `0x370` set and the smoother idle (linear phase turns it
+off) applies the main gain and then runs op 4 a frame at a time: no band
+runs, no tail counts down, and the plugin never sleeps (the tail is reset
+every block). The engine context is `crates/plugins/src/linear_phase.rs`
+(`docs/plugins/maximus.md` section 5.8): two FFT convolvers of the
+zero-phase impulse, its `N/2` taps from `N/4` under a half sine window,
+`3N/4` late, crossfaded linearly over `SR * window` frames when a new curve
+arrives, the new one primed with the last `N` frames.
 
 ### Parameter smoothing (`TParameterSmoother`, `FUN_006f21a0`)
 
@@ -389,10 +429,6 @@ first.
 
 ## 4. What stays unknown
 
-- The IPP calls of the linear phase convolver (`FUN_1801e1960`,
-  `FUN_1801e2ad0`), the 2^x polynomial and clamps of the kernel builder,
-  and what sets the band flag at `+0x1371` that snaps a bin to a band's
-  centre.
 - `0x364`, `0x2078`, `0x20e8..0x20ea`, `0x212c`, `0x20ec`: saved GUI state,
   values constant in the corpus.
 - What distinguishes state version 7 from 8 (same bytes).
@@ -408,4 +444,5 @@ first.
 - A band counts its 0 dB tail down once a block, after the whole block, as FL does. Going to sleep empties only the bands still counting down and the built-in polyphase, and the main level jumps to its target on waking.
 - The matched designer is `matched` in `crates/plugins/src/parametric_eq_2_engine.rs`, in the DLL's order of operations. Its tests hold a table of 32 calls to the DLL's `dispatch` (every branch of every kind), run under an emulator.
 - `Delphi`'s `sinh` (`FUN_0045d8d0`), used for the octave Q, is taken as Rust's `sinh`; they may be an ulp apart.
-- Approximated in the corpus: linear phase (8 states, run minimum phase). 1,130 slots are exact.
+- Linear phase is `build_kernel` and `convolve`, sending the curve to the shared engine context in `crates/plugins/src/linear_phase.rs`. The FFT size and the window table are shared with Maximus there. Rust's `ln` and `sin_cos` stand in for Delphi's `Ln` and `SinCos`, and the radix-2 FFT for IPP's, so the low bits may differ.
+- Every corpus state, the 8 with linear phase too, runs as FL's. Parameter smoothing (version 7 on) is left out; every corpus state has it off.

@@ -17,6 +17,25 @@
 
 use std::f64::consts::TAU;
 
+/// The crossfade's seconds a plugin sends by op 6, by the menu entry its
+/// state picks: Maximus's speed (`0x330`) and Parametric EQ 2's window
+/// (`0x374`, the table at `0x0074e708`) are the same four.
+pub(crate) const WINDOWS: [f32; 4] = [0.1, 0.25, 0.01, 0.02];
+
+/// The FFT size a plugin sends by op 2 (Maximus's `FUN_00847730`,
+/// Parametric EQ 2's `FUN_006edd00`, the same code): `512 << step`,
+/// halved under 44.1 kHz, else doubled for each octave of rate over it
+/// rounded half up, at most 65536.
+pub(crate) fn fft_size(step: i32, rate: i32) -> usize {
+    let size = 0x200i32.wrapping_shl(step as u32 & 0x1f);
+    if rate < 44_100 {
+        return (size / 2).max(0) as usize;
+    }
+    let octaves = (f64::from(rate) * 2.267_573_696_145_124_8e-5).ln() * (1.0 / 2f64.ln()) + 0.5;
+    let n = i64::from(size.wrapping_shl(octaves as i64 as u32 & 0x1f));
+    n.clamp(0, 0x1_0000) as usize
+}
+
 /// A complex number in floats.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct C32 {
