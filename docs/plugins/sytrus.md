@@ -465,8 +465,7 @@ the kernel above over a 16384-sample table (section 10), band limited and filter
 and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
 law and the output levels; the send path goes through the effects
-(section 9). Left out, each named in `fidelity`: plucked
-operators, the comb and the phaser,
+(section 9). Left out, each named in `fidelity`: the comb and the phaser,
 the arpeggiator and portamento. Every state reports `Approximate`. The 597
 REC parameters are the host's (section 6).
 
@@ -833,6 +832,47 @@ Implemented as read (`sytrus/band.rs`) with an f64 FFT where FL's is
 f32. FL keeps every copy it ever made; here each band-limited operator
 has room for 32, made on the audio thread without allocating, and a note
 that finds all 32 in use reads the one with the nearest low limit.
+
+## 12. The plucked operator (`0x86a810`, `0x86aba0`, the kernel's pluck branch)
+
+`PluckModeBtn` is the operator's switch 6 (`part+0x866`). When the voice
+starts (`0x86af20`), `0x86a810` draws the string into memory of its own
+(`GetMem`, the operator state's +0x130..+0x140), with `f` the operator's
+frequency in cycles a sample before its pitch articulator (+0x40):
+
+```
+len    = max(2, round(88200 / (f x SR)))                   // 0x86ab6c: the string is drawn at 88.2 kHz
+noise  = part+0x48 (the noise wheel): n = level(v / 128) (1 at 128); then dry 1 - n, wet 1.5 n (0x86ab80)
+phase  = round(+0x38 x 2^32)  (the start phase in cycles: the phase wheel, the unison's and the phase articulator)
+step   = round(2^32 / len)
+noise != 0: buffer = ippsRandUniform_Direct_32f(-1, 1, seed = phase)
+buffer[i] = t[p >> 18 & 0x3fff] + (t[(p + 2^18) >> 18] - t[.]) x (p & 0x3ffff) 2^-18 ( x dry + buffer[i] x wet ), p += step
+buffer -= its mean;  held (+0x148) = buffer[len - 1];  owed (+0x164) = 1
+```
+
+`t` is the operator's 16384-sample table after the filter wheel (shape
+`+0x868`). `0x86aba0` runs then and whenever the damping articulator
+(operator articulator 5, kept to 0..1, +0x370) or the pitch (+0x368) moves:
+
+```
+take (+0x14c) = d x 0.99 + 0.01; keep (+0x150) = 1 - take                    // 0x86acc0, 0x86acc4
+keep changed: (s, c) = sincos(1 / len); period (+0x12c) = len x (keep s / (1 - keep c) + 1)
+step = period x max(f x pitch art, 0): whole (+0x15c) and fraction (+0x160) of trunc(step x 2^32)   // 0x62de80
+```
+
+The kernel's pluck branch (`0x877270`), a sample: `frac += fraction`;
+`n = owed + whole + carry`; n times: `previous = current; current =
+buffer[at]; buffer[at] = held = current x take + held x keep; at++`
+(wrapping); then `out = previous + (current - previous) x (int)frac x
+2^-32` (the SSE kernel takes the fraction as signed; the x87 one,
+`0x870580`, as unsigned). The rest is the kernel's: the RM gain, the
+volume, the FM and RM sends; a plucked operator takes no FM and no
+per-sample noise.
+
+Implemented as read (`sytrus/pluck.rs`), the noise burst from Sytrus's
+own generator (`0x8088405 x + 1`) rather than IPP's, each plucked
+operator with room for 64 strings of up to 16384 samples (5.4 Hz) made
+with the state; a note that finds none free plays the operator silent.
 
 ## Corrections
 
