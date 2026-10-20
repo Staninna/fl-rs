@@ -70,6 +70,8 @@ pub mod fast_lp;
 pub mod filter;
 pub mod fl_fx;
 pub mod fl_keys;
+pub mod fl_slayer;
+mod fl_slayer_engine;
 pub mod flanger;
 pub mod flangus;
 pub mod fpc;

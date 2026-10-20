@@ -232,6 +232,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fl_keys::NAME, || {
         Box::new(crate::fl_keys::FlKeys::default())
     }),
+    (crate::fl_slayer::NAME, || {
+        Box::new(crate::fl_slayer::FlSlayer::default())
+    }),
     (crate::fpc::NAME, || Box::new(crate::fpc::Fpc::default())),
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
