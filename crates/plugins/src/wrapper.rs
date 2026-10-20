@@ -515,9 +515,9 @@ mod tests {
         let mut wrapper = Wrapper::default();
         let mut refused = |bytes: &[u8]| wrapper.set_state(bytes).unwrap_err();
         assert_eq!(refused(&wrapping("Sylenth1", &[0.5])), StateError::Unhosted);
-        // One of FL's own the loader swaps, but not built here.
-        let phaser = wrapping("Fruity Phaser", &[0.5]);
-        assert_eq!(refused(&phaser), StateError::Unhosted);
+        // One of FL's own the loader converts another way, not built here.
+        let eq = wrapping("Fruity 7 Band EQ", &[0.5]);
+        assert_eq!(refused(&eq), StateError::Unhosted);
         // Only under kind 0.
         let chunk = chunk(&[0.5]);
         let other = state(&[
@@ -562,6 +562,6 @@ mod tests {
                 assert_eq!(refused, Err(StateError::Unhosted), "{file}");
             }
         }
-        assert_eq!(hosted, 27);
+        assert_eq!(hosted, 36);
     }
 }
