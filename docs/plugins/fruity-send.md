@@ -88,7 +88,8 @@ the other, as FL's insert panning does.
 if target (0x12c) > 0:
     if 0x15c: rework the matrix
     for each of the four gains: FUN_005e0180(&delta, &now, &start, aim, maxstep, len)
-        // delta = (aim - now) / len, clamped to maxstep (renderer+0x34); now = aim
+        // delta = (aim - now) / len, clamped to maxstep; now = where it ends
+        // maxstep = TAudioRenderer+0x34 = 0.001 * 44100 / rate (equo.md)
     host.GetOutBuffer(Sender, target, &buf) (host vtable +0x128, flag 0)
     if buf: add Source * the ramped matrix into buf (function pointer 0x0071c4f8)
     host.GetOutBuffer(Sender, target, &buf) (flag 1)       // hand it back
@@ -105,9 +106,11 @@ dispatcher 50 with index 1, in `FUN_006bd450`). The engine's
 
 Dispatcher ID 2 (flush) copies the aimed matrix over the current one.
 
+The ramp is `FUN_005e0180`, the same as Balance's and Convolver's: the
+port uses `parts::glide` with the renderer's cap.
+
 ## Not read
 
-- The per-sample step clamp `maxstep` is the renderer's field `+0x34`,
-  which was not traced; the port ramps the whole way over one block.
 - The mixing routine behind `0x0071c4f8` is filled at startup and was not
-  read; the port applies `now + n delta` from the first frame (`inferred`).
+  read; the port applies `now + n delta` from the first frame, as Balance's
+  matrix routine does (`inferred`).
