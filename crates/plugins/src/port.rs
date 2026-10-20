@@ -70,6 +70,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::transient_processor::NAME, Port::Exact),
     (crate::vocodex::NAME, Port::Gaps),
     (crate::waveshaper::NAME, Port::Gaps),
+    (crate::wrapper::NAME, Port::Gaps),
 ];
 
 /// The port of a plugin by its event 201 name, in any case.

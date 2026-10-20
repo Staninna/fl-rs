@@ -98,6 +98,7 @@ pub mod three_osc;
 pub mod transient_processor;
 pub mod vocodex;
 pub mod waveshaper;
+pub mod wrapper;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
@@ -287,6 +288,9 @@ pub enum StateError {
     /// The state starts with a version newer than the plugin reads. FL
     /// leaves such a state alone too.
     Version { found: i32 },
+    /// The state holds another plugin, one this crate does not host, as a
+    /// Fruity Wrapper's can.
+    Unhosted,
 }
 
 impl fmt::Display for StateError {
@@ -301,6 +305,7 @@ impl fmt::Display for StateError {
             StateError::Version { found } => {
                 write!(f, "the state is of version {found}, which is too new")
             }
+            StateError::Unhosted => write!(f, "the state holds a plugin that is not hosted"),
         }
     }
 }
@@ -387,6 +392,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(vocodex::Vocodex::default()))
     } else if is(waveshaper::NAME) {
         Some(Box::new(waveshaper::WaveShaper::default()))
+    } else if is(wrapper::NAME) {
+        Some(Box::new(wrapper::Wrapper::default()))
     } else {
         None
     }
@@ -630,8 +637,12 @@ mod tests {
             let Some(mut effect) = by_name(&saved.plugin) else {
                 continue;
             };
-            if let Err(error) = effect.set_state(&saved.state) {
-                panic!("{} in {}: {error}", saved.plugin, saved.file);
+            match effect.set_state(&saved.state) {
+                // A wrapper of an effect not built yet, which
+                // `wrapper::tests` counts.
+                Err(StateError::Unhosted) if saved.plugin == wrapper::NAME => continue,
+                Err(error) => panic!("{} in {}: {error}", saved.plugin, saved.file),
+                Ok(()) => {}
             }
             let plugin = saved.plugin.to_ascii_lowercase();
             *loaded.entry((plugin, saved.state.len())).or_insert(0) += 1;
@@ -707,6 +718,8 @@ mod tests {
             "maximus",
             "soundgoodizer",
             "vocodex",
+            // Counted in `wrapper::tests`.
+            "fruity wrapper",
         ];
         let lengths = loaded
             .keys()
