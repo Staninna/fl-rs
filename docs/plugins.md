@@ -61,7 +61,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Vintage Chorus | 3849 | yes | 5 | implemented in crates/plugins (the engine_x64.dll chorus exact; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-chorus.md |
 | Generator | Fruity Slicer | 4483 | yes | 5 | |
 | Generator | GMS | 1516 | yes | 5 | |
-| Effect | Edison | 6077 |  | 4 | |
+| Effect | Edison | 6077 |  | 4 | implemented in crates/plugins (the sound passes untouched, exact, for a state that does not mute the input and holds no audio: 5 of 6 corpus states; a muted input and the playback of a held sample left out, passed through: the second Edison of Asher Postman - Future House, which holds a sample MIDI notes can start), docs/plugins/edison.md |
 | Effect | Frequency Shifter | 3786 | yes | 4 | implemented in crates/plugins (the Engine_x64.dll shifters, HQ crossovers, Hilbert pair, ring modulator and tempo sync read in full and summed in its order; the CRT's sinf, sin, tanhf, powf and pow are Rust's; glides from the engine's defaults land when a state loads; tempo sync counts four steps a beat and the song's frames from the host's ticks), docs/plugins/frequency-shifter.md |
 | Effect | Fruity Filter | 3692 | yes | 4 | implemented in crates/plugins, docs/plugins/fruity-filter.md |
 | Effect | Fruity Flanger | 3629 | yes | 4 | implemented in crates/plugins (exact; a new sample rate empties the lines where FL keeps them), docs/plugins/fruity-flanger.md |

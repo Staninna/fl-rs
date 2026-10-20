@@ -40,6 +40,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::directwave::NAME, Port::Gaps),
     (crate::drumpad::NAME, Port::Gaps),
     (crate::dx10::NAME, Port::Gaps),
+    (crate::edison::NAME, Port::Gaps),
     (crate::effector::NAME, Port::Gaps),
     (crate::equo::NAME, Port::Gaps),
     (crate::fast_dist::NAME, Port::Exact),
