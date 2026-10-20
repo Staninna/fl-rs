@@ -527,7 +527,10 @@ The voice side (`0x872290`, read for this):
 - The main pitch: when `FinalLevels.Pitch + 0x6318` changes, every
   operator's increment is worked out again (`0x872210`), so a note that
   sounds is retuned. The main volume is taken every block (voice+0x48 =
-  `FinalLevels.Vol x 0x6310`).
+  `FinalLevels.Vol x 0x6310`). The same check retunes a note whose
+  `FinalLevels.Pitch` the host moves (a slide note, a clip on the
+  channel's pitch), which `sytrus.rs` takes from
+  `Generator::set_note_pitch` at the voice's next tick.
 
 Implemented: every index reads back and stores inside its range; the main
 volume, the LFO level, the main pitch, the quick ADSR (on the envelopes it

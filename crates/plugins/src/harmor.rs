@@ -2551,6 +2551,22 @@ impl Generator for Harmor {
         self.release(None);
     }
 
+    /// The voices read the note's pitch on their next tick. A legato voice
+    /// that holds the note under the one it plays takes the new pitch with
+    /// it for when it goes back.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for v in self.voices.iter_mut().filter(|v| v.active) {
+            if v.id == voice {
+                v.key_pitch = pitch;
+            }
+            for held in &mut v.stack[..v.stacked] {
+                if held.0 == voice {
+                    held.1 = pitch;
+                }
+            }
+        }
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let total = left.len().min(right.len());
         let mut done = 0;
@@ -2758,6 +2774,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -2770,6 +2787,10 @@ mod tests {
         (l, r)
     }
 
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        crate::testing::follows_note_pitch(|| Box::new(Harmor::default()), 44_100.0);
+    }
     #[test]
     fn the_default_is_a_saw_at_c4() {
         let mut plugin = Harmor::default();

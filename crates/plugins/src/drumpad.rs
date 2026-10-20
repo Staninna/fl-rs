@@ -414,6 +414,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }

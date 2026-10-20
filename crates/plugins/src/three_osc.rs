@@ -91,8 +91,10 @@
 //! - FL steps the envelopes on the song's ticks. Here the ticks run from
 //!   when the plugin was made or last reset. They are as long as the
 //!   song's, by [`Generator::set_ppq`], and 96 to a beat until it is told.
-//! - A slide note sounds like any other, and a note past [`VOICES`] takes
-//!   the place of the oldest.
+//! - A note past [`VOICES`] takes the place of the oldest. A slide note
+//!   sounds like any other: FL's host sends none, and moves the pitch of
+//!   what sounds instead, which a voice takes on its next tick
+//!   ([`Generator::set_note_pitch`]), as FL's reads `FinalLevels.Pitch`.
 //! - FL's box filter for its offline render mode is not built.
 //! - FL draws its random numbers from a seed it shares with everything
 //!   else. Here each plugin starts from 0.
@@ -1541,6 +1543,14 @@ impl Generator for ThreeOsc {
         }
     }
 
+    /// The voice reads the note's pitch as its tick starts, where the
+    /// oscillators' steps are worked out again.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for sounding in self.voices.iter_mut().filter(|v| v.id == voice) {
+            sounding.pitch = pitch;
+        }
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         let mut at = 0;
@@ -1661,6 +1671,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -1756,6 +1767,10 @@ mod tests {
         20.0 * ratio.log10()
     }
 
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        crate::testing::follows_note_pitch(|| Box::new(ThreeOsc::default()), 44_100.0);
+    }
     #[test]
     fn key_60_is_523_25_hz_and_a_new_plugin_is_three_sines_an_octave_apart() {
         // 0 cents is 523.25 Hz of a 32-bit phase.
