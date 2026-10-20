@@ -349,6 +349,20 @@ impl Run {
     pub(crate) fn over(&self) -> bool {
         self.stage >= OVER
     }
+
+    /// Put the run at its last stage where it is, as Sytrus does to the
+    /// voices it cuts (`0x86d770`).
+    pub(crate) fn end(&mut self) {
+        self.stage = OVER;
+        self.held = OVER;
+    }
+}
+
+impl LfoRun {
+    /// Put the LFO's level at its last stage where it is (`0x86d770`).
+    pub(crate) fn end(&mut self) {
+        self.level.end();
+    }
 }
 
 impl Track {
