@@ -106,7 +106,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Vintage Phaser | 3880 |  | 1 | |
 | Generator | BeepMap | 4186 | yes | 1 | |
 | Generator | Drumaxx | 4319 | yes | 1 | |
-| Generator | Fruity DrumSynth Live | 1062 |  | 1 | |
+| Generator | Fruity DrumSynth Live | 1062 | yes | 1 | implemented in crates/plugins (state versions 2..4, the 120 patches by key, morph, voice modes, both oscillators, waves read from the engine DLL's resource, harmonics, re-trigger, tone filter, release and the noise generator with its seed exact; approximated: the gain ramp of a cut voice, FL's channel volume counted once where FL counts it twice, FL's block order of the one noise generator, sends to a mixer track not built (none in the corpus), 256 voices at most), docs/plugins/fruity-drumsynth-live.md |
 | Generator | Fruity Keyboard Controller | 3923 |  | 1 | |
 | Generator | Fruity Voltage Controller | 3992 | yes | 1 | |
 | Generator | PoiZone | 3867 | yes | 1 | |
