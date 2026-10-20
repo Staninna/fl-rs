@@ -27,7 +27,7 @@ reached when a plugin's second output points at it).
 
 Both projects that use Fruity Send (I'll Be Your Madonna, the render test)
 have a target of -1 or 0, so in FL's own files it only scales by the dry
-level (197 -> 0.497 in Madonna, 256 -> 1 in the render test).
+level (197 -> 0.533 in Madonna, 256 -> 1 in the render test).
 
 Left open: the mixing routine behind the function pointer at 0x0071c4f8 was
 not read; the port takes it to be Balance's ramped matrix.
