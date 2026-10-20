@@ -80,6 +80,7 @@ pub mod html_notebook;
 pub mod hyper_chorus;
 pub mod limiter;
 pub mod love_philter;
+pub mod low_lifter;
 pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
@@ -413,6 +414,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(limiter::Limiter::default()))
     } else if is(love_philter::NAME) {
         Some(Box::new(love_philter::LovePhilter::default()))
+    } else if is(low_lifter::NAME) {
+        Some(Box::new(low_lifter::LowLifter::default()))
     } else if is(luxeverb::NAME) {
         Some(Box::new(luxeverb::Luxeverb::default()))
     } else if is(maximus::NAME) {
@@ -763,6 +766,7 @@ mod tests {
             ("fruity stereo shaper", 36, 77),
             ("frequency splitter", 113, 17),
             ("hyper chorus", 52, 20),
+            ("low lifter", 82, 4),
             ("luxeverb", 165, 13),
             ("luxeverb", 169, 11),
             ("pitcher", 160, 61),
@@ -815,7 +819,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 48);
+        assert_eq!(lengths.count(), 49);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
