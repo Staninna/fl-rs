@@ -55,6 +55,7 @@ pub mod delay_bank;
 pub mod directwave;
 pub mod drumpad;
 mod drumpad_voice;
+pub mod drumsynth_live;
 pub mod dx10;
 pub mod effector;
 pub mod equo;

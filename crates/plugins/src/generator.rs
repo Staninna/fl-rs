@@ -170,6 +170,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::drumpad::NAME, || {
         Box::new(crate::drumpad::Drumpad::default())
     }),
+    (crate::drumsynth_live::NAME, || {
+        Box::new(crate::drumsynth_live::DrumSynthLive::default())
+    }),
     (crate::dx10::NAME, || Box::new(crate::dx10::Dx10::default())),
     (crate::fl_keys::NAME, || {
         Box::new(crate::fl_keys::FlKeys::default())
