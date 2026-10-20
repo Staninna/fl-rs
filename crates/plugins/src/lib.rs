@@ -127,6 +127,7 @@ pub mod wave_candy;
 pub mod waveshaper;
 pub mod wrapper;
 pub mod xy_controller;
+pub mod zgameeditor;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
@@ -468,6 +469,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
     } else if is(xy_controller::NAME) {
         let left_out = xy_controller::LEFT_OUT;
         Some(Box::new(pass_through::PassThrough::controller(left_out)))
+    } else if is(zgameeditor::NAME) {
+        Some(Box::new(zgameeditor::ZGameEditor))
     } else if is(wrapper::NAME) {
         Some(Box::new(wrapper::Wrapper::default()))
     } else {
@@ -816,6 +819,8 @@ mod tests {
             "vocodex",
             // Counted in `wrapper::tests`.
             "fruity wrapper",
+            // Counted in `zgameeditor::tests`.
+            "zgameeditor visualizer",
         ];
         // Any state does for an effect that leaves the sound alone.
         let controllers = [control_surface::NAME, xy_controller::NAME];
