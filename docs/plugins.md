@@ -132,7 +132,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | VFX Script | 4390 |  | 0 | |
 | Effect | VFX Sequencer | 4074 |  | 0 | |
 | Generator | Dashboard | 4918 |  | 0 | |
-| Generator | FL Slayer | 5608 |  | 0 | |
+| Generator | FL Slayer | 5608 |  | 0 | implemented in crates/plugins (the bridged Slayer_Engine.dll whole: strings, excitation samples read from that DLL at runtime, Aid modes, glide, envelopes, all 15 effects, amp, cabinet and speaker; left out: pitch bend, mod wheel and glissando, MIDI volume, expression and sustain, note pan; inferred from the shell's form, not its code: state word 0 and the selector scaling), docs/plugins/fl-slayer.md |
 | Generator | FL Studio Mobile | 11857 |  | 0 | |
 | Generator | FL Studio Mobile Rack | 8039 |  | 0 | |
 | Generator | Fruity Dance | 4065 |  | 0 | |
