@@ -67,7 +67,7 @@ Corpus render at `3d38082`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Flanger | 3629 | yes | 4 | implemented in crates/plugins (exact; a new sample rate empties the lines where FL keeps them), docs/plugins/fruity-flanger.md |
 | Generator | Morphine | 1704 |  | 4 | |
 | Effect | Distructor | 3571 |  | 3 | |
-| Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
+| Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers and linear phase by the engine convolver exact; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | implemented in crates/plugins, docs/plugins/fruity-parametric-eq.md |
 | Effect | Fruity Phaser | 3622 | yes | 3 | implemented in crates/plugins (exact), docs/plugins/fruity-phaser.md |
 | Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, `FPF_NoProcess`; state, the ten parameters, speed and acceleration at the song's PPQ, the point's motion each tick, tension, min and max and the two outputs exact, with Rust's `ln`, `exp`, `atan` and `sin_cos` for Delphi's; a loaded pad starts at its levels, inferred from FL ticking while stopped; the joystick input left out, none in the corpus), docs/plugins/fruity-x-y-controller.md |
