@@ -22,9 +22,11 @@
 //! `docs/rec-channel.md` maps a channel's controls. Its pitch moves the
 //! speed of the voices that are sounding on a sampler or audio clip
 //! channel, from where each is in its sample. A generator's note takes the
-//! pitch the channel has as it starts and keeps it: FL hands a plugin's
-//! voices the channel's pitch again on every tick, and a
-//! [`plugins::Generator`] has no way to hear it. The others the engine
+//! pitch the channel has as it starts, and as FL hands a plugin's voices
+//! the channel's pitch again on every tick, the engine reads the clip on
+//! the pitch of a plugin channel on every tick and tells the generator of
+//! each note it moves ([`plugins::Generator::set_note_pitch`],
+//! [`Automation::pitch_shift`]). The others the engine
 //! leaves out, mod X and Y, the arpeggiator, the time stretch, the
 //! envelopes and a clip's own LFO, have no part in it to drive.
 //!
@@ -1108,6 +1110,11 @@ impl Automation {
         })
     }
 
+    /// Whether a clip drives the pitch knob of this channel.
+    pub fn drives_pitch(&self, channel: u16) -> bool {
+        self.pitch_lane(channel).is_some()
+    }
+
     /// The lane of the pitch knob of this channel, when a clip drives it.
     fn pitch_lane(&self, channel: u16) -> Option<&Lane> {
         let pitch = Control::Channel {
@@ -1120,7 +1127,7 @@ impl Automation {
     /// How far, in cents, a clip has moved the pitch knob of this channel
     /// from what the project has it at, at `tick`. 0 for a channel whose
     /// pitch no clip drives. A note that a generator plays starts at this
-    /// pitch and keeps it.
+    /// pitch, and moves with it on every tick.
     pub fn pitch_shift(&self, channel: u16, tick: f64) -> f32 {
         let lane = self.pitch_lane(channel);
         let levels = self.levels.iter().find(|l| l.channel == channel);

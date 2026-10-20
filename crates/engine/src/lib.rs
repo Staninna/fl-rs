@@ -22,7 +22,9 @@
 //!    channel plays when the [`plugins`] crate has its generator: every
 //!    note of the channel is a note on and a note off for the generator,
 //!    which keeps its own voices, and the channel's volume and pan go on
-//!    what it puts out.
+//!    what it puts out. A slide note starts no voice: it bends the notes
+//!    of its channel and its colour that sound to its key, a tick at a
+//!    time, on a sampler channel and on a plugin channel alike.
 //! 4. Mix. A channel's voices sum into the channel's insert. Each insert
 //!    runs its bus through the plugins in its effect slots and its
 //!    three-band EQ, applies its volume, pan, stereo separation, polarity
@@ -117,6 +119,7 @@ mod mix;
 mod pool;
 mod sample;
 mod sequence;
+mod slide;
 mod transport;
 mod voice;
 
