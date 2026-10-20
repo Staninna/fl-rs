@@ -244,6 +244,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::minisynth::NAME, || {
         Box::new(crate::minisynth::MiniSynth::default())
     }),
+    (crate::morphine::NAME, || {
+        Box::new(crate::morphine::Morphine::default())
+    }),
     (crate::ogun::NAME, || Box::new(crate::ogun::Ogun::default())),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
