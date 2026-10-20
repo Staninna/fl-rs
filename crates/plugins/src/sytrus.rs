@@ -34,6 +34,7 @@ use crate::menvelope::{Class, Lfo, LfoRun, MEnvelope, Reader, Run, Track};
 use crate::parts::glide;
 
 mod band;
+mod filter;
 mod fx;
 mod pluck;
 
@@ -43,6 +44,8 @@ mod pluck;
 struct Pools {
     copies: Vec<band::Copies>,
     strings: Vec<pluck::Strings>,
+    /// The state variable filter's coefficients at the rate.
+    tables: filter::Tables,
 }
 
 impl Default for Pools {
@@ -50,14 +53,14 @@ impl Default for Pools {
         Pools {
             copies: vec![band::Copies::default(); OPERATORS],
             strings: vec![pluck::Strings::default(); OPERATORS],
+            tables: filter::Tables::new(44_100.0),
         }
     }
 }
 use crate::three_osc::pan_law;
 use crate::{Fidelity, Generator, NoteOn, StateError, knob_gain};
-use dsp::biquad::{Biquad64, Coefficients64};
 use dsp::curve::{Curve, Point};
-use std::f64::consts::{FRAC_PI_2, LN_2, PI, TAU};
+use std::f64::consts::{LN_2, PI};
 
 pub const NAME: &str = "Sytrus";
 
@@ -106,21 +109,6 @@ const FADE: f64 = 0.01;
 /// before version 8 are another format.
 const OLDEST: i32 = 8;
 const NEWEST: i32 = 25;
-
-/// Filter types, as Love Philter numbers them. 12 is Sytrus's phaser.
-const SVF: i32 = 0;
-const LADDER_LOW: i32 = 1;
-const LADDER_HIGH: i32 = 2;
-const LOW: i32 = 3;
-const BAND: i32 = 4;
-const STOP: i32 = 5;
-const HIGH: i32 = 6;
-const ALL: i32 = 7;
-const LOW_SHELF: i32 = 8;
-const PEAK: i32 = 9;
-const HIGH_SHELF: i32 = 10;
-const COMB: i32 = 11;
-const PHASER: i32 = 12;
 
 /// FL's REC parameters: `ProcessParam` (`0x867930`) takes indexes under
 /// 0x255, and its decoder (`0x868c90`) walks the parts' REC bases.
@@ -805,36 +793,22 @@ struct Filter {
     kind: i32,
     cutoff: f32,
     resonance: f32,
-    /// The low, band and high (or gain) sliders' levels.
+    /// The order (`FOrderSelect`, header 0): 0 for none, 1 to 3 filters
+    /// in a row, 4 and 5 two and three with the earlier ones tuned up.
+    order: i32,
+    /// The low, band and high sliders' levels, and the low (or gain, or
+    /// drive) slider as it is.
     levels: [f32; 3],
-    /// The gain slider as a shelf's or a peak's gain.
-    gain: f32,
+    low: i32,
     /// The waveshaper after the filter.
     shaper: Shaper,
+    /// The block's first two bytes: the quality switch (+0x880,
+    /// `FQualityBtn`), which runs the filter at twice the rate, and the
+    /// alternate switch (+0x881).
+    quality: bool,
+    alternate: bool,
     to_next: f32,
     articulators: Vec<Articulator>,
-}
-
-/// What one tick's cutoff and resonance come to for a filter's row.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Design {
-    kind: i32,
-    stages: usize,
-    /// The SVF's corner and damping, or the ladder's corner and keep, a
-    /// stage.
-    a: [f32; STAGES],
-    b: [f32; STAGES],
-    coefficients: [Coefficients64; STAGES],
-}
-
-impl Design {
-    const REST: Design = Design {
-        kind: SVF,
-        stages: 0,
-        a: [0.0; STAGES],
-        b: [1.0; STAGES],
-        coefficients: [Coefficients64::IDENTITY; STAGES],
-    };
 }
 
 impl Filter {
@@ -845,6 +819,7 @@ impl Filter {
     fn set_wheel(&mut self, k: usize, value: i32) {
         match k {
             0 => {
+                self.order = value;
                 let order = value - 1;
                 self.detune = order > 2;
                 let last = if self.detune { order - 2 } else { order };
@@ -855,8 +830,7 @@ impl Filter {
             4..=6 => {
                 self.levels[k - 4] = level(value, 128.0);
                 if k == 4 {
-                    let knob = (f64::from(value) * 0.015_625) as f32;
-                    self.gain = (curve(8.0, f64::from(knob)) * 0.125 + 0.125) as f32;
+                    self.low = value;
                 }
             }
             7 => self.shaper.pre_amp = value as f32 * (1.0 / 128.0),
@@ -864,184 +838,6 @@ impl Filter {
             9 => self.to_next = level(value, 256.0),
             _ => {}
         }
-    }
-
-    /// Design the row for a cutoff and a resonance from 0 to 1, as Love
-    /// Philter's `design` does (`docs/plugins/fruity-love-philter.md`).
-    /// `scale` is `44100 / rate`.
-    fn design(&self, cutoff: f32, resonance: f32, scale: f32) -> Design {
-        let mut design = Design::REST;
-        design.kind = self.kind;
-        design.stages = self.stages;
-        let mut stages = self.stages;
-        let x = f64::from(cutoff);
-        let mut r = f64::from(resonance);
-        if matches!(self.kind, COMB | PHASER) {
-            // The comb's resonance is its feedback and the phaser has
-            // none: the low pass that stands in for them is one mild
-            // stage.
-            stages = stages.min(1);
-            r = 0.5;
-        }
-        let scale = f64::from(scale);
-        let tuning = if stages == 2 { 0.5 } else { 0.75 };
-        let detune = self.detune;
-        let detuned = |fc: f64| if detune { power(fc, tuning) } else { fc };
-        let spread = if stages > 1 {
-            (1.0 / stages as f64) as f32
-        } else {
-            1.0
-        };
-        match self.kind {
-            SVF => {
-                let mut fc = if x > 0.0 {
-                    curve(51.0, x) * 0.015_900_000_929_832_46
-                } else {
-                    0.0
-                };
-                for stage in (0..stages).rev() {
-                    let turn = ((fc + 0.005) * scale).min(0.625);
-                    design.a[stage] = (turn.sin() * 2.0) as f32;
-                    fc = detuned(fc);
-                }
-                let damping = if r <= 0.0 {
-                    1.0
-                } else if r < 1.0 {
-                    1.0 - r * 0.899_999_976_158_142_1
-                } else {
-                    0.2
-                };
-                design.b[0] = damping as f32;
-            }
-            LADDER_LOW | LADDER_HIGH => {
-                let mut fc = if x > 0.0 {
-                    (curve(76.0, x) * 0.013_24).min(1.6)
-                } else {
-                    0.0
-                };
-                let mut q = if r <= 0.0 {
-                    1.0
-                } else if r < 1.0 {
-                    curve(1001.0, f64::from(r as f32)) * 0.049 + 1.0
-                } else {
-                    50.0
-                };
-                if stages > 1 {
-                    q = power(q, spread);
-                }
-                let scale = scale * FRAC_PI_2;
-                for stage in (0..stages).rev() {
-                    let cos = ((fc + 0.007) * scale).min(0.4 * PI).cos();
-                    design.a[stage] = (2.0 - cos * 2.0) as f32;
-                    let fall = cos - 1.0;
-                    let keep = (-fall * fall * fall).sqrt() * f64::from(std::f32::consts::SQRT_2);
-                    let keep = (keep / (q * fall) + 1.0) as f32;
-                    design.b[stage] = if f64::from(keep) < 0.1 { 0.1 } else { keep };
-                    fc = detuned(fc);
-                }
-            }
-            _ => {
-                // The comb and the phaser are not built: a low pass stands
-                // in for them.
-                let kind = if (LOW..=HIGH_SHELF).contains(&self.kind) {
-                    self.kind
-                } else {
-                    LOW
-                };
-                let (reach, offset, most) = match kind {
-                    LOW => (0.000_664_666_644_297_540_2, 0.003, f64::INFINITY),
-                    HIGH => (0.000_399_933_342_123_404_15, 1e-4, 0.6001),
-                    _ => (0.000_399_933_342_123_404_15, 1e-4, 1.0001),
-                };
-                let mut fc = if x > 0.0 {
-                    (curve(1501.0, x) * reach).min(most)
-                } else {
-                    0.0
-                };
-                let shape = match kind {
-                    BAND | STOP => {
-                        if r <= 0.0 {
-                            0.01
-                        } else if r < 1.0 {
-                            curve(101.0, f64::from(r as f32)) * 0.119_899_995_625_019_07 + 0.01
-                        } else {
-                            12.0
-                        }
-                    }
-                    LOW_SHELF | HIGH_SHELF => {
-                        let r = 1.0 - r;
-                        if r <= 0.0 {
-                            0.1
-                        } else if r < 1.0 {
-                            curve(3.0, f64::from(r as f32)) * 0.449_999_988_079_071_04 + 0.1
-                        } else {
-                            1.0
-                        }
-                    }
-                    PEAK => {
-                        let r = 1.0 - r;
-                        if r <= 0.0 {
-                            0.1
-                        } else if r < 1.0 {
-                            curve(2001.0, f64::from(r as f32)) * 0.049_949_999_898_672_104 + 0.1
-                        } else {
-                            100.0
-                        }
-                    }
-                    _ => {
-                        let q = if r <= 0.0 {
-                            0.1
-                        } else if r < 1.0 {
-                            curve(2001.0, f64::from(r as f32)) * 0.024_950_001_388_788_223 + 0.1
-                        } else {
-                            50.0
-                        };
-                        if stages > 1 { power(q, spread) } else { q }
-                    }
-                };
-                let mut a = f64::from(self.gain);
-                if stages > 1 && kind >= LOW_SHELF {
-                    a = (a.ln() * f64::from(spread)).exp();
-                }
-                let mut width = f64::from(stages.max(1) as u32);
-                if kind == STOP {
-                    width = 1.0 / width;
-                }
-                let width = width * (LN_2 / 2.0);
-                let scale = scale * TAU;
-                for stage in (0..stages).rev() {
-                    let w = ((fc + offset) * scale).clamp(0.0, 2.849_517_146_113_191);
-                    let (sin, cos) = w.sin_cos();
-                    design.coefficients[stage] = match kind {
-                        LOW => Coefficients64::low_pass(cos, sin * (0.5 / shape)),
-                        HIGH => Coefficients64::high_pass(cos, sin * (0.5 / shape)),
-                        ALL => Coefficients64::all_pass(cos, sin * (0.5 / shape)),
-                        BAND => {
-                            let alpha = sin * (shape * width * w / sin).sinh();
-                            Coefficients64::band_pass(cos, alpha)
-                        }
-                        STOP => {
-                            let alpha = sin * (shape * width * w / sin).sinh();
-                            Coefficients64::notch(cos, alpha)
-                        }
-                        PEAK => Coefficients64::peak(cos, sin / (shape * 2.0), a),
-                        _ => {
-                            let beta =
-                                a.sqrt() * ((a + 1.0 / a) * (1.0 / shape - 1.0) + 2.0).sqrt();
-                            if kind == LOW_SHELF {
-                                Coefficients64::low_shelf(cos, beta * sin, a)
-                            } else {
-                                Coefficients64::high_shelf(cos, beta * sin, a)
-                            }
-                        }
-                    };
-                    fc = detuned(fc);
-                }
-                design.kind = kind;
-                design.stages = stages;
-            }
-        }
-        design
     }
 }
 
@@ -1145,12 +941,15 @@ impl State {
             .map(|_| Filter {
                 stages: 1,
                 detune: false,
-                kind: SVF,
+                kind: filter::SVF,
+                order: 1,
                 cutoff: 0.5,
                 resonance: 0.0,
                 levels: [1.0, 0.0, 0.0],
-                gain: 8.0,
+                low: 128,
                 shaper: Shaper::default(),
+                quality: false,
+                alternate: false,
                 to_next: 0.0,
                 articulators: articulators(1),
             })
@@ -1436,12 +1235,14 @@ impl State {
                     filter.set_wheel(k, header[k]);
                 }
                 let block = reader.bytes(if version < 9 { 0x29 } else { 0x30 })?;
+                filter.quality = block[0] != 0;
+                filter.alternate = block[1] != 0;
                 let word = |at: usize| {
                     block
                         .get(at..at + 4)
                         .map_or(0, |w| i32::from_le_bytes([w[0], w[1], w[2], w[3]]))
                 };
-                filter.kind = word(0x2c).clamp(0, PHASER);
+                filter.kind = word(0x2c).clamp(0, filter::PHASER);
                 for k in [7, 8] {
                     filter.set_wheel(k, header[k]);
                 }
@@ -1722,82 +1523,6 @@ struct OpRun {
     phase_art: f32,
 }
 
-/// One filter as a voice runs it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct FilterRun {
-    design: Design,
-    /// The SVF's low and band, or the ladder's low and speed, a stage.
-    state: [[f64; 2]; STAGES],
-    biquad: [Biquad64; STAGES],
-    gains: [f32; 3],
-    volume: f32,
-    volume_step: f32,
-    /// The waveshaper's mix, and what the tick aims it at.
-    mix: f32,
-    mix_target: f32,
-}
-
-impl FilterRun {
-    /// A row at rest.
-    fn rest() -> Self {
-        FilterRun {
-            design: Design::REST,
-            state: [[0.0; 2]; STAGES],
-            biquad: [Biquad64::default(); STAGES],
-            gains: [0.0; 3],
-            volume: 0.0,
-            volume_step: 0.0,
-            mix: 0.0,
-            mix_target: 0.0,
-        }
-    }
-
-    /// Run one sample through the row.
-    fn run(&mut self, x: f32) -> f32 {
-        let design = &self.design;
-        let mut sample = f64::from(x);
-        match design.kind {
-            SVF => {
-                let gains = self.gains.map(f64::from);
-                for stage in 0..design.stages {
-                    let [mut low, mut band] = self.state[stage];
-                    let f = f64::from(design.a[stage]);
-                    let q = f64::from(design.b[stage]);
-                    low += band * f;
-                    let high = sample - (band * q + low);
-                    band += high * f;
-                    sample = low * gains[0] + band * gains[1] + high * gains[2];
-                    self.state[stage] = [flushed(low), flushed(band)];
-                }
-            }
-            LADDER_LOW | LADDER_HIGH => {
-                let high = design.kind == LADDER_HIGH;
-                for stage in 0..design.stages {
-                    let [mut low, mut speed] = self.state[stage];
-                    let g = f64::from(design.a[stage]);
-                    let k = f64::from(design.b[stage]);
-                    speed += (sample - low) * g;
-                    low += speed;
-                    speed *= k;
-                    sample = if high { sample - low } else { low };
-                    self.state[stage] = [flushed(low), flushed(speed)];
-                }
-            }
-            _ => {
-                for stage in 0..design.stages {
-                    sample = self.biquad[stage].process(&design.coefficients[stage], sample);
-                }
-            }
-        }
-        sample as f32
-    }
-}
-
-/// A filter's state, with a number too small to hold in full made 0.
-fn flushed(state: f64) -> f64 {
-    if state.is_subnormal() { 0.0 } else { state }
-}
-
 /// One sounding note.
 #[derive(Debug, Clone, PartialEq)]
 struct Voice {
@@ -1817,7 +1542,7 @@ struct Voice {
     offsets: [f32; 2],
     places: [usize; 2],
     operators: [OpRun; OPERATORS],
-    filters: [FilterRun; FILTERS],
+    filters: [filter::Run; FILTERS],
     articulators: [ArtRun; PARTS * ARTICULATORS],
     /// Every row's gain into the left and the right output and the left
     /// and the right send, and the steps.
@@ -2163,7 +1888,7 @@ impl Voice {
             offsets,
             places: [place(mods[0], offsets[0]), place(mods[1], offsets[1])],
             operators,
-            filters: [FilterRun::rest(); FILTERS],
+            filters: std::array::from_fn(|f| filter::Run::start(&state.filters[f], timing.rate)),
             articulators,
             gains: [[0.0; 4]; ROWS],
             aims: [[0.0; 4]; ROWS],
@@ -2319,17 +2044,12 @@ impl Voice {
             let filter = &state.filters[f];
             let cutoff = filter.cutoff + value(part, 2);
             let resonance = filter.resonance + value(part, 3);
+            let arts = [value(part, 4), value(part, 5), value(part, 6)];
             let run = &mut self.filters[f];
-            run.design = filter.design(cutoff, resonance, timing.scale);
-            for k in 0..3 {
-                run.gains[k] = filter.levels[k] * value(part, 4 + k);
-            }
-            let volume = value(part, 1);
+            run.tick(filter, (cutoff, resonance), arts, &pools.tables, snap);
+            run.volume_aim = value(part, 1);
             if snap {
-                run.volume = volume;
-                run.volume_step = 0.0;
-            } else {
-                run.volume_step = (volume - run.volume) / len;
+                run.volume = run.volume_aim;
             }
             // The waveshaper's mix articulator times its wheel, kept to 0..1
             // (`0x870820`).
@@ -2518,16 +2238,17 @@ impl Voice {
             }
             let inputs = &state.filter_inputs[f];
             let run = &mut self.filters[f];
+            let (rows, work) = scratch.split_at_mut((ROWS + OPERATORS) * CHUNK);
             for i in 0..len {
                 let mut x = 0.0;
                 for k in 0..inputs.len() {
                     let (row, gain) = inputs[k];
-                    x += scratch[row * CHUNK + i] * gain;
+                    x += rows[row * CHUNK + i] * gain;
                 }
-                x *= run.volume;
-                run.volume += run.volume_step;
-                scratch[part * CHUNK + i] = run.run(x);
+                rows[part * CHUNK + i] = x;
             }
+            let buffer = &mut rows[part * CHUNK..part * CHUNK + len];
+            run.run(&state.filters[f], buffer, work, timing.shaper_cap);
             // The waveshaper after the filter, mixed in by a glide of no
             // more than `TAudioRenderer+0x38` a sample (`0x62bb20`).
             let shaper = &state.filters[f].shaper;
@@ -2614,7 +2335,7 @@ impl Default for Sytrus {
             notes: 0,
             fx: fx::Effects::default(),
             pools: Pools::default(),
-            scratch: vec![0.0; (ROWS + OPERATORS) * CHUNK],
+            scratch: vec![0.0; (ROWS + OPERATORS + 2) * CHUNK],
             seed: 0x1234_5678,
         }
     }
@@ -2696,6 +2417,7 @@ impl Generator for Sytrus {
         // operators that make them.
         let operators = &self.state.operators;
         self.pools = Pools {
+            tables: filter::Tables::new(self.rate),
             copies: operators
                 .iter()
                 .map(|o| {
@@ -2724,6 +2446,7 @@ impl Generator for Sytrus {
         if hz.is_finite() && hz > 0.0 {
             self.rate = hz;
             self.build_effects();
+            self.pools.tables = filter::Tables::new(hz);
         }
     }
 
@@ -2888,13 +2611,7 @@ impl Generator for Sytrus {
 
     fn fidelity(&self) -> Fidelity {
         let state = &self.state;
-        let active_filters = (0..FILTERS).filter(|f| state.active[OPERATORS + f]);
-        if active_filters
-            .clone()
-            .any(|f| matches!(state.filters[f].kind, COMB | PHASER))
-        {
-            Fidelity::Approximate("Sytrus comb or phaser filter")
-        } else if state.send_on && state.fx.send_target != -1 {
+        if state.send_on && state.fx.send_target != -1 {
             // The send to a mixer track (`Gen_Render`'s GetInBuffer) has no
             // way out of a generator here.
             Fidelity::Approximate("Sytrus FX send")
@@ -2908,6 +2625,7 @@ impl Generator for Sytrus {
 mod tests {
     use super::*;
     use crate::testing::{self, partial};
+    use std::f64::consts::TAU;
 
     const RATE: f32 = 48_000.0;
 
@@ -3129,7 +2847,7 @@ mod tests {
         state.out = [0.0; ROWS];
         state.out[OPERATORS] = 1.0;
         state.to_filter[0][0] = 1.0;
-        state.filters[0].kind = LOW;
+        state.filters[0].kind = 3;
         state.route();
         sytrus.set_param(328, 256.0);
         let open = rms(&play(&mut sytrus, 72, 8192)[4096..]);
@@ -3202,47 +2920,75 @@ mod tests {
         assert!(partial(&ring[4096..], turns * 2.0) > 0.3);
     }
 
+    /// A filter of one stage of this type, wide open in its levels.
+    fn one_filter(kind: i32) -> Filter {
+        let mut filter = State::blank().filters[0].clone();
+        filter.kind = kind;
+        filter.set_wheel(0, 1);
+        filter
+    }
+
+    /// The gain of a filter at `hz` for this cutoff and resonance, past
+    /// its settling.
+    fn response(filter: &Filter, (cutoff, resonance): (f32, f32), hz: f64) -> f64 {
+        let tables = filter::Tables::new(RATE);
+        let mut run = filter::Run::start(filter, RATE);
+        run.tick(filter, (cutoff, resonance), [1.0; 3], &tables, true);
+        run.volume = 1.0;
+        run.volume_aim = 1.0;
+        let tone = testing::sine(hz / f64::from(RATE), 48_000);
+        let mut out = tone.clone();
+        let mut work = vec![0.0; 2 * CHUNK];
+        for block in out.chunks_mut(CHUNK) {
+            run.run(filter, block, &mut work, 1.0);
+        }
+        rms(&out[24_000..]) / rms(&tone[24_000..])
+    }
+
     #[test]
     fn a_low_pass_at_a_cutoff_passes_a_tenth_of_it_and_cuts_ten_times_it() {
-        // The corner of a Vanilla low pass is `(fc + 0.003) * 44100` Hz,
-        // and this cutoff puts it at 1 kHz.
-        let filter = Filter {
-            stages: 1,
-            detune: false,
-            kind: LOW,
-            cutoff: 0.0,
-            resonance: 0.0,
-            levels: [1.0, 0.0, 0.0],
-            gain: 1.0,
-            shaper: Shaper::default(),
-            to_next: 0.0,
-            articulators: Vec::new(),
-        };
+        // The corner of a type 3 low pass is `(fc + 0.003) x 44100` Hz, and
+        // this cutoff puts it at 1 kHz.
         let fc: f64 = 1000.0 / 44_100.0 - 0.003;
-        let x = (fc / 0.000_664_666_644_297_540_2 + 1.0).ln() / 1501f64.ln();
-        let gain = |hz: f64| {
-            let mut run = FilterRun::rest();
-            run.design = filter.design(x as f32, 0.5, 44_100.0 / RATE);
-            let tone = testing::sine(hz / f64::from(RATE), 48_000);
-            let out: Vec<f32> = tone.iter().map(|v| run.run(*v)).collect();
-            rms(&out[24_000..]) / rms(&tone[24_000..])
+        let x = ((fc / 0.000_664_666_644_297_540_2 + 1.0).ln() / 1501f64.ln()) as f32;
+        let low = one_filter(3);
+        assert!((response(&low, (x, 0.5), 100.0) - 1.0).abs() < 0.1);
+        assert!(response(&low, (x, 0.5), 10_000.0) < 0.05);
+        // At twice the rate (the quality switch) it is the same filter.
+        let twice = Filter {
+            quality: true,
+            ..low.clone()
         };
-        assert!((gain(100.0) - 1.0).abs() < 0.1, "{}", gain(100.0));
-        assert!(gain(10_000.0) < 0.05, "{}", gain(10_000.0));
-        // The state variable filter does the same with its low output.
-        let svf = Filter {
-            kind: SVF,
-            ..filter.clone()
-        };
-        let mut run = FilterRun::rest();
-        run.gains = [1.0, 0.0, 0.0];
-        run.design = svf.design(0.5, 0.0, 44_100.0 / RATE);
-        let low = testing::sine(50.0 / f64::from(RATE), 48_000);
-        let out: Vec<f32> = low.iter().map(|v| run.run(*v)).collect();
-        assert!((rms(&out[24_000..]) / rms(&low[24_000..]) - 1.0).abs() < 0.1);
-        let high = testing::sine(20_000.0 / f64::from(RATE), 48_000);
-        let out: Vec<f32> = high.iter().map(|v| run.run(*v)).collect();
-        assert!(rms(&out[24_000..]) / rms(&high[24_000..]) < 0.1);
+        assert!((response(&twice, (x, 0.5), 100.0) - 1.0).abs() < 0.1);
+        assert!(response(&twice, (x, 0.5), 10_000.0) < 0.05);
+        // The state variable filter's low output at a cutoff of a half:
+        // its coefficient is 2 sin(asin(x) 44100 / rate), x = (f + 0.01)
+        // / 2 for f = (26^0.5 - 1) 0.0396.
+        let svf = one_filter(0);
+        let tables = filter::Tables::new(44_100.0);
+        // At 44.1 kHz it is 2x and stops where that reaches 1.175.
+        assert_eq!(tables_len(&tables), 2387);
+        assert!((response(&svf, (0.5, 0.0), 50.0) - 1.0).abs() < 0.1);
+        assert!(response(&svf, (0.5, 0.0), 20_000.0) < 0.1);
+        // The four pole ladder (11) and the phaser (12) play and stay
+        // finite: the ladder passes the lows and cuts the highs, the
+        // phaser passes everything at its gain of 1.
+        let mut ladder = one_filter(11);
+        // The low slider is its drive: none.
+        ladder.set_wheel(4, 0);
+        assert!((response(&ladder, (0.3, 0.0), 50.0) - 1.0).abs() < 0.1);
+        assert!(response(&ladder, (0.3, 0.0), 15_000.0) < 0.05);
+        let phaser = one_filter(12);
+        for hz in [100.0, 1000.0, 10_000.0] {
+            assert!(
+                (response(&phaser, (0.5, 0.0), hz) - 1.0).abs() < 0.02,
+                "{hz}"
+            );
+        }
+    }
+
+    fn tables_len(tables: &filter::Tables) -> usize {
+        tables.len(0)
     }
 
     #[test]
