@@ -529,19 +529,126 @@ latency)", whose v4 block ends with the first byte of `0x31c`, which FL
 reads as 1. No state asks for more; the implementation runs orders up to
 3 (8x) and an order past that at 3, marked `Approximate`.
 
-### 5.8 Linear phase (`0x32c`, `FUN_00847e50`, `FUN_00841340`), confidence `binary`, not implemented
+### 5.8 Linear phase (`0x32c`, `FUN_00847e50`, `FUN_00841340`), confidence `binary`, implemented
 
-The plugin asks the host through the callback at `0x82c` for a handle per
-band (`FUN_00848680`, message 0x100 with an FFT size from `DAT_008bbcb4`),
-and `FUN_00847e50` hands it a magnitude response of `N / 2 + 1` points
-(`N = FUN_00847730(SpeedSlider 0x328, SR)`: `0x200 << speed`, scaled by
-`log2(SR / 44100)` above 44.1 kHz, 2048 at the default) built from the IIR
-sections' responses (`FUN_00847cb0` -> `FUN_008477b0`) times the low cut's.
-The engine builds the linear-phase filter; the DLL has nothing of it.
-Latency in this mode is `3 N / 4` plus the delays. Four corpus states
-(three in "Astes - Bien Duro", one in "LollieVox & Lezina J") have the
-flag. The implementation runs the IIR crossover for them, marked
-`Approximate`.
+Ghidra run r9 (`out/lpasm`) and the engine (`engine_x64.dll` in Frequency
+Splitter's folder, objdump listing; `out/eng`, `out/engasm`).
+
+**Where the engine comes from.** The constructor (`0x008403d4..0x8404b0`)
+loads `Plugins\Fruity\Effects\Frequency Splitter\engine_x64.dll`
+(`FUN_00448710`), takes `mydispatcher` into `0x82c` and calls it with op 0
+three times for the band contexts at `0x834 + 8 b`. It is the dispatcher
+Parametric EQ 2 uses (`.scratch/notes/fruity-parametric-eq-2.md`). The
+handle at `0x800` with ops 0x100..0x108 is the editor's analyser, not the
+sound.
+
+**The magnitudes (`FUN_00847e50`, at the start of every `Eff_Render`).**
+
+```
+N      = FUN_00847730(0x328, band rate): 0x200 << p; rate < 44100: N / 2; else N << trunc(ln(rate / 44100) / ln 2 + 0.5), at most 65536
+bin    = float(double(rate) / N)
+f_low  = float(exp(p0 * ln(533.33) / (ln 2 * 65536) * ln 2) * 30)        // not put in order, unlike the IIR design
+f_high = the same of p2
+s_low, s_high = float([12, 24][the LowSlopeSel / HighSlopeSel switch])  // the editor's controls at 0xd8c / 0xd9c, Tag 1 and 3: params 1 and 3
+lc     = float(exp(p6 * ln 16 / (ln 2 * 65536) * ln 2) * 5);  lc -= round(log_1.3(max(lc - 5, 1)))   // FUN_00466580 is LogN
+off    = quick_exp2(0.16666667)                                          // a band without sections
+window = [0.1, 0.25, 0.01, 0.02][0x330]                                  // DAT_008bbca4, the "Linear phase mod speed" menu
+for b in 0..2 with 0x120[b] set and op 0xe(b) == 1:                     // FUN_00848930 sets all three: state load, rate, freqs, slopes
+    0x120[b] = 0
+    for k in 0..=N/2:
+        f = max(0.1f, k * bin)
+        if f > float(0.4999 rate): m[k] = 1; continue                   // the renderer's +0x30 (FUN_0062b450)
+        m[k] = band b has sections ? curve_b(f) : off
+        if p6 > 0 and the low cut has not yet given exactly 1: m[k] *= HP(lc, 24 dB, f)
+    m[N/2] = m[N/2 - 1]
+    op 5 (band rate), op 6 (window), op 2 (N), op 3 (m)                  // under the host lock
+latency: when FUN_00841340 changes, msg 0x1e
+```
+
+`curve_b` (`FUN_00847cb0`): LOW `LP(f_low, s_low)`, HIGH `HP(f_high,
+s_high)`, MID `HP(f_low, s_low)` when HIGH is off (mode 3), `LP(f_high,
+s_high)` when LOW is off, else `HP(f_low, s_low) * LP(f_high, s_high)`.
+A band has sections when its slope index `band+0x78` is not -1 (LOW and
+HIGH in mode 3) and its stage array is not empty (MID with both outer
+bands off).
+
+`FUN_008477b0(fc, slope, f, high)`, all in floats but where noted:
+
+```
+L  = quick_log2(f / fc);  high: L = -L
+level(o) = db = float(-6.0 - double(slope * o))                   // FL's dB here are sixths of an octave of level
+           db < -100: 0;  db > 100: Power(2, db * 0.16666667);  else quick_exp2(db * 0.16666667)
+L >= 0: level(L)                                                  // the stop side
+L <  0: float(1.0 - double(level(-L)))                            // the pass side: one less the mirrored stop side
+quick_log2(x) = (exponent - 127) + float(((t c1) t t - (t c2) t) - t c3 + 1.0),  t = double(1 - mantissa * 2^-23)
+                c1 = -0.1556501, c2 = 0.1063157, c3 = 0.739 (doubles)
+quick_exp2(x) = x > 0: float(2^n * (r (r (r d1 + d2) + d3) + d4)), n = trunc(x), r = x - n
+                x < 0: 1 / quick_exp2(-x);  x = 0: 1
+                d1..d4 = 0.079064658211, 0.224328091473, 0.69659850257, 0.999862219597
+```
+
+So the LOW and HIGH low and high passes add to 1 at any frequency, -6 dB
+at their corner; the three bands add to `1 + LP_low HP_high`, flat to
+1e-3 at the default 200 Hz and 3 kHz. This is not the IIR sections'
+response: section 5.1's sections are not read here at all.
+
+**The engine context (`mydispatcher` @ `0x1801e1e50`, jump table
+`0x1801e2710`).** 0x48 bytes: `+0 N`, `+4` a new magnitude, `+8` the
+magnitude (`N/2 + 1` floats), `+0x10 / +0x18` two filters, `+0x20 / +0x28`
+the last N frames a side, `+0x30` rate (44100), `+0x34` window (0.1),
+`+0x38` frames faded, `+0x3c` fade length (0x1000), `+0x40` the idle
+filter, `+0x44` the history place.
+
+```
+op 0     new context, then op 2 with 256
+op 2     FUN_1801c8850: a new N frees and remakes everything: a zero magnitude, two filters designed from it,
+         zero history, idle 0, place 0, faded = fade length (settled), no new magnitude. The same N does nothing.
+op 3     copy N/2 + 1 floats into the magnitude; new = 1
+op 5, 6  rate, window
+op 0xd   zero both histories and both filters' blocks and places (Maximus's flush, FUN_00846440)
+op 0xe   faded >= fade length
+op 4     FUN_1801c8a70, per frame, in place:
+         if new and settled: new = 0; faded = 0; fade length = int(float(rate) * window)
+              clear and design the idle filter, prime it with the last N frames from the oldest, idle = !idle
+         history[place] = frame; place = (place + 1) % N
+         fading: a = filter 0 (frame), b = filter 1 (frame), t = float(faded) / float(fade length)
+                 w_a = idle == 0 ? 1 - t : t; out = b * (1 - w_a) + a * w_a; faded += 1
+         else:   out = the playing filter (not the idle one) (frame)
+```
+
+A filter (`FUN_1801e3040`, 0xa8 bytes: `N`, `N/2`, `N/4`, input blocks,
+work, spectrum `+0x38`, two IPP FFT specs forward and one inverse made by
+`FUN_1801e1890` with `IPP_FFT_NODIV_BY_ANY`, output `+0x90 / +0x98`):
+
+```
+design (FUN_1801e2c90 -> FUN_1801de130, FUN_1801e1960):
+    B = FFT(click at N/2);  B[k] *= m[k] for k in 0..=N/2;  B[N-k] *= m[k] for k in 1..N/2
+    h = Re(IFFT(B)) * (1 / N)                                       // the zero-phase impulse, N/2 late
+    g[i] = h[N/4 + i] * sinf(float(i) * rcp(N/2 - 1) * pi), i < N/2; g[i] = 0 after   // rcpps and one Newton step
+    spectrum = FFT(g)
+frame (FUN_1801e2ad0): in[side][place].re = x; y = out[side][place]; place += 1
+    place == N/2: place = 0; per side: Y = IFFT(FFT(in) * spectrum); out[0..N/2] = out[N/2..N]; out[N/2..N] = 0
+                  out[i] += (1 / N) * Re(Y[i]) for i < N                // overlap-add, the input's upper half stays 0
+```
+
+A click comes out `N/2 + N/4 = 3N/4` frames late. `Eff_Render` runs op 4
+on every frame of bands 0..2 at the band rate (section 3), MID taking the
+input itself afterwards when `0x324` is set, and leaves out the IIR low
+cut (`0x342 && !0x32c`). The sum signs are 1.0. Latency (`FUN_00841340`):
+`max band delay / os + master delay + (3N / 4) / os`, each divided on its
+own.
+
+Implementation: `crates/plugins/src/linear_phase.rs` (the context, FL's
+sums in their order, a radix-2 float FFT for IPP's) and
+`LinearSetting::magnitudes` in `maximus.rs`. What is not FL's to the bit:
+the FFT's rounding (IPP's path depends on the CPU), the window's
+`rcpps` and vector `sinf` last bits, and the libm `ln` / `exp` of the
+wheels. Inferred: the implementation sends new magnitudes whenever what
+they are made of changes; FL sets the flags on load, rate, the
+frequencies and the slopes (`0x842933`, `0x842960`), so a moved low cut
+or band mode in linear-phase mode waits there for one of those. Four
+corpus states (three in "Astes - Bien Duro", one in "LollieVox & Lezina
+J") have the flag.
 
 ### 5.9 Soundgoodizer (`Soundgoodizer_x64.dll`, imported into `proj/maximus`), confidence `binary`
 
@@ -596,3 +703,19 @@ the corpus projects.
 - The RMS detector is `sqrt(max(0, mean(L^2 + R^2) / 2))` as in Fruity
   Limiter; the `/ 2` is taken from the Limiter's reading, since
   `TRMSLookahead.SetLength` was not decompiled here.
+- The linear-phase magnitudes are not the IIR sections' responses, as
+  section 5.8 first had it: `FUN_008477b0` draws an analytic -6 dB
+  crossover from the wheels and the 12 / 24 dB slope switches, the one
+  Frequency Splitter's engine draws, with Maximus's own quick log2 and
+  2^x in doubles.
+
+Known and left as they were (each would move every state's sound a
+little, so they wait for a decision):
+
+- `FUN_008415c0` takes the attack, release 2 and release times as
+  `t * SR * os` without rounding; only the delay and the detector window
+  are rounded. The implementation rounds all of them to whole frames
+  (`limiter::frames`) before making the stage coefficients.
+- Moving a slope (globals 1 and 3) calls `FUN_008485d0`, which remakes
+  the oversamplers and flushes the plugin (`FUN_00846280`); the
+  implementation only redesigns the crossover.

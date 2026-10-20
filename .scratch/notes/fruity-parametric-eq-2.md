@@ -85,3 +85,13 @@ and settle the scaling: IPP's FFTs here do not scale.
    free 0x1801cf440) hooked, and IPP will take whatever path the emulated
    CPU's cpuid picks. FFT rounding will not match FL's to the bit on any
    path but FL's own CPU's.
+
+## Update: the engine context is rebuilt (Maximus, 2026-10-20)
+
+`crates/plugins/src/linear_phase.rs` is the context of ops 0, 2..6, 0xd,
+0xe as Maximus drives it, with the IPP calls of `FUN_1801e1960` and
+`FUN_1801e2ad0` read from the disassembly (`docs/plugins/maximus.md`
+section 5.8): the design multiplies the click's spectrum by the magnitude
+on both halves, inverse-transforms and scales by `1/N` once; a frame
+block is overlap-added with one `1/N` on the way out. Parametric EQ 2 can
+send its kernel to a `LinearPhase` the same way.
