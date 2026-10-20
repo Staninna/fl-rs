@@ -696,6 +696,17 @@ impl Automation {
             // A clip whose 234 did not decode has no curve to play.
             let curve = channel.automation.as_ref().map(|d| Curve::new(&d.envelope));
             for binding in bound.clone() {
+                // A control of a slot that holds no plugin changes nothing:
+                // the slot passes its input on whatever it is set to.
+                if let RecTarget::Insert {
+                    index,
+                    slot: Some(slot),
+                    ..
+                } = binding.target
+                    && empty_slot(project, index, slot)
+                {
+                    continue;
+                }
                 let lane = automation.lane(project, binding, tempo);
                 match (lane, curve.is_some()) {
                     (Some((lane, min, max)), true) => {
@@ -1064,6 +1075,18 @@ impl Automation {
 /// the width is taken in f64.
 fn raw_at(low: i32, high: i32, part: i32) -> f64 {
     f64::from(low) + f64::from(part) / 12_800.0 * (f64::from(high) - f64::from(low))
+}
+
+/// Whether a slot of an insert holds no plugin.
+fn empty_slot(project: &Project, insert: u16, slot: u8) -> bool {
+    let slots = project
+        .insert_mix(insert)
+        .insert()
+        .map(|insert| &insert.slots);
+    let found = slots.and_then(|slots| slots.iter().find(|s| s.index == i32::from(slot)));
+    found
+        .and_then(|slot| slot.plugin_name.as_deref())
+        .is_none_or(str::is_empty)
 }
 
 #[cfg(test)]

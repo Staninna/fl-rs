@@ -46,9 +46,10 @@
 //!    parameters. The controls are read at the
 //!    start of a block and stay as read until the next one: a block starts
 //!    on every 512th sample of the song and where a note or a clip starts.
-//!    The tempo is read on every 512th sample only. Every other control a
-//!    clip is bound to is counted in [`Rendered::unsupported_targets`], and
-//!    so is a clip bound to nothing. [`automation::Curve`] is the curve a
+//!    The tempo is read on every 512th sample only. A control of an effect
+//!    slot that holds no plugin changes nothing, and is left alone. Every
+//!    other control a clip is bound to is counted in
+//!    [`Rendered::unsupported_targets`], and so is a clip bound to nothing. [`automation::Curve`] is the curve a
 //!    clip draws.
 //! 6. Controllers. A hosted plugin that is an internal controller, which is
 //!    Fruity Peak Controller, works its outputs out once a tick of the
