@@ -21,11 +21,11 @@ render. The levels are explained under the plugin list below.
 
 | The 165 projects that come with FL | done | of | |
 |---|---:|---:|---|
-| Projects that make any sound | 114 | 165 | `██████████████░░░░░░` 69% |
-| Projects that play with nothing missing | 57 | 165 | `███████░░░░░░░░░░░░░` 34% |
+| Projects that make any sound | 119 | 165 | `██████████████░░░░░░` 72% |
+| Projects that play with nothing missing | 62 | 165 | `████████░░░░░░░░░░░░` 37% |
 | Plugins they load that are rebuilt | 932 | 1006 | `███████████████████░` 92% |
-| Instrument channels with notes that play | 186 | 215 | `█████████████████░░░` 86% |
-| Mixer effects that run, on tracks audio reaches | 1081 | 1101 | `████████████████████` 98% |
+| Instrument channels with notes that play | 192 | 215 | `██████████████████░░` 89% |
+| Mixer effects that run, on tracks audio reaches | 1091 | 1111 | `████████████████████` 98% |
 | Projects saved back unchanged, byte for byte | 165 | 165 | `████████████████████` 100% |
 
 These count only what FL's own projects contain, so 100% here is not 100%
