@@ -860,6 +860,9 @@ struct State {
     mod_smooth: bool,
     /// The control tick is 8 samples and not 96 (`DQEnvBtn`, i32 0x430).
     envelope_hq: bool,
+    /// The voices run at `2^oversample` times the rate (`DQOverSelect`,
+    /// i32 0x438, 0 to 6).
+    oversample: usize,
     /// u8 0x4f6 (section 11 of the doc).
     smooth: bool,
     /// The waveshapers read between their steps (u8 0x5f18; FL also does
@@ -966,6 +969,7 @@ impl State {
             mod_y: 256,
             mod_smooth: true,
             envelope_hq: false,
+            oversample: 0,
             smooth: false,
             hq_shaper: false,
             fm: [[0.0; OPERATORS]; OPERATORS],
@@ -1054,7 +1058,9 @@ impl State {
         // 0x430 / 0x434: the envelopes' high quality while playing and
         // while rendering; 0x438 / 0x43c: the oversampling.
         state.envelope_hq = reader.i32()? != 0;
-        reader.bytes(0x440 - 0x434)?;
+        let _rendering = reader.i32()?;
+        state.oversample = reader.i32()?.clamp(0, fx::LEVELS as i32 - 1) as usize;
+        let _rendering = reader.i32()?;
         let flags = reader.bytes(4)?;
         state.mod_smooth = flags[0] != 0;
         reader.bytes(8)?;
@@ -2353,8 +2359,8 @@ impl Sytrus {
     /// Make the effects' memory for the state at the rate. This allocates.
     fn build_effects(&mut self) {
         let state = &self.state;
-        self.fx
-            .build(&state.fx, &state.wheels(), self.rate, self.tempo);
+        let rate = (self.rate, state.oversample);
+        self.fx.build(&state.fx, &state.wheels(), rate, self.tempo);
     }
 
     /// Let every voice of a note go, and their band-limited copies.
@@ -2394,20 +2400,26 @@ impl Sytrus {
     /// playing; `0x8fc9c4`), at the rate, in fours.
     fn tick_len(&self) -> f64 {
         let at = if self.state.envelope_hq { 8.0 } else { 96.0 };
-        let frames = at * f64::from(self.rate.round() as i32) / 44_100.0;
+        let frames = at * f64::from(self.voice_rate().round() as i32) / 44_100.0;
         ((frames / 4.0).round_ties_even() * 4.0).max(4.0)
+    }
+
+    /// The voices' rate: the host's, oversampled.
+    fn voice_rate(&self) -> f32 {
+        self.rate * (1u32 << self.state.oversample) as f32
     }
 
     fn timing(&self) -> Timing {
         let tick = self.tick_len();
-        let seconds = tick / f64::from(self.rate);
+        let rate = self.voice_rate();
+        let seconds = tick / f64::from(rate);
         Timing {
-            rate: self.rate,
+            rate,
             tick,
             rates: [seconds * 2.0, seconds * self.tempo / 60.0],
-            scale: (44_100.0 / f64::from(self.rate)) as f32,
-            shaper_cap: ((44_100.0 / f64::from(self.rate) * 0.001) as f32) * 10.0,
-            out_cap: (44_100.0 / f64::from(self.rate) * 0.001) as f32,
+            scale: (44_100.0 / f64::from(rate)) as f32,
+            shaper_cap: ((44_100.0 / f64::from(rate) * 0.001) as f32) * 10.0,
+            out_cap: (44_100.0 / f64::from(rate) * 0.001) as f32,
             mod_glide: 0.01f64.powf(seconds * 44_100.0 / (96.0 * 96.0)) as f32,
         }
     }
@@ -2424,7 +2436,7 @@ impl Generator for Sytrus {
         // operators that make them.
         let operators = &self.state.operators;
         self.pools = Pools {
-            tables: filter::Tables::new(self.rate),
+            tables: filter::Tables::new(self.voice_rate()),
             copies: operators
                 .iter()
                 .map(|o| {
@@ -2453,7 +2465,7 @@ impl Generator for Sytrus {
         if hz.is_finite() && hz > 0.0 {
             self.rate = hz;
             self.build_effects();
-            self.pools.tables = filter::Tables::new(hz);
+            self.pools.tables = filter::Tables::new(self.voice_rate());
         }
     }
 
@@ -2524,18 +2536,21 @@ impl Generator for Sytrus {
         }
     }
 
+    /// The voices render `2^L` frames for every frame asked for, which
+    /// the effects bring down to the rate.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
-        self.clock = self.clock.wrapping_add(len as u32);
+        let levels = self.state.oversample;
+        self.clock = self.clock.wrapping_add((len << levels) as u32);
         let timing = self.timing();
         let mut at = 0;
         while at < len {
-            let run = (len - at).min(CHUNK);
+            let run = (len - at).min(CHUNK >> levels);
             let (state, scratch) = (&self.state, &mut self.scratch[..]);
             let block = at..at + run;
             let mut ended = false;
             let sounding = self.voices.len();
-            let mut buses = self.fx.buses(run);
+            let mut buses = self.fx.buses(run << levels);
             let pools = &mut self.pools;
             self.voices.retain_mut(|voice| {
                 let over = voice.play(state, timing, scratch, &mut buses, pools);
@@ -2621,7 +2636,8 @@ impl Generator for Sytrus {
         let slowest = unison[..count].iter().map(|u| u.gain).fold(1f32, f32::min);
         let loudest = 2.0 * self.state.main_volume.max(1.0);
         let glide = f64::from(loudest / (timing.out_cap * slowest.max(0.01)));
-        frames.ceil() as usize + glide.ceil() as usize + 1 + self.fx.tail()
+        let voice_frames = frames.ceil() as usize + glide.ceil() as usize;
+        (voice_frames >> self.state.oversample) + 1 + self.fx.tail()
     }
 
     fn fidelity(&self) -> Fidelity {
@@ -2710,6 +2726,31 @@ mod tests {
         assert!(left[1000..].iter().all(|v| *v == 0.0));
         assert!(sytrus.voices.is_empty());
         assert!(sytrus.tail() > 480);
+    }
+
+    #[test]
+    fn oversampled_voices_play_the_same_note_at_the_rate() {
+        let turns = f64::from(C5 as f32) / f64::from(RATE);
+        let whole = (4096.0 * turns).round() / turns;
+        let len = whole.round() as usize;
+        for levels in [1, 3] {
+            let mut sytrus = blank();
+            sytrus.state.oversample = levels;
+            sytrus.set_sample_rate(RATE);
+            assert_eq!(sytrus.timing().rate, RATE * (1 << levels) as f32);
+            let sound = play(&mut sytrus, 60, 8192 + len);
+            let steady = &sound[8192..8192 + len];
+            let at_pitch = partial(steady, turns);
+            assert!((at_pitch - 0.707).abs() < 0.03, "{levels}: {at_pitch}");
+            assert!(partial(steady, turns * 2.0) < 0.01);
+            // The release glides as long in the host's frames.
+            sytrus.all_notes_off();
+            let (mut left, mut right) = (vec![0.0; 2048], vec![0.0; 2048]);
+            sytrus.process(&mut left, &mut right);
+            assert!(left[..100].iter().any(|v| v.abs() > 0.1));
+            assert!(left[1000..].iter().all(|v| v.abs() < 1e-4));
+            assert!(sytrus.voices.is_empty());
+        }
     }
 
     #[test]
