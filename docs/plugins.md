@@ -88,7 +88,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Drumpad | 4008 | yes | 2 | implemented in crates/plugins (state, the 38 parameters with their velocity slots, the membrane lines, mallet, LOW, MID, HIGH and SOF filters, hold, lo-fi, the 38 kHz render and its resampler exact, and every shipped state plays exact; approximated: 32 voices where FL has 99, membrane room sized per state, each instance's noise starting where FL's first does, DMP1 and DMP2 states turned down), docs/plugins/drumpad.md |
 | Generator | Fruity Granulizer | 4371 | yes | 2 | |
 | Generator | Fruity Wrapper | 5857 |  | 2 | |
-| Generator | Minisynth | 542 | yes | 2 | |
+| Generator | Minisynth | 542 | yes | 2 | implemented in crates/plugins (state, parameters, voice modes and allocation, glide, the 10 oscillator kinds on the 1024 tables built from FL's `oscdata.dat` read at runtime, dithered table reads, the 4096-step ladder and its envelopes, LFO, distortion, delay, phaser and chorus as read; approximated: the drift, dither and noise run on a seed of the instance's own where FL's is process-wide, the song position is counted from the song's start, the per-key slots take the note's pan law, fine pitch and mod X/Y as `FinalLevels` is guessed to give them), docs/plugins/minisynth.md |
 | Generator | Toxic Biohazard | 737 |  | 2 | |
 | Generator | Wave Traveller | 4369 | yes | 2 | |
 | Effect | Emphasizer | 3688 |  | 1 | |

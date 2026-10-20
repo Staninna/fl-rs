@@ -72,6 +72,7 @@ pub mod love_philter;
 pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
+pub mod minisynth;
 pub mod multiband_compressor;
 pub mod ogun;
 pub mod panomatic;
