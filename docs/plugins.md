@@ -103,7 +103,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Vocoder | 3725 | yes | 1 | |
 | Effect | Fruity dB Meter | 3576 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` keeps the peaks and copies the block with `ippsCopy_64s`; the meter is left out), docs/plugins/fruity-db-meter.md |
 | Effect | Razer Chroma | 3952 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` reads the block for the keyboard lights and copies it with `ippsCopy_64s`; the lights are left out), docs/plugins/razer-chroma.md |
-| Effect | Vintage Phaser | 3880 |  | 1 | |
+| Effect | Vintage Phaser | 3880 |  | 1 | implemented in crates/plugins (the engine_x64.dll phaser, both engines, the upsampler, halfbands, hiss, gate and delay, the same to the bit as the DLL run under an emulator but for an ULP of the sine LFO's sinf; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-phaser.md |
 | Generator | BeepMap | 4186 | yes | 1 | |
 | Generator | Drumaxx | 4319 | yes | 1 | |
 | Generator | Fruity DrumSynth Live | 1062 |  | 1 | |
