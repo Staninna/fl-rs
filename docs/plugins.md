@@ -70,7 +70,7 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
 | Effect | Fruity Phaser | 3622 | yes | 3 | |
-| Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its two controller outputs are not driven, so the 60 corpus links from it in 3 projects play nothing, and it says so as approximated), docs/plugins/fruity-x-y-controller.md |
+| Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, `FPF_NoProcess`; state, the ten parameters, speed and acceleration at the song's PPQ, the point's motion each tick, tension, min and max and the two outputs exact, with Rust's `ln`, `exp`, `atan` and `sin_cos` for Delphi's; a loaded pad starts at its levels, inferred from FL ticking while stopped; the joystick input left out, none in the corpus), docs/plugins/fruity-x-y-controller.md |
 | Effect | Low Lifter | 3704 | yes | 3 | |
 | Generator | BassDrum | 3973 | yes | 3 | implemented in crates/plugins (oscillator table and noise sample read from FL's data at runtime), docs/plugins/bassdrum.md |
 | Generator | BooBass | 3599 | yes | 3 | implemented in crates/plugins (samples read from FL's BooBass_Eng_x64.dll at runtime), docs/plugins/boobass.md |
