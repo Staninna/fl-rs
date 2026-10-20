@@ -847,6 +847,7 @@ mod tests {
             "fruity wrapper",
             // Counted in their own tests.
             "control surface",
+            "fruity formula controller",
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
             "zgameeditor visualizer",
