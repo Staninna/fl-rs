@@ -1007,6 +1007,121 @@ fn an_insert_panned_left_silences_the_right_side() {
     assert_eq!(out.right[0], 1.0);
 }
 
+const SEPARATION: u32 = 0x1FC2;
+const EQ_GAIN: u32 = 0x1FD0;
+const EQ_FREQUENCY: u32 = 0x1FD8;
+const EQ_WIDTH: u32 = 0x1FE0;
+
+/// Set the flags word of an insert's 236: bit 3 is on, bit 0 reverses the
+/// polarity and bit 1 swaps the sides.
+fn flags(project: &mut Project, insert: usize, bits: u32) {
+    project.inserts[insert].flags.as_mut().unwrap().flags = bits;
+}
+
+#[test]
+fn an_insert_s_polarity_turns_it_over_and_its_swap_trades_its_sides() {
+    let dir = Dir::new("insert-flags");
+    let mut reversed = one_click();
+    flags(&mut reversed, 1, 0b1001);
+    let out = render(&reversed, &dir);
+    assert_impulses(&out.left, &[0]);
+    assert_eq!((out.left[0], out.right[0]), (-1.0, -1.0));
+
+    // Panned all the way left and swapped, the click is on the right.
+    let mut swapped = one_click();
+    set(&mut swapped, 1, PAN, -6400);
+    flags(&mut swapped, 1, 0b1010);
+    let out = render(&swapped, &dir);
+    assert!(out.left.iter().all(|v| *v == 0.0));
+    assert_eq!(out.right[0], 1.0);
+    flags(&mut swapped, 1, 0b1011);
+    assert_eq!(render(&swapped, &dir).right[0], -1.0);
+
+    // On FL's curves the swap trades what the pan feeds across too: all
+    // of both inputs at -3 dB goes right.
+    let exact = render_exact(&swapped, &dir);
+    let level = (new_channel() / SQRT_2) as f32;
+    assert_gains(
+        &exact,
+        0,
+        (0.0, -2.0 * level * std::f32::consts::FRAC_1_SQRT_2),
+    );
+
+    // A switched off insert stays silent whatever its other bits say.
+    flags(&mut swapped, 1, 0b0011);
+    assert!(render(&swapped, &dir).right.iter().all(|v| *v == 0.0));
+}
+
+/// The mixer fixture with the click on the left alone, on its way to the
+/// master through insert 2.
+fn left_through_2() -> Project {
+    let mut left = one_click();
+    set(&mut left, 1, PAN, -6400);
+    route(&mut left, 1, &[2]);
+    left
+}
+
+#[test]
+fn stereo_separation_merges_above_0_and_separates_below() {
+    let dir = Dir::new("insert-separation");
+    let out = render(&left_through_2(), &dir);
+    assert_eq!((out.left[0], out.right[0]), (1.0, 0.0));
+
+    // All the way merged, each side is the mean of the two.
+    let mut merged = left_through_2();
+    set(&mut merged, 2, SEPARATION, 64);
+    let out = render(&merged, &dir);
+    assert_eq!((out.left[0], out.right[0]), (0.5, 0.5));
+    // All the way separated, each side is its own at 1.5 less the other's
+    // at 0.5.
+    let mut separated = left_through_2();
+    set(&mut separated, 2, SEPARATION, -64);
+    let out = render(&separated, &dir);
+    assert_eq!((out.left[0], out.right[0]), (1.5, -0.5));
+    // Half way merged is (5^0.5 - 1) / 4 of the way, not half of it.
+    let mut half = left_through_2();
+    set(&mut half, 2, SEPARATION, 32);
+    let out = render(&half, &dir);
+    let across = (5f32.sqrt() - 1.0) / 8.0;
+    assert!((out.right[0] - across).abs() < 1e-6, "{}", out.right[0]);
+    assert!((out.left[0] - (1.0 - across)).abs() < 1e-6);
+    // A sound alike on both sides has nothing to merge or separate.
+    let mut centred = one_click();
+    set(&mut centred, 1, SEPARATION, -40);
+    let out = render(&centred, &dir);
+    assert!((out.left[0] - 1.0).abs() < 1e-6 && (out.right[0] - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn an_insert_s_eq_shapes_its_bus_and_does_nothing_at_0_db() {
+    let dir = Dir::new("insert-eq");
+    // Bands without a gain run nothing, wherever they are set.
+    let mut flat = one_click();
+    set(&mut flat, 1, EQ_FREQUENCY, 20_000);
+    set(&mut flat, 1, EQ_WIDTH + 1, 60_000);
+    let out = render(&flat, &dir);
+    assert_impulses(&out.left, &[0]);
+    assert_eq!((out.left[0], out.right[0]), (1.0, 1.0));
+
+    // A low shelf 18 dB up lifts what is under it 18 dB: the click's
+    // response sums to 10^(18/20).
+    let mut low = one_click();
+    set(&mut low, 1, EQ_GAIN, 1800);
+    let out = render(&low, &dir);
+    assert_eq!(out.left, out.right);
+    let dc = out.left.iter().map(|v| f64::from(*v)).sum::<f64>();
+    assert!((dc - 10f64.powf(0.9)).abs() < 1e-3, "{dc}");
+    // A peak and a high shelf leave the bottom where it was, and the high
+    // shelf 18 dB down takes most of the click's first sample.
+    let mut high = one_click();
+    set(&mut high, 1, EQ_GAIN + 1, 1200);
+    set(&mut high, 1, EQ_GAIN + 2, -1800);
+    let out = render(&high, &dir);
+    let dc = out.left.iter().map(|v| f64::from(*v)).sum::<f64>();
+    assert!((dc - 1.0).abs() < 1e-3, "{dc}");
+    assert!(out.left[0] < 0.5);
+}
+
 #[test]
 fn a_route_carries_an_insert_through_another_to_the_master() {
     let dir = Dir::new("route");
@@ -2318,16 +2433,16 @@ fn a_clip_bound_to_nothing_the_engine_plays_is_counted() {
     let out = render(&unbound, &dir);
     assert_eq!((out.automation_clips, out.unsupported_targets), (0, 0));
 
-    // Links to a plugin parameter of channel 0, to insert 1's stereo
-    // separation and to the main volume: three controls the engine does
-    // not play. The mix level of a slot of insert 1 that holds no plugin
-    // changes nothing, and is not counted.
+    // Links to a plugin parameter of channel 0, to a fourth EQ band of
+    // insert 1, which it has not, and to the main volume: three controls
+    // the engine does not play. The mix level of a slot of insert 1 that
+    // holds no plugin changes nothing, and is not counted.
     let mut bound = base();
     let clip = add_automation(&mut bound, &line, FULL);
     for target in [
         0x8003,
         insert_control(1, 0x1F01) + (2 << 16),
-        insert_control(1, 0x1FC2),
+        insert_control(1, 0x1FD3),
         MAIN_VOLUME,
     ] {
         bind(&mut bound, clip, target);
@@ -4261,4 +4376,47 @@ fn panomatic_pans_and_scales_what_plays_into_its_insert() {
     let out = render(&moving, &dir);
     let said: Vec<_> = out.approximated_slots.iter().collect();
     assert_eq!(said, [(&"PanOMatic LFO rate at non-44.1k", &1)]);
+}
+
+#[test]
+fn clips_drive_an_insert_s_separation_and_eq() {
+    let dir = Dir::new("automation-separation-eq");
+    dir.tone(3 * 96_000);
+    // The tone on the left alone, through insert 2, whose separation a
+    // clip holds all the way merged over the first bar. A clip's whole
+    // range is the control's -64 to 64.
+    let mut merged = tone(BAR + 2 * BEAT);
+    set(&mut merged, 1, PAN, -6400);
+    route(&mut merged, 1, &[2]);
+    let hold = add_automation(
+        &mut merged,
+        &[Point::new(0.0, 1.0), Point::new(4.0, 1.0)],
+        FULL,
+    );
+    bind(&mut merged, hold, insert_control(2, SEPARATION));
+    place(&mut merged, hold, 0, BAR);
+    let out = render(&merged, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    assert_eq!((out.left[1000], out.right[1000]), (0.5, 0.5));
+
+    // A clip that holds the low shelf of insert 1 at the top of its range,
+    // 18 dB, lifts the tone, which is all bottom, by as much once the
+    // shelf has settled.
+    let mut lifted = tone(BAR + 2 * BEAT);
+    let hold = add_automation(
+        &mut lifted,
+        &[Point::new(0.0, 1.0), Point::new(4.0, 1.0)],
+        FULL,
+    );
+    bind(&mut lifted, hold, insert_control(1, EQ_GAIN));
+    place(&mut lifted, hold, 0, BAR);
+    let out = render(&lifted, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    let want = 10f32.powf(0.9);
+    assert!(
+        (out.left[40_000] - want).abs() < 1e-3,
+        "{}",
+        out.left[40_000]
+    );
+    assert_eq!(out.left[40_000], out.right[40_000]);
 }
