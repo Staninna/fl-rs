@@ -111,7 +111,7 @@ Corpus render at `fd911a4`: 119 of 165 shipped projects have sound with the stoc
 | Generator | Fruity Voltage Controller | 3992 | yes | 1 | |
 | Generator | PoiZone | 3867 | yes | 1 | |
 | Effect | FL Studio Mobile Rack FX | 8036 |  | 0 | |
-| Effect | Fruity 7 Band EQ | 3584 |  | 0 | |
+| Effect | Fruity 7 Band EQ | 3584 |  | 0 | implemented in crates/plugins (exact: the shelves and peaks designed at 44100 Hz whatever the rate, as FL's are, float coefficients, the x87 kernel's double precision sum and its flush under 2^-24, the 48-block tail of a band at 0 dB), docs/plugins/fruity-7-band-eq.md |
 | Effect | Fruity Big Clock | 3514 |  | 0 | |
 | Effect | Fruity Center | 3504 | yes | 0 | implemented in crates/plugins (exact: the follower `v += (x - y) a; y += v; v *= 0.96` per side in doubles, its pace `4.567e-6 * 44100 / rate` as a single, the state under 2^-24 cleared after each block; its render test sits inside a Fruity Wrapper), docs/plugins/fruity-center.md |
 | Effect | Fruity LSD | 4398 |  | 0 | |
