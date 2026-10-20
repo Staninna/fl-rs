@@ -79,6 +79,7 @@ mod harmor_state;
 pub mod html_notebook;
 pub mod hyper_chorus;
 pub mod limiter;
+mod linear_phase;
 pub mod love_philter;
 pub mod luxeverb;
 pub mod maximus;
