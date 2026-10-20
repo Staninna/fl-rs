@@ -39,12 +39,14 @@
 //! - The other four envelopes, the LFOs and the attack, hold and decay of
 //!   the volume envelope are read and not run, and fidelity says so when a
 //!   state has them other than as FL leaves them.
-//! - FL's resampler is not read: a 4-point Hermite curve stands in between
-//!   frames.
+//! - The player is FL's interpolator ([`dsp::interpolator`]) on the
+//!   slice's frames alone, at the quality the host asks for, taken to be
+//!   FL's default render quality (`sampler::RENDER_POINTS`).
 
 use crate::menvelope::Reader;
 use crate::sampler::{self, Bank, Wave};
 use crate::{Fidelity, Generator, NoteOn, SampleFile, StateError};
+use dsp::interpolator::Interpolator;
 use std::f64::consts::PI;
 
 /// The plugin's event 201 name.
@@ -88,9 +90,13 @@ struct Region {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Voice {
     note: u32,
+    /// The slice's first frame: FL's player is given the frames from it
+    /// to `stop` alone.
+    start: usize,
     pos: f64,
     stop: f64,
     step: f64,
+    reader: Interpolator,
     gains: (f32, f32),
     /// Where the release is: 1 at the note off, 0 when it is down. `None`
     /// while the note is held.
@@ -669,9 +675,11 @@ impl Generator for FruitySlicer {
         }
         self.voices.push(Voice {
             note: note.voice,
+            start: region.start,
             pos: region.start as f64,
             stop: (region.start + len) as f64,
             step,
+            reader: sampler::reader(step),
             gains: sampler::circular(note.pan, note.velocity),
             release: None,
             declick: None,
@@ -735,7 +743,8 @@ impl Generator for FruitySlicer {
                     }
                     gain *= (*done as f64 * dk_step).cos().mul_add(0.5, 0.5);
                 }
-                let (l, r) = wave.frame(voice.pos);
+                let region = voice.start..voice.stop as usize;
+                let (l, r) = wave.read_in(region, voice.pos - voice.start as f64, &voice.reader);
                 left[n] += l * voice.gains.0 * gain as f32;
                 right[n] += r * voice.gains.1 * gain as f32;
                 voice.pos += voice.step;
@@ -781,11 +790,6 @@ impl Generator for FruitySlicer {
         if self.articulated() {
             return Fidelity::Approximate(
                 "Fruity Slicer: its envelopes and LFOs are left out but for the volume release",
-            );
-        }
-        if self.bank.resampled(self.rate) {
-            return Fidelity::Approximate(
-                "Fruity Slicer: a Hermite curve stands in for FL's resampler",
             );
         }
         if self.release().is_some() {
