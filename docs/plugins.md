@@ -96,7 +96,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Delay | 3685 |  | 1 | implemented in crates/plugins (exact: tempo-synced ring, the three modes, the feedback low pass in f64 as FL's SSE loops keep it, both ramps with the renderer's cap; the input-add routine is taken to be Balance's; no render test, unit tests only), docs/plugins/fruity-delay.md |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
 | Effect | Fruity HTML NoteBook | 3835 |  | 1 | |
-| Effect | Fruity Reeverb | 3627 | yes | 1 | |
+| Effect | Fruity Reeverb | 3627 | yes | 1 | implemented in crates/plugins (exact: the plate's twelve lines, taps, cuts, colour shelf and damping as the render reads them, in f32 with FL's 1e-30 fill), docs/plugins/fruity-reeverb.md |
 | Effect | Fruity Scratcher | 4172 | yes | 1 | |
 | Effect | Fruity Send | 3621 | yes | 1 | implemented in crates/plugins (pan matrix, knob curves and the send to the chosen insert through the host's output buffer, as Stereo Shaper's difference goes; the send's mixing routine is not read and is taken to be Balance's), docs/plugins/fruity-send.md |
 | Effect | Fruity Squeeze | 3736 | yes | 1 | |
