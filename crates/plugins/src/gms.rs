@@ -1416,20 +1416,31 @@ impl Generator for Gms {
         self.restart();
     }
 
-    /// The release from full to under 0.0001, and what the delay and the
-    /// reverb hold after it.
+    /// The release from full to under 0.0001, then what the delay's
+    /// feedback and the reverb's decay hold after it.
     fn tail(&self) -> usize {
         let r = (f64::from(self.get(7)) * 0.55 + 0.1) as f32;
         let coef = 8.82 / ((f64::from(r * r * r * 25.0) + 0.001) * self.rate);
         let release = (1e-4f64).ln() / (1.0 - coef.min(0.5)).ln();
-        let mut seconds = 0.5;
+        let mut seconds = 0.1;
         if self.get(147 + DELAY) != 0.0 {
-            seconds += 1.5 * 8.0;
+            let mut length = f64::from(beats(self.get(137 + DELAY)));
+            if self.get(167 + DELAY) != 0.0 {
+                length *= 4.0;
+            }
+            let time = (length * 60.0 / self.tempo.max(1.0) * 0.666_666_7).clamp(0.01, 0.99) * 1.5;
+            let x = f64::from(self.get(117 + DELAY));
+            let laps = if x * x > 1e-3 {
+                ((1e-4f64).ln() / (x * x).ln()).clamp(1.0, 40.0)
+            } else {
+                1.0
+            };
+            seconds += time * (laps + 1.0);
         }
         if self.get(147 + REVERB) != 0.0 {
             let x = self.get(117 + REVERB);
-            let rt = ((x * x * x * 0.75 * 199.0 + 1.5).floor() * 0.1) as f64;
-            seconds += rt;
+            let decay = (x * x * x * 0.75 * 199.0 + 1.5).floor() * 0.1;
+            seconds += f64::from(decay) * 1.4;
         }
         (release + seconds * self.rate).ceil() as usize
     }
