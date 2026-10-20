@@ -6,7 +6,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
-| Effect | Fruity Parametric EQ 2 | 3942 | yes | 54 | implemented in crates/plugins (cookbook path and both 2x resamplers exact; HQ matched and linear phase approximated), docs/plugins/fruity-parametric-eq-2.md |
+| Effect | Fruity Parametric EQ 2 | 3942 | yes | 54 | implemented in crates/plugins (cookbook and matched HQ filters and both 2x resamplers exact; linear phase approximated), docs/plugins/fruity-parametric-eq-2.md |
 | Effect | Fruity Limiter | 3777 | yes | 52 | implemented in crates/plugins, docs/plugins/fruity-limiter.md |
 | Effect | Maximus | 5766 | yes | 40 | implemented in crates/plugins (IIR and FIR crossovers, curves, detectors, saturators and low cut exact; 2x oversampling and the linear-phase crossover approximated), docs/plugins/maximus.md |
 | Generator | 3x Osc | 4247 | yes | 39 | implemented in crates/plugins (HQ tables approximated), docs/plugins/3x-osc.md |

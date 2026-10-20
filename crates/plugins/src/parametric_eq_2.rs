@@ -40,20 +40,20 @@
 //! 176 tap FIR going down, 44 frames late
 //! (`crate::parametric_eq_2_engine`).
 //!
-//! Two things a state can ask for are stood in for, and
-//! [`Effect::fidelity`] says which one a state has:
+//! HQ in its second mode asks the engine for matched filters in place of
+//! the cookbook's, fitted to the analog curve up to Nyquist, at the
+//! project's rate (`crate::parametric_eq_2_engine`).
 //!
-//! - HQ in its second mode, "matched" filters that the doc does not give
-//!   in closed form, runs the cookbook filters at the project's rate. They
-//!   differ from the matched ones near the top of the band.
-//! - Linear phase runs the same filters as they are: the same gains with
-//!   another phase, and no delay.
+//! One thing a state can ask for is stood in for, and
+//! [`Effect::fidelity`] says when a state has it: linear phase runs the
+//! same filters as they are, the same gains with another phase and no
+//! delay.
 //!
 //! The parameter smoothing of version 7 on is not here either: a moved
 //! parameter counts at once, as it does in FL with the smoothing off, and
 //! every state FL's own projects hold has it off.
 
-use crate::parametric_eq_2_engine::{Decimator, RESAMPLER_LATENCY, TAPS, half_band};
+use crate::parametric_eq_2_engine::{self, Decimator, Matched, RESAMPLER_LATENCY, TAPS, half_band};
 use crate::parts::Matrix;
 use crate::{Effect, Fidelity, StateError, knob_value, read_state, state_version};
 use dsp::biquad::{Biquad64, Coefficients64, bandwidth_alpha, shelf_beta};
@@ -223,12 +223,14 @@ impl Knobs {
         self.order.unsigned_abs() as usize + 1
     }
 
-    /// The filters of a band that is not off, for a rate in Hz. The ones
-    /// past [`Knobs::count`] pass their input on.
+    /// The filters of a band that is not off, for a rate in Hz: the
+    /// cookbook's, or with `matched` the engine's matched ones
+    /// (`FUN_006ee6e0` into `FUN_006f1c80`). The ones past
+    /// [`Knobs::count`] pass their input on.
     ///
     /// FL holds the level, the frequency and the width as floats, and
     /// comes back to a float here and there on the way. So does this.
-    fn design(&self, rate: f64) -> [Coefficients64; 4] {
+    fn design(&self, rate: f64, matched: bool) -> [Coefficients64; 4] {
         let n = self.count();
         let row = n - 1;
         let steep = self.order < 0;
@@ -242,6 +244,14 @@ impl Knobs {
             let w0 = (f64::from(hz) * step).min(top);
             (w0, w0.sin(), w0.cos())
         };
+        // What the engine takes: the frequency over half the rate, the Q
+        // and the gain, each as a float. The frequency is not held under
+        // a top here.
+        let engine = |kind: Matched, hz: f64, q: f64, db: f64| {
+            parametric_eq_2_engine::matched(kind, ((hz / rate) * 2.0) as f32, q as f32, db as f32)
+        };
+        // The Q of a width in octaves: `1 / (2 sinh(ln 2 / 2 BW))`.
+        let octave_q = |octaves: f64| 1.0 / ((LN_2 / 2.0 * octaves).sinh() * 2.0);
 
         std::array::from_fn(|i| {
             if i >= n {
@@ -257,6 +267,14 @@ impl Knobs {
                     if steep {
                         q *= f64::from(STEEP_Q[row][i]);
                     }
+                    if matched {
+                        let kind = if self.kind == LOW_PASS {
+                            Matched::LowPass
+                        } else {
+                            Matched::HighPass
+                        };
+                        return engine(kind, f64::from(hz), q * FRAC_1_SQRT_2, f64::from(db));
+                    }
                     let alpha = sin * FRAC_1_SQRT_2 / q;
                     if self.kind == LOW_PASS {
                         Coefficients64::low_pass(cos, alpha)
@@ -268,18 +286,27 @@ impl Knobs {
                     let (w0, _, cos) = corner(hz, TOP);
                     if self.kind == BAND_PASS {
                         let wide = octaves(width) * f64::from(spread(n));
+                        if matched {
+                            let q = octave_q(wide);
+                            return engine(Matched::BandPass, f64::from(hz), q, f64::from(db));
+                        }
                         Coefficients64::band_pass(cos, bandwidth_alpha(w0, wide))
                     } else {
                         let narrow = octaves(width) * f64::from(1.0 / spread(n));
+                        if matched {
+                            let q = octave_q(narrow);
+                            return engine(Matched::Notch, f64::from(hz), q, f64::from(db));
+                        }
                         Coefficients64::notch(cos, bandwidth_alpha(w0, narrow))
                     }
                 }
                 PEAK => {
                     let (mut w0, _, mut cos) = corner(hz, TOP_PEAK);
                     let mut wide = octaves(width);
+                    let mut centre = f64::from(hz);
                     let amplitude = if steep {
                         let off = f64::from(STEEP_OFFSET[row][i]) * wide * f64::from(share);
-                        let centre = f64::from(hz) * (off * LN_2).exp();
+                        centre = f64::from(hz) * (off * LN_2).exp();
                         wide = wide * f64::from(share) * f64::from(STEEP_WIDTH[row][i]);
                         (w0, _, cos) = corner(centre as f32, TOP_STEEP_PEAK);
                         let mut part = f64::from(STEEP_GAIN[row]);
@@ -290,6 +317,11 @@ impl Knobs {
                     } else {
                         f64::from(db) * f64::from(share) * 0.5
                     };
+                    if matched {
+                        // The level the filter has at its centre, twice
+                        // the amplitude's.
+                        return engine(Matched::Peak, centre, octave_q(wide), amplitude * 2.0);
+                    }
                     let a = f64::from(f64::from(amplitude as f32 * LN10_20).exp() as f32);
                     Coefficients64::peak(cos, bandwidth_alpha(w0, wide), a)
                 }
@@ -299,6 +331,15 @@ impl Knobs {
                     let mut slope = shelf_slope(width);
                     if steep {
                         slope *= f64::from(STEEP_SLOPE[row][i]);
+                    }
+                    if matched {
+                        let kind = if self.kind == LOW_SHELF {
+                            Matched::LowShelf
+                        } else {
+                            Matched::HighShelf
+                        };
+                        let q = 1.0 / ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).sqrt();
+                        return engine(kind, f64::from(hz), q, f64::from(db * share));
                     }
                     let beta_sin = shelf_beta(a, slope) * sin;
                     if self.kind == LOW_SHELF {
@@ -536,6 +577,11 @@ impl ParametricEq2 {
         self.hq && self.mode == 0
     }
 
+    /// Whether the bands are the engine's matched filters.
+    fn matched(&self) -> bool {
+        self.hq && self.mode == 1
+    }
+
     /// Whether they get there by the engine's resampler.
     fn by_engine(&self) -> bool {
         self.oversampled() && self.engine_resampler
@@ -565,10 +611,12 @@ impl ParametricEq2 {
     fn design(&mut self, band: usize) {
         let knobs = self.knobs(band);
         let rate = self.band_rate();
+        let matched = self.matched();
         let band = &mut self.bands[band];
         band.count = knobs.count();
         if knobs.kind == OFF {
             band.tail = 0;
+            band.filters = [Coefficients64::IDENTITY; 4];
             return;
         }
         // A peak or a shelf with no gain rings out and then drops out.
@@ -577,7 +625,7 @@ impl ParametricEq2 {
         } else {
             -1
         };
-        band.filters = knobs.design(f64::from(rate));
+        band.filters = knobs.design(f64::from(rate), matched);
     }
 
     fn design_all(&mut self) {
@@ -787,13 +835,11 @@ impl Effect for ParametricEq2 {
         self.design(band);
     }
 
-    /// With no band that changes the sound, the matched filters and
-    /// linear phase have nothing to differ in.
+    /// With no band that changes the sound, linear phase has nothing to
+    /// differ in.
     fn fidelity(&self) -> Fidelity {
         if self.linear_phase && self.shapes() {
             Fidelity::Approximate("linear phase runs as the same filters with their own phase")
-        } else if self.hq && self.mode == 1 && self.shapes() {
-            Fidelity::Approximate("the matched HQ filters run as the cookbook ones")
         } else {
             Fidelity::Exact
         }
@@ -913,6 +959,17 @@ mod tests {
         20.0 * response(&num, &den, hz / rate).log10()
     }
 
+    /// The gain in dB of the analog peak at `hz`: `(s^2 + s A/Q + 1) /
+    /// (s^2 + s/(A Q) + 1)` with `A = 10^(dB / 40)`.
+    fn analog_peak(centre: f64, q: f64, db: f64, hz: f64) -> f64 {
+        let a = 10f64.powf(db / 40.0);
+        let w = hz / centre;
+        let real = (1.0 - w * w) * (1.0 - w * w);
+        let num = real + (w * a / q) * (w * a / q);
+        let den = real + (w / (a * q)) * (w / (a * q));
+        10.0 * (num / den).log10()
+    }
+
     /// A signal with a bit of everything in it.
     fn noise(len: usize) -> Vec<f32> {
         let mut seed = 0x2545_f491u32;
@@ -975,7 +1032,7 @@ mod tests {
         let params = one_band(PEAK, 1_000.0, 600, 25412, 0);
         let centre = f64::from(hertz(params[FREQ]));
         assert!((centre - 1_000.0).abs() < 0.1);
-        for (flags, rate) in [(PLAIN, 44_100.0), (TWICE, 88_200.0), (MATCHED, 44_100.0)] {
+        for (flags, rate) in [(PLAIN, 44_100.0), (TWICE, 88_200.0)] {
             let mut plugin = eq(&params, flags);
             let at = |hz: usize| measured(&mut eq(&params, flags), hz);
             let (low, mid, high) = (at(100), measured(&mut plugin, 1_000), at(10_000));
@@ -994,6 +1051,16 @@ mod tests {
         let plain = measured(&mut eq(&params, PLAIN), 10_000);
         let twice = measured(&mut eq(&params, TWICE), 10_000);
         assert!(twice > plain + 0.01, "{twice} against {plain}");
+        // The matched filter is the analog peak at the rate, with no
+        // squeeze to speak of: within 0.02 dB of it from 100 Hz to
+        // 15 kHz.
+        let q = 1.0 / ((LN_2 / 2.0 * 2.0f64).sinh() * 2.0);
+        for hz in [100, 1_000, 4_000, 10_000, 15_000] {
+            let got = measured(&mut eq(&params, MATCHED), hz);
+            let want = analog_peak(centre, q, 6.0, hz as f64);
+            assert!((got - want).abs() < 0.02, "{hz} Hz: {got} and not {want}");
+        }
+        assert!(plain < analog_peak(centre, q, 6.0, 10_000.0) - 0.02);
 
         // A cut is the boost upside down.
         let cut = one_band(PEAK, 1_000.0, -600, 25412, 0);
@@ -1283,12 +1350,10 @@ mod tests {
         for flags in [PLAIN, TWICE, 2] {
             assert_eq!(eq(&peak, flags).fidelity(), Fidelity::Exact, "{flags}");
         }
-        // The matched filters are not, where a band does something.
-        assert!(note(&eq(&peak, MATCHED)).contains("matched"));
+        // So are the engine's matched ones.
+        assert_eq!(eq(&peak, MATCHED).fidelity(), Fidelity::Exact);
         assert_eq!(eq(&flat, MATCHED).fidelity(), Fidelity::Exact);
-        let off = saved(8, &peak, MATCHED, 0x40, 0x7e);
-        assert_eq!(with(&off).fidelity(), Fidelity::Exact);
-        // Nor is linear phase.
+        // Linear phase is not, where a band does something.
         let linear =
             |params: &[i32; PARAMS], flags: i32| with(&saved(8, params, flags, 0x41, 0x7f));
         assert!(note(&linear(&peak, PLAIN)).contains("linear phase"));
@@ -1301,16 +1366,19 @@ mod tests {
         assert_eq!(engine(&flat, TWICE).fidelity(), Fidelity::Exact);
         assert_eq!(engine(&peak, TWICE).fidelity(), Fidelity::Exact);
         assert_eq!(engine(&peak, PLAIN).fidelity(), Fidelity::Exact);
-        assert!(note(&engine(&peak, MATCHED)).contains("matched"));
+        assert_eq!(engine(&peak, MATCHED).fidelity(), Fidelity::Exact);
         // A moved level changes what is said.
-        let mut plugin = eq(&flat, MATCHED);
+        let mut plugin = with(&saved(8, &flat, PLAIN, 0x41, 0x7f));
         plugin.set_param(2, 150.0);
-        assert!(note(&plugin).contains("matched"));
+        assert!(note(&plugin).contains("linear phase"));
+        let off = saved(8, &peak, PLAIN, 0x41, 0x7e);
+        assert_eq!(with(&off).fidelity(), Fidelity::Exact);
 
-        // The stand-ins sound as the cookbook filters at the rate do.
+        // The stand-in sounds as the filters it is made of do.
         let want = measured(&mut eq(&peak, PLAIN), 2_000);
-        assert_eq!(measured(&mut eq(&peak, MATCHED), 2_000), want);
         assert_eq!(measured(&mut linear(&peak, PLAIN), 2_000), want);
+        let want = measured(&mut eq(&peak, MATCHED), 2_000);
+        assert_eq!(measured(&mut linear(&peak, MATCHED), 2_000), want);
         // The two resamplers pass 2 kHz alike, to a hundredth of a dB.
         let twice = measured(&mut eq(&peak, TWICE), 2_000);
         let by_engine = measured(&mut engine(&peak, TWICE), 2_000);
@@ -1643,10 +1711,8 @@ mod tests {
         assert_eq!((kick.spare()[0], kick.spare()[KIND]), (-430, HIGH_PASS));
         assert!((measured(&mut kick, 48) - 2.6).abs() < 0.1);
         // "Old Telephone" and its like ask for the matched filters.
-        assert!(matches!(
-            load("Old Telephone").fidelity(),
-            Fidelity::Approximate(_)
-        ));
+        let telephone = load("Old Telephone");
+        assert!(telephone.matched() && telephone.fidelity() == Fidelity::Exact);
     }
 
     #[test]
@@ -1679,12 +1745,12 @@ mod tests {
             *counts.entry((asks, exact)).or_insert(0) += 1;
             total += 1;
         }
-        // 1071 of the 1138 are FL's own filters, and 67 are stood in for.
+        // 1130 of the 1138 are FL's own filters, and the 8 with linear
+        // phase are stood in for.
         let want = [
             (("engine resampler", true), 204),
             (("linear phase", false), 8),
-            (("matched", false), 59),
-            (("matched", true), 2),
+            (("matched", true), 61),
             (("the rate", true), 274),
             (("twice the rate", true), 591),
         ];
