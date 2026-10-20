@@ -51,6 +51,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::fast_lp::NAME, Port::Exact),
     (crate::filter::NAME, Port::Exact),
     (crate::fl_keys::NAME, Port::Gaps),
+    (crate::fl_slayer::NAME, Port::Gaps),
     (crate::flanger::NAME, Port::Exact),
     (crate::flangus::NAME, Port::Exact),
     (crate::fpc::NAME, Port::Gaps),
