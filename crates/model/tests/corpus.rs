@@ -611,7 +611,9 @@ fn automation_clips_read_as_the_automation_doc_says() {
     );
     eprintln!("automation: the LFO is on in {lfos:?}");
     assert_eq!((clips, points, lfos.len()), (1105, 9785, 3));
-    assert_eq!((bindings, unbound, ranged), (1322, 36, 117));
+    // 117 to a volume, a pan, a send level or the tempo, and 93 to a
+    // channel's pitch, pan offset or volume multiplier.
+    assert_eq!((bindings, unbound, ranged), (1322, 36, 210));
     assert_eq!((on_insert, on_channel, on_tempo), (820, 495, 7));
     assert_eq!((items, trimmed, off_length), (5462, 3104, 1));
 }

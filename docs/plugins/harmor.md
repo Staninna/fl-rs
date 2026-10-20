@@ -472,11 +472,35 @@ ProcessParam case unless marked; "direct" means the DSP reads the stored int.
 See the decoder above. The corpus has no articulator knob slot set in the
 param array (they live in the curve streams) and 18 smoothing values set.
 
+Ranges (`FUN_00879380` hands `ProcessParam` the control, whose Min and Max
+REC_FromMIDI rescales by): a knob's control is `form+0x2848 + 8 j`, the
+envelope editor's `EnvAttWheel`, `EnvDecWheel`, `EnvSusWheel`,
+`EnvRelWheel`, `LFOSpeedWheel`, `LFOTensionWheel`, `LFOSkewWheel` and
+`LFOPWWheel` (Tags 0..7): 0..256, 0..256, -128..128, 0..256, 512..65536,
+-128..128, -128..128, -112..112. A smoothing's is `form+0x758`,
+`ArtSmoothWheel` 0..1001. A knob is read from and stored into the
+articulator's `TMEnvelope` (+0x98 + 4 j, then `FUN_007a2c10`) or `TMLFO`
+(+0xd0 + 4 (j - 4), then its vmt+0x40), not the param array; a smoothing
+into the array (this+0x138 + 4 i, then `FUN_008980b0`). The code
+(`Harmor::set_param`, `harmor_state::KNOB_RANGES`) does the same; a moved
+envelope knob is heard by the voices that start after it.
+
 ### 2.3 Global parameters (REC 772..824, at this+0xd48)
 
 The loader copies them raw and re-applies them through ProcessParam;
 distortion params act at once, reverb, chorus and delay params set a dirty
 flag that the next block applies (`FUN_00891280`).
+
+Every global's range is its control's (`form+0xe80 + 8 i`), in
+`harmor_state::GLOBAL_RANGES`; a box is 0..1, `StrumModeSelect` 0..3,
+`DelModeSelect` 0..2. Distortion: drive 0..1000, asymmetry -500..500, out
+0..2000, mix -1000..1000, cutoff 500..1100. Reverb: low cut 0..1000, high
+cut and damping 400..1050, predelay -384..384, room 1..100, diffusion
+0..100, decay 0..900, colour 0..4, volume -1000..1000. Chorus: order 0..9,
+depth and speed 0..1024, delay and spread 0..128, cross -128..128, wet
+-1000..1000. Delay: feedback 0..1000, time -384..384, offset -512..512,
+volume -1000..1000, pan -128..128, low cut 0..1000, high cut 400..1050.
+Compression: volume 0..1000, low, mid and high 0..2000.
 
 | REC | Tag / control | range (default) | conversion -> field | corpus (100) |
 |---|---|---|---|---|
@@ -1388,7 +1412,7 @@ and unison; with steps 9 to 13 the shared FX cover most states; steps 14 to
 |---|---|---|
 | 1 | parser | built: all 100 corpus states and 328 presets parse to the last byte, 128 enabled parts |
 | 2 | bank, tick, ramping, declicker | built. The bank keeps its recursion from block to block and resyncs on a new frequency, on waking, or every 8192 samples (FL: `round(8192 f)`); partials are summed eight at a time. Per-partial ramp coefficients, the -96 dB drop threshold at average precision, the 10 ms release fade. The attack declicker is not built (declick 0 in the whole corpus) |
-| 3 | pitch, ratios, partial count, global EQ, taper | built |
+| 3 | pitch, ratios, partial count, global EQ, taper | built. A note's pitch follows the host's (`Generator::set_note_pitch`, for slide notes and a clip on the channel's pitch) from its voices' next tick, a note held under a legato voice included |
 | 4 | timbres, mix, start phases, harmonic phase | built, with the blend modes and phase randomness |
 | 5 | voice lifecycle, pan, FX / dry, part mix, volumes | built. MaxPoly is not read; a full pool of 128 voices steals the oldest, released ones first |
 | 6 | articulators | built on `menvelope.rs`'s `Lfo` (with its centre at 0.5) and a Harmor envelope runner in `harmor_art.rs`: per-voice scales, global scales, the attack jump, sustain offset and the release carried over from where the run is. Approximated: the per-point sustain weights (taken as 1 from the decay marker to the loop end), shared runs (flag 2) run per voice, arpeggiator points are not read, the LFO's speed articulator also speeds its level envelope, the global LFO phase (articulator 40) is not applied |

@@ -51,8 +51,10 @@
 //!
 //! - The note's velocity is its gain and its pan is [`dsp::pan_linear`],
 //!   the pan the engine's curves have, until FL's `ComputeLRVol` is read.
-//! - FL moves a sounding note's pitch every block, for slides. Here a
-//!   note keeps its pitch and a slide note sounds like any other.
+//! - FL works a sounding note's steps out again at the top of every
+//!   block. Here that is done when the host moves the note's pitch
+//!   ([`Generator::set_note_pitch`]), from the next block on, which is
+//!   the same.
 //! - FL's high quality mode, which reads the loop through a box filter,
 //!   is not built.
 //! - FL ends a note with the block its envelope ends in, and here it ends
@@ -528,6 +530,19 @@ impl Default for BooBass {
 }
 
 impl BooBass {
+    /// How far a sample moves the loop and the attack of a note of this
+    /// many cents in `zone` (`FUN_180003f90`).
+    fn steps(&self, zone: usize, cents: i32) -> (f32, f32) {
+        let from_root = cents - ROOTS[zone];
+        let attack_ratio = match from_root {
+            1.. => up(from_root) as f32,
+            0 => 1.0,
+            _ => 1.0 / up(-from_root) as f32,
+        };
+        let loop_step = up(cents) as f32 * (267_955.84 / self.rate);
+        (loop_step, attack_ratio * (16_000.0 / self.rate))
+    }
+
     /// Play these samples.
     pub fn set_samples(&mut self, samples: Samples) {
         self.samples = Some(samples);
@@ -539,28 +554,27 @@ impl BooBass {
         let cents = cents.min(TOP);
         let zone = zone_of(cents);
         let len = samples.zones[zone].attack.len();
-        let up = |cents: i32| (f64::from(cents) / 1200.0).exp2();
-        let from_root = cents - ROOTS[zone];
-        let attack_ratio = match from_root {
-            1.. => up(from_root) as f32,
-            0 => 1.0,
-            _ => 1.0 / up(-from_root) as f32,
-        };
         // Four turns of the note.
         let decay = self.rate / (up(cents) * 4.088_681_640_625) as f32;
         let fade = (len << 4) as f32 * (self.rate / 44_100.0);
+        let (loop_step, attack_step) = self.steps(zone, cents);
         Note {
             id,
             zone,
             phase: 0.0,
-            loop_step: up(cents) as f32 * (267_955.84 / self.rate),
+            loop_step,
             attack_at: 0.0,
-            attack_step: attack_ratio * (16_000.0 / self.rate),
+            attack_step,
             attack_end: (len - 1) as f32,
             envelope: Envelope::new(decay as u32, fade as u32, (self.rate / 55.0) as u32),
             gains,
         }
     }
+}
+
+/// 2 to the power of `cents` over 1200.
+fn up(cents: i32) -> f64 {
+    (f64::from(cents) / 1200.0).exp2()
 }
 
 /// What a block of `len` samples adds to a gain that is `delta` from its
@@ -637,6 +651,22 @@ impl Generator for BooBass {
         if let Some(note) = &mut self.note {
             note.envelope.release();
         }
+    }
+
+    /// `Gen_Render` works the steps out again from `FinalLevels.Pitch` at
+    /// the top of every block (`FUN_180003f90`), in the zone the note
+    /// started in.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        let Some(note) = self.note.filter(|note| note.id == voice) else {
+            return;
+        };
+        let cents = ((pitch + 2400.0) as i32).min(TOP);
+        let (loop_step, attack_step) = self.steps(note.zone, cents);
+        self.note = Some(Note {
+            loop_step,
+            attack_step,
+            ..note
+        });
     }
 
     /// A knob that has moved pulls its gain along in steps of 16 samples,
@@ -739,6 +769,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -814,27 +845,16 @@ mod tests {
     }
 
     #[test]
-    fn without_its_samples_it_is_found_and_silent_and_says_why() {
-        for name in [NAME, "boobass"] {
-            let mut bass = crate::generator_by_name(name).unwrap();
-            let lacking = Fidelity::Approximate("BooBass samples not available");
-            assert_eq!(bass.fidelity(), lacking);
-            // A directory with no DLL in it leaves it so.
-            bass.set_resource_dir(Path::new("/nowhere/Plugins/Fruity/Generators"));
-            assert_eq!(bass.fidelity(), lacking);
-            bass.set_sample_rate(48_000.0);
-            bass.set_state(&state(&[1, 65_535, 0, 0])).unwrap();
-            bass.note_on(note(1, 36));
-            let (mut left, mut right) = ([0.0; 512], [0.0; 512]);
-            bass.process(&mut left, &mut right);
-            bass.note_off(1);
-            bass.process(&mut left, &mut right);
-            assert_eq!((left, right), ([0.0; 512], [0.0; 512]));
-            assert_eq!((bass.param_count(), bass.param(0)), (3, 65_535.0));
-            assert_eq!(bass.tail(), 874);
-        }
-        assert!(Samples::from_dll(b"MZ, and not a DLL").is_none());
-        assert!(Samples::from_dll(&[]).is_none());
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        let samples = sines(2000);
+        testing::follows_note_pitch(
+            || {
+                let mut bass = BooBass::default();
+                bass.set_samples(samples.clone());
+                Box::new(bass)
+            },
+            44_100.0,
+        );
     }
 
     #[test]

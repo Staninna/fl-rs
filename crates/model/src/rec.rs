@@ -40,6 +40,17 @@ pub mod control {
     pub const CHANNEL_VOLUME: u16 = 0;
     /// Channel pan, 0..=12800 with 6400 in the centre.
     pub const CHANNEL_PAN: u16 = 1;
+    /// Channel mod X, 219 @12, 0..=256. The sampler's filter cutoff.
+    pub const CHANNEL_MOD_X: u16 = 2;
+    /// Channel mod Y, 219 @16, 0..=256. The sampler's filter resonance.
+    pub const CHANNEL_MOD_Y: u16 = 3;
+    /// Channel pitch knob, 219 @8, in cents. An automation value covers
+    /// -4800..=4800.
+    pub const CHANNEL_PITCH: u16 = 4;
+    /// Channel pan offset, 229 @0, -6400..=6400. It adds to the pan.
+    pub const CHANNEL_PAN_OFFSET: u16 = 0x10;
+    /// Channel volume multiplier, 229 @4, 0..=25600 with 12800 at unity.
+    pub const CHANNEL_VOLUME_MULTIPLIER: u16 = 0x11;
 }
 
 /// The highest insert index. FL keeps the "current" track there.
@@ -149,14 +160,23 @@ impl RecTarget {
     }
 
     /// The lowest and the highest raw value of the control, for the
-    /// controls the engine plays: insert volume, pan and send level,
-    /// channel volume and pan, and the tempo. `None` for any other.
+    /// controls the engine plays: insert volume, pan, stereo separation,
+    /// EQ and send level, channel volume, pan, pitch, pan offset and volume multiplier, and
+    /// the tempo. `None` for any other.
     ///
     /// The mixer and channel ranges are the dispatcher's clamps in
     /// `docs/rec-225.md`. The tempo's is FL's 10 to 522 BPM. No clamp was
     /// read for it: with that range the 219 of all seven corpus clips that
     /// drive the tempo says 60 to 180 BPM, which is what FL's "create
     /// automation clip" writes for a tempo (`docs/automation-234.md`).
+    ///
+    /// An insert's EQ has the range of its knobs in FL's mixer form: a
+    /// band's gain -1800..=1800, its frequency and width 0..=65536
+    /// (`docs/mixer-insert.md`).
+    ///
+    /// A channel's pitch is the dispatcher's fixed -4800..=4800 cents, and
+    /// its pan offset and volume multiplier the range of their knobs in
+    /// FL's channel settings form (`docs/rec-channel.md`).
     pub fn raw_range(&self) -> Option<(i32, i32)> {
         let sends = control::SEND..=control::SEND + LAST_INSERT;
         match *self {
@@ -167,19 +187,85 @@ impl RecTarget {
             } => match control {
                 control::VOLUME => Some((0, 16_000)),
                 control::PAN => Some((-6400, 6400)),
+                control::SEPARATION => Some((-64, 64)),
+                gain if (control::EQ_GAIN..control::EQ_GAIN + 3).contains(&gain) => {
+                    Some((-1800, 1800))
+                }
+                eq if (control::EQ_FREQUENCY..control::EQ_FREQUENCY + 3).contains(&eq)
+                    || (control::EQ_WIDTH..control::EQ_WIDTH + 3).contains(&eq) =>
+                {
+                    Some((0, 65_536))
+                }
                 send if sends.contains(&send) => Some((0, 16_000)),
                 _ => None,
             },
             RecTarget::Global {
                 control: control::TEMPO,
             } => Some((10_000, 522_000)),
-            RecTarget::Channel {
-                control: control::CHANNEL_VOLUME | control::CHANNEL_PAN,
-                ..
-            } => Some((0, 12_800)),
+            RecTarget::Channel { control, .. } => match control {
+                control::CHANNEL_VOLUME | control::CHANNEL_PAN => Some((0, 12_800)),
+                control::CHANNEL_PITCH => Some((-4800, 4800)),
+                control::CHANNEL_PAN_OFFSET => Some((-6400, 6400)),
+                control::CHANNEL_VOLUME_MULTIPLIER => Some((0, 25_600)),
+                _ => None,
+            },
             _ => None,
         }
     }
+}
+
+impl crate::Project {
+    /// What the target of a 226 or 227 link addresses in this project:
+    /// [`Project::rec_target`](crate::Project::rec_target) after the
+    /// rewrites FL's loader runs on the links of an old project, see
+    /// [`remap_old_link`].
+    ///
+    /// FL rewrites a link's source the same way only when a flag of its
+    /// own is set (bit 3 of the word at 0x193fc70), which is not read, so
+    /// a source is decoded with [`Project::rec_target`](crate::Project::rec_target).
+    /// An automation clip's source, control 0 of its channel, comes out
+    /// the same either way.
+    pub fn link_target(&self, id: u32) -> RecTarget {
+        RecTarget::decode(remap_old_link(id, self.version()), self.legacy_rec_ids())
+    }
+}
+
+/// The first writer version whose links number plugin parameters from
+/// 0x8000, 11.5.6.
+const PLUGIN_PARAMS_AT_0X8000: u32 = 11_005_006;
+/// The first writer version whose current track is insert 126, 12.9.0.
+const CURRENT_TRACK_126: u32 = 12_009_000;
+
+/// The rewrites FL's loader runs on the IDs of a project's links when the
+/// project's writer `version` is old (the version gates at the end of
+/// `FUN_00f46490`, each rewrite run through `FUN_012cb6c0`, which walks
+/// the links and the other lists of IDs, but not the 225 records):
+///
+/// - Before 11.5.6 (`FUN_00f45980`), a channel control from 0x2000 to
+///   0x3FFF moves up by 0x6000 and a control below 0x1F00 of a legacy mixer
+///   ID up by 0x8000. Plugin parameters started at 0x2000 on a channel and
+///   at 0 in a slot then.
+/// - Before 12.9.0 (`FUN_00f459e0`), a legacy mixer ID on insert 104 moves
+///   to insert 501 with the new base, as [`remap_legacy`] does for 126.
+///
+/// The ones for writers before 8.5.0 are left out. The corpus has no
+/// project that old.
+pub fn remap_old_link(id: u32, version: u32) -> u32 {
+    let mut id = id;
+    let control = id & 0xffff;
+    let legacy = (LEGACY_MIXER..2 * LEGACY_MIXER).contains(&id);
+    if version < PLUGIN_PARAMS_AT_0X8000 {
+        if id < CHANNELS_END && (0x2000..0x4000).contains(&control) {
+            id += 0x6000;
+        } else if legacy && control < 0x1F00 {
+            id += 0x8000;
+        }
+    }
+    if version < CURRENT_TRACK_126 && legacy && (id - LEGACY_MIXER) >> 22 == 104 {
+        let slot = ((id - LEGACY_MIXER) >> 16) & 0x3f;
+        id = MIXER + (((u32::from(LAST_INSERT) << 6) + slot) << 16) + (id & 0xffff);
+    }
+    id
 }
 
 /// The rewrite FL's loader runs on every 225 record of a legacy project
@@ -321,17 +407,68 @@ mod tests {
         assert_eq!(range(0x4000_0005), Some((10_000, 522_000)));
         assert_eq!(range(0x0002_0000), Some((0, 12_800)));
         assert_eq!(range(0x0002_0001), Some((0, 12_800)));
-        // Separation, a slot's mix, a plugin parameter, the main volume
-        // and a channel's pitch.
+        assert_eq!(range(0x0002_0004), Some((-4800, 4800)));
+        assert_eq!(range(0x0002_0010), Some((-6400, 6400)));
+        assert_eq!(range(0x0002_0011), Some((0, 25_600)));
+        assert_eq!(range(id(1, 0, control::SEPARATION)), Some((-64, 64)));
+        assert_eq!(range(id(1, 0, control::EQ_GAIN + 2)), Some((-1800, 1800)));
+        assert_eq!(range(id(1, 0, control::EQ_FREQUENCY)), Some((0, 65_536)));
+        assert_eq!(range(id(1, 0, control::EQ_WIDTH + 1)), Some((0, 65_536)));
+        // A fourth EQ band, a slot's mix, a plugin parameter, the main volume,
+        // a channel's mod X and a channel's arpeggio time.
         for other in [
-            id(1, 0, control::SEPARATION),
+            id(1, 0, control::EQ_GAIN + 3),
             id(1, 3, control::SLOT_MIX),
             id(1, 3, 0x8000),
             0x4000_0000,
-            0x0002_0004,
+            0x0002_0002,
+            0x0002_0303,
         ] {
             assert_eq!(range(other), None, "{other:#x}");
         }
+    }
+
+    #[test]
+    fn a_link_from_before_11_5_6_numbers_plugin_parameters_from_0x2000() {
+        let old = 11_000_003;
+        // A channel's plugin parameter 0x12.
+        assert_eq!(remap_old_link(0x001B_2012, old), 0x001B_8012);
+        assert_eq!(remap_old_link(0x001B_3FFF, old), 0x001B_9FFF);
+        // A channel's own controls and its parameters from 0x4000 stay.
+        for id in [0x001B_0004, 0x001B_1FFF, 0x001B_4000, 0x001B_8012] {
+            assert_eq!(remap_old_link(id, old), id, "{id:#x}");
+        }
+        // A slot's parameter 5 on insert 3, slot 2, and a slot's mix level,
+        // which stays.
+        let legacy = |insert: u32, slot: u32, control: u32| {
+            LEGACY_MIXER + (insert << 22) + (slot << 16) + control
+        };
+        assert_eq!(remap_old_link(legacy(3, 2, 5), old), legacy(3, 2, 0x8005));
+        assert_eq!(
+            remap_old_link(legacy(3, 2, 0x1F01), old),
+            legacy(3, 2, 0x1F01)
+        );
+        // From 11.5.6 on nothing moves.
+        assert_eq!(remap_old_link(0x001B_2012, 11_005_006), 0x001B_2012);
+        assert_eq!(remap_old_link(legacy(3, 2, 5), 11_005_006), legacy(3, 2, 5));
+    }
+
+    #[test]
+    fn a_link_from_before_12_9_0_to_insert_104_goes_to_501() {
+        let id = LEGACY_MIXER + (104 << 22) + (3 << 16) + 0x1F01;
+        assert_eq!(remap_old_link(id, 12_008_999), 0xED43_1F01);
+        assert_eq!(
+            RecTarget::decode(remap_old_link(id, 12_008_999), true),
+            RecTarget::Insert {
+                index: 501,
+                slot: Some(3),
+                control: control::SLOT_MIX
+            }
+        );
+        assert_eq!(remap_old_link(id, 12_009_000), id);
+        // A slot's parameter is shifted first, as FL's loader does.
+        let param = LEGACY_MIXER + (104 << 22) + 7;
+        assert_eq!(remap_old_link(param, 11_000_000), 0xED40_8007);
     }
 
     #[test]

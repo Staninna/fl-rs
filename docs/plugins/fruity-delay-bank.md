@@ -12,9 +12,10 @@ The DSP is in the DLL itself, in Delphi: nothing in FLEngine is called for
 audio. It is a big plugin. Eight units, each with two multi-stage filters of
 eight modes, a delay line with ten read and write routines, a grain window
 and an optional 2x oversampler around the lot. This map has the state, the
-parameters, the routing, the delay line, the gains and the grain. The filter
-designs, the oversampler's kernels and the grain's shape curve were located
-and not read through: section 4 lists them with their addresses.
+parameters, the routing, the delay line, the gains, the grain and the
+filters (section 3.1). The oversampler's kernels and the grain's shape curve
+were located and not read through: section 4 lists them with their
+addresses.
 
 Confidence tags: `loader`, `dfm`, `corpus`, `preset`, `asm`, `inferred`.
 
@@ -266,14 +267,75 @@ What that means in practice:
   A flush (`FUN_006dfe30` -> `FUN_006dfd00`) clears the lines, restarts the
   grains and puts the gains in use on their targets.
 
-## 4. What stays unknown
+### 3.1 The filters (`FUN_006debc0`, `FUN_005dc180`, `FUN_006e1320`)
 
-- The filters. `FUN_006debc0` maps the mode through the table at `0x7344e0`
-  (`0, 1, 2, 3, 4, 6, 7, 8`) to a design kind, works a cutoff and a width out
-  of the two wheels (`exp` curves with constants at `0x6df748..0x6df820`), and
-  designs `type + 1` stages with `FUN_005dc180` after `FUN_005d1750`. The run
-  kernel is behind `PTR_DAT_00735ab0`. It looks like the biquad family Love
-  Philter has. None of it was read to the coefficients.
+A filter is `0x178` bytes: three stages of `0x78` (kind `+0`, the state's
+eight doubles at `+0x10`, `b0 b1 b2 a1 a2` at `+0x50..+0x70`), then `+0x168`
+the width spread, `+0x16c` the stage spread, `+0x170` the mode and `+0x174`
+the type, which is the stage count less one. Where they run (`Eff_Render`):
+the input filter at `+0x358` (`-1` when its mode is 0, else the POST byte:
+0 before the line, 1 after the grain); the feedback filter on each chunk read
+from the line when its mode at `+0x350` is above 0, after the first echo is
+taken and before the feedback gains.
+
+`FUN_006debc0(band, first wheel)`: `c, r = wheel / 65536` (cutoff and
+resonance), `kind = [0, 1, 2, 3, 4, 6, 7, 8][mode]`, `step = renderer+0x20
+(44100 / SR) * 2 pi`. Every curve is `float(Exp(double(float(x)) * Ln(b)) -
+1)` (`curve(x, b)` below). Constants from `0x6df748..0x6df820`.
+
+```
+LP (1):    fc = c > 0 ? curve(c, 1501) * 0.00066466664 : 0;   offset 0.003
+HP (4):    fc = c > 0 ? min(curve(c, 1501) * 0.00039993334, 0.6001) : 0;   offset 0.0001
+           Q  = r <= 0 ? 0.1 : r < 1 ? curve(r, 2001) * 0.02495 + 0.1 : 50;  stages > 1: Q = Power(Q, spread)
+           alpha = sin * (0.5 / Q)
+BP, notch: fc as HP but held under 1.0001;  BW = r <= 0 ? 0.01 : r < 1 ? curve(r, 101) * 0.1199 + 0.01 : 12
+           alpha = sin * Sinh(BW * width * w / sin)
+peak (7):  fc as BP;  q = 1 - r <= 0 ? 0.1 : 1 - r < 1 ? curve(1 - r, 2001) * 0.04995 + 0.1 : 100
+           A = float(Exp(double(float(gain) / 128) * Ln(1.1111111)) - 1) * 8.1 + 0.1;  stages > 1: A = Power(A, spread)
+           alpha = sin / (q * 2)
+shelves:   fc as BP;  S = 1 - r <= 0 ? 0.1 : 1 - r < 1 ? curve(1 - r, 3) * 0.45 + 0.1 : 1;  A as peak
+           FUN_005dc180 gets sqrt(A) * sqrt((A + 1/A)(1/S - 1) + 2) for its alpha
+w = clamp((fc + offset) * step, 0, 2.8495171);  SinCos(w) (FUN_005d1750)
+every stage, last first: kind, FUN_005dc180(stage, A, alpha, sin, cos)
+```
+
+So a cutoff counts in parts of 44.1 kHz; the gain wheel is an amplitude of
+0.1 at 0, 1 at 128 and 2 at 256 (-40 to +12 dB at a peak's centre).
+
+`FUN_006dfc10`, on a flush (`FUN_006dfd00` bits 2 and 4): the stages' states
+to 0, `+0x16c = float(1 / n)` and `+0x168 = float(n)`, or `1 / float(n)` when
+stage 0 is a notch, for `n = type + 1`. A state load designs every filter
+(`FUN_006dfbb0`), flushes (`FUN_006dfe30`) and then sets each wheel, so the
+designs it keeps have the spreads of their own stage count. A filter picked in
+the window is designed (`FUN_006df830`, 6) before the flush (`FUN_006dfd00`, 6)
+and so keeps the old spread until a wheel moves.
+
+`FUN_005dc180(stage, A, alpha, sin, cos)`, `n = 1 / (alpha + 1)` but where
+noted, is the cookbook normalised to `a0 = 1`:
+
+```
+1 LP     a1 = n cos (-2), a2 = n (1 - alpha), b1 = n (1 - cos), b0 = b2 = b1 * 0.5
+2 BP     a1, a2 as LP; b0 = n alpha, b1 = 0, b2 = n (-alpha)
+3 notch  a1, a2 as LP; b0 = b2 = n, b1 = a1
+4 HP     a1, a2 as LP; b1 = n (-(cos + 1)), b0 = b2 = -b1 * 0.5
+5 allpass  a1, a2 as LP; b0 = a2, b1 = a1, b2 = 1                       (no mode picks it)
+6 low shelf   t = (A - 1) cos, s = alpha sin, n = 1 / (A + 1 + t + s)
+         b0 = n A ((A + 1 - t) + s), b1 = n A 2 ((A - 1) - (A + 1) cos), b2 = n A ((A + 1 - t) - s)
+         a1 = n ((A - 1) + (A + 1) cos) (-2), a2 = n ((A + 1 + t) - s)
+7 peak   n = 1 / (alpha / A + 1); a1 = b1 = n cos (-2), a2 = n (1 - alpha / A), b0 = n (alpha A + 1), b2 = n (1 - alpha A)
+8 high shelf  n = 1 / ((A + 1 - t) + s)
+         b0 = n A ((A + 1 + t) + s), b1 = n A (-2) ((A - 1) + (A + 1) cos), b2 = n A ((A + 1 + t) - s)
+         a1 = n ((A - 1) - (A + 1) cos) 2, a2 = n ((A + 1 - t) - s)
+```
+
+`FUN_006e1320` runs stage 0 to `type` in place on the block with the kernel
+the startup table (`FUN_005df170`) puts at `0x7443a8`: `FUN_005dc8c0` is a
+"Not implemented in i64/ARM" stub, and on x64 it is `FUN_005dc9a0`, direct
+form I in doubles on interleaved stereo, `y = x b0 + (((x1 b1 - y2 a2) + x2
+b2) - y1 a1)`, the output cast to float, then the eight state doubles
+flushed (`DAT_007445c8`). It is `dsp::biquad::Biquad64` to the operation.
+
+## 4. What stays unknown
 - The oversampler: class at `PTR_DAT_006db258`, constructor `FUN_006db740`,
   setup `FUN_006db830` / `FUN_006db8d0` (0xc0 bytes a stage), kernels behind
   `0x746568` (up) and `0x746570` (down).
@@ -292,9 +354,15 @@ What that means in practice:
   "to next" gains, the line with its two write offsets, the four feedback
   modes, the first echo switch, the time in seconds or beats, the grain with
   a shape of 0, the fade in after a state and the flush.
-- Not built, and `fidelity` says which: the two filters (a unit runs without
-  them), the 2x oversampling (the unit runs at the host rate, with the same
-  times), the grain's shape (the window stays a raised cosine).
+- The filters are `Filter` (section 3.1), run a frame at a time, which is the
+  same as FL's blocks and chunks for a recursive filter; their states are
+  flushed at the end of each block rather than of each chunk, which only
+  differs for subnormals. A type above 2 is held at three stages, all the
+  filter has room for. Rust's `ln`, `exp`, `sinh` and `sin_cos` stand in for
+  Delphi's and may be an ulp off.
+- Not built, and `fidelity` says which: the 2x oversampling (the unit runs at
+  the host rate, with the same times), the grain's shape (the window stays a
+  raised cosine).
 - The gains glide over the block the host hands over. FL glides the feedback
   gains over each chunk of the line instead, which is the same unless they
   are still moving.
