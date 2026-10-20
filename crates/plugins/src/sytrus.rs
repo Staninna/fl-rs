@@ -103,8 +103,6 @@ const SELF_FM: f32 = 35.0 / 128.0;
 /// The ratio wheel's 20000 is the base pitch.
 const RATIO_UNIT: f64 = 20_000.0;
 const STAGES: usize = 3;
-/// A note with no envelope fades out over this long after its release.
-const FADE: f64 = 0.01;
 /// The oldest state read: the operator block and the articulator stream
 /// before version 8 are another format.
 const OLDEST: i32 = 8;
@@ -1492,6 +1490,7 @@ impl State {
     }
 
     /// Whether any envelope of a sounding part is on.
+    #[cfg(test)]
     fn any_envelope(&self) -> bool {
         (0..PARTS).any(|part| {
             (part == ROWS || self.active[part])
@@ -1549,8 +1548,9 @@ struct Voice {
     gains: [[f32; 4]; ROWS],
     aims: [[f32; 4]; ROWS],
     released: bool,
-    /// The fade of a note with no envelope, from 1 to 0 after its release.
-    fade: f32,
+    /// Released with every envelope over (stage 9): the gains glide to 0
+    /// and the voice ends when they get there (`0x872290`).
+    ending: bool,
     over: bool,
     /// The next tick is the first.
     first: bool,
@@ -1573,8 +1573,6 @@ struct Timing {
     rates: [f64; 2],
     /// `44100 / rate`.
     scale: f32,
-    /// What a fade loses a sample.
-    fade_step: f32,
     /// The most a waveshaper's mix, an operator's volume or modulation
     /// moves a sample: `TAudioRenderer+0x38`, `0.01 * 44100 / rate`
     /// (`0x62bcd0`).
@@ -1822,7 +1820,7 @@ impl Voice {
         state: &State,
         timing: Timing,
         seed: &mut u32,
-        (group, unison): (u32, Unison),
+        (group, unison, clock): (u32, Unison, u32),
     ) -> Self {
         let key_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         let pitch = key_pitch + state.main_pitch;
@@ -1868,9 +1866,11 @@ impl Voice {
             let operator = &state.operators[op];
             run.pitch = op_pitch(operator, pitch, unison.pitch, timing.rate);
             run.phase = f64::from(operator.phase) + f64::from(unison.phase);
+            // A free-running operator starts where it would be had it run
+            // since the plugin started: the frames played (`0x62b8`) times
+            // its frequency (`0x86af20`).
             if operator.free_run {
-                *seed = seed.wrapping_mul(0x0808_8405).wrapping_add(1);
-                run.phase += f64::from(*seed) / f64::from(u32::MAX);
+                run.phase += f64::from(clock as i32 as f32 * run.pitch as f32);
             }
             run.phase -= run.phase.floor();
         }
@@ -1893,7 +1893,7 @@ impl Voice {
             gains: [[0.0; 4]; ROWS],
             aims: [[0.0; 4]; ROWS],
             released: false,
-            fade: 1.0,
+            ending: false,
             over: false,
             first: true,
             to_tick: 0,
@@ -1937,6 +1937,7 @@ impl Voice {
         let snap = self.first;
         self.first = false;
         let dt = if snap { 0.0 } else { 1.0 };
+        // The articulators move first, then the stage is taken.
         // The main pitch retunes the operators (`0x872290` calls `0x872210`
         // when the note's pitch and it come to another sum).
         let pitch = self.key_pitch + state.main_pitch;
@@ -2058,6 +2059,7 @@ impl Voice {
                 run.mix = run.mix_target;
             }
         }
+        self.ending = self.released && self.envelopes_over(state);
         for row in 0..ROWS {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
@@ -2071,31 +2073,35 @@ impl Voice {
             let send = gain * state.send[row] * value(ROWS, 1);
             let [l, r] = pan_law((pan * 2.0 - 1.0).clamp(-1.0, 1.0), gain * state.out[row]);
             let [sl, sr] = pan_law((send_pan * 2.0 - 1.0).clamp(-1.0, 1.0), send);
-            // The render glides to these (`0x616e20`).
-            self.aims[row] = [l, r, sl, sr];
+            // The render glides to these (`0x616e20`), and to nothing
+            // once the voice is ending.
+            self.aims[row] = if self.ending {
+                [0.0; 4]
+            } else {
+                [l, r, sl, sr]
+            };
             if snap {
                 self.gains[row] = self.aims[row];
             }
         }
-        if self.released {
-            let mut over = true;
-            for part in 0..PARTS {
-                if part < ROWS && !state.active[part] {
-                    continue;
-                }
-                for (index, articulator) in state.articulators(part).iter().enumerate() {
-                    let run = &self.articulators[part * ARTICULATORS + index];
-                    if articulator.envelope.active() && !run.run.over() {
-                        over = false;
-                    }
-                }
+    }
+
+    /// Whether every envelope of the voice is over: then a released voice
+    /// is at stage 9 (`0x872290` takes the least of its envelopes'
+    /// stages).
+    fn envelopes_over(&self, state: &State) -> bool {
+        for part in 0..PARTS {
+            if part < ROWS && !state.active[part] {
+                continue;
             }
-            if state.any_envelope() {
-                self.over = over;
-            } else if self.fade <= 0.0 {
-                self.over = true;
+            for (index, articulator) in state.articulators(part).iter().enumerate() {
+                let run = &self.articulators[part * ARTICULATORS + index];
+                if articulator.envelope.active() && !run.run.over() {
+                    return false;
+                }
             }
         }
+        true
     }
 
     /// Play the frames the buses hold: a control tick wherever the voice's
@@ -2124,6 +2130,9 @@ impl Voice {
             self.render(state, timing, scratch, (buses, at, run), pools);
             self.to_tick -= run;
             at += run;
+            if self.ending && self.unison.role != Role::Slave && self.silent(state) {
+                return true;
+            }
         }
         false
     }
@@ -2140,7 +2149,6 @@ impl Voice {
         pools: &mut Pools,
     ) {
         let len = len.min(CHUNK);
-        let fading = self.released && !state.any_envelope();
         for i in 0..len {
             for op in 0..OPERATORS {
                 if !state.active[op] {
@@ -2267,7 +2275,6 @@ impl Voice {
                 }
             }
         }
-        let mut fade = self.fade;
         for row in 0..ROWS {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
@@ -2283,9 +2290,8 @@ impl Voice {
                 (gains[side], steps[side]) = glide(&mut self.gains[row][side], aim, cap, len);
             }
             let sends = state.send[row] != 0.0;
-            fade = self.fade;
             for i in 0..len {
-                let sample = scratch[row * CHUNK + i] * fade;
+                let sample = scratch[row * CHUNK + i];
                 buses[0][at + i] += sample * gains[0];
                 buses[1][at + i] += sample * gains[1];
                 if sends {
@@ -2295,14 +2301,13 @@ impl Voice {
                 for (gain, step) in gains.iter_mut().zip(&steps) {
                     *gain += step;
                 }
-                if fading {
-                    fade = (fade - timing.fade_step).max(0.0);
-                }
             }
         }
-        if fading {
-            self.fade = fade;
-        }
+    }
+
+    /// An ending voice is over once every gain has got to 0 (stage 10).
+    fn silent(&self, state: &State) -> bool {
+        (0..ROWS).all(|row| !state.active[row] || self.gains[row].iter().all(|gain| *gain == 0.0))
     }
 }
 
@@ -2322,6 +2327,8 @@ pub struct Sytrus {
     pools: Pools,
     scratch: Vec<f32>,
     seed: u32,
+    /// The frames played since the plugin started (`0x62b8`).
+    clock: u32,
 }
 
 impl Default for Sytrus {
@@ -2337,6 +2344,7 @@ impl Default for Sytrus {
             pools: Pools::default(),
             scratch: vec![0.0; (ROWS + OPERATORS + 2) * CHUNK],
             seed: 0x1234_5678,
+            clock: 0,
         }
     }
 }
@@ -2398,7 +2406,6 @@ impl Sytrus {
             tick,
             rates: [seconds * 2.0, seconds * self.tempo / 60.0],
             scale: (44_100.0 / f64::from(self.rate)) as f32,
-            fade_step: (1.0 / (FADE * f64::from(self.rate))) as f32,
             shaper_cap: ((44_100.0 / f64::from(self.rate) * 0.001) as f32) * 10.0,
             out_cap: (44_100.0 / f64::from(self.rate) * 0.001) as f32,
             mod_glide: 0.01f64.powf(seconds * 44_100.0 / (96.0 * 96.0)) as f32,
@@ -2497,7 +2504,8 @@ impl Generator for Sytrus {
             } else {
                 unison[k]
             };
-            let voice = Voice::new(&note, &self.state, timing, &mut self.seed, (self.notes, u));
+            let place = (self.notes, u, self.clock);
+            let voice = Voice::new(&note, &self.state, timing, &mut self.seed, place);
             self.voices.push(voice);
         }
     }
@@ -2518,6 +2526,7 @@ impl Generator for Sytrus {
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
+        self.clock = self.clock.wrapping_add(len as u32);
         let timing = self.timing();
         let mut at = 0;
         while at < len {
@@ -2591,8 +2600,9 @@ impl Generator for Sytrus {
         self.fx.reset(&self.state.fx, &self.state.wheels());
     }
 
-    /// The longest release among the envelopes that are on, and the fade
-    /// of a note without one.
+    /// The longest release among the envelopes that are on, then the
+    /// glide of the gains to 0 at the slowest unison voice's cap, and the
+    /// effects' tail.
     fn tail(&self) -> usize {
         let timing = self.timing();
         let mut ticks = 1.0;
@@ -2606,7 +2616,12 @@ impl Generator for Sytrus {
             }
         }
         let frames = ticks.min(1e6) * timing.tick;
-        frames.ceil() as usize + (FADE * f64::from(self.rate)).ceil() as usize + 1 + self.fx.tail()
+        let mut unison = [Unison::ALONE; UNISON];
+        let count = Unison::voices(&self.state, &mut unison);
+        let slowest = unison[..count].iter().map(|u| u.gain).fold(1f32, f32::min);
+        let loudest = 2.0 * self.state.main_volume.max(1.0);
+        let glide = f64::from(loudest / (timing.out_cap * slowest.max(0.01)));
+        frames.ceil() as usize + glide.ceil() as usize + 1 + self.fx.tail()
     }
 
     fn fidelity(&self) -> Fidelity {
@@ -2686,7 +2701,8 @@ mod tests {
         let sound = play(&mut sytrus, 72, 8192 + len);
         assert!(partial(&sound[8192..8192 + len], turns * 2.0) > 0.68);
 
-        // Let go, the note fades out in 10 ms and the voice is gone.
+        // Let go, the gains glide to 0 by 0.001 x 44100 / 48000 a frame,
+        // 770 frames from 0.707, and the voice is gone.
         sytrus.all_notes_off();
         let (mut left, mut right) = (vec![0.0; 2048], vec![0.0; 2048]);
         sytrus.process(&mut left, &mut right);
