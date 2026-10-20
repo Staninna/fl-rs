@@ -122,6 +122,14 @@ pub trait Generator: Send {
     /// that does not say: its notes keep the pitch they started with.
     fn set_note_pitch(&mut self, _voice: u32, _pitch: f32) {}
 
+    /// The gain the channel's volume makes, from the next block on: FL's
+    /// `chan.Vol`, which its host puts in `FinalLevels.Vol` with the
+    /// note's velocity and a host that does not hand it over puts on what
+    /// the generator plays. A plugin that raises `FinalLevels.Vol` to a
+    /// power takes it from here and plays as if the host's were not on
+    /// top; the others take no notice. 1 until the host says.
+    fn set_channel_volume(&mut self, _volume: f32) {}
+
     /// Add one block of the generator's sound to what `left` and `right`
     /// hold. The two sides are as long as each other.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]);

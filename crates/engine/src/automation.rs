@@ -884,6 +884,7 @@ impl Automation {
             let level = curves.volume_adjust_gain(levels.adjust);
             let gains = voice::gains(levels.volume, levels.pan(), level, 0.0, curves);
             mixer.set_channel_gains(levels.channel, gains);
+            mixer.set_channel_volume(levels.channel, level * curves.volume_gain(levels.volume));
         }
     }
 
