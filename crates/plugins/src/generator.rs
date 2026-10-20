@@ -217,9 +217,13 @@ mod tests {
     fn the_four_generators_are_found_with_their_defaults_and_no_other_of_fl_s() {
         // The name, as FL's projects and as its presets have it, and what
         // the parameters start at.
+        // 3x Osc's 21, two that are nobody's, and the instrument tab's.
+        let tab = *crate::three_osc::ThreeOsc::default().articulation();
         let osc: Vec<f32> = [0, 0, 0, 0, 0, 0, 64, 0, 0, -12, 0, 0, 0, 32, 0, 0, -24]
             .iter()
-            .chain(&[0; 4])
+            .chain(&[0; 6])
+            .chain(tab.blocks.as_flattened())
+            .chain(&[0, 0, tab.cutoff, tab.resonance, 0, tab.filter])
             .map(|value| *value as f32)
             .collect();
         let drum = [
