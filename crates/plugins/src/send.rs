@@ -24,6 +24,7 @@
 //! right both sides come out on the right at half; to the left, the other
 //! way round.
 
+use crate::parts::{Matrix, glide};
 use crate::{Effect, StateError, knob_value, read_state};
 
 /// The plugin's event 201 name.
@@ -72,6 +73,8 @@ pub struct Send {
     aim: [f32; 4],
     now: [f32; 4],
     dry: f32,
+    /// The rate, in Hz.
+    hz: f64,
     /// The last block's send, when there is a target.
     sent: [Vec<f32>; 2],
 }
@@ -84,6 +87,7 @@ impl Default for Send {
             aim: [0.0; 4],
             now: [0.0; 4],
             dry: 1.0,
+            hz: 44_100.0,
             sent: [Vec::with_capacity(ROOM), Vec::with_capacity(ROOM)],
         };
         plugin.set(DEFAULTS);
@@ -116,38 +120,45 @@ impl Effect for Send {
         Ok(())
     }
 
-    /// Nothing here depends on the rate.
-    fn set_sample_rate(&mut self, _hz: f32) {}
+    /// The rate sets how fast the send's matrix may move.
+    fn set_sample_rate(&mut self, hz: f32) {
+        if hz.is_finite() && hz > 0.0 {
+            self.hz = f64::from(hz);
+        }
+    }
 
     /// The send is made from the input, and then the input is scaled by the
     /// dry level. After a send wheel has moved, the matrix goes from where
-    /// the last block ended to where the wheels put it, in a straight line
-    /// over the block.
+    /// the last block ended towards where the wheels put it, in a straight
+    /// line over the block that moves by no more than `0.001 * 44100 / rate`
+    /// a frame, FL's `TAudioRenderer` cap.
     ///
     /// A block longer than any before it and longer than 4096 frames asks
     /// for memory to keep the send in.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         let (left, right) = (&mut left[..len], &mut right[..len]);
-        if self.target > 0 {
+        if self.target > 0 && len > 0 {
             let [send_left, send_right] = &mut self.sent;
             send_left.clear();
             send_right.clear();
-            let mut g = self.now;
-            let aim = self.aim;
-            let delta: [f32; 4] = std::array::from_fn(|k| (aim[k] - g[k]) / len.max(1) as f32);
-            let ramp = delta.iter().any(|d| *d != 0.0);
-            for (l, r) in left.iter().zip(right.iter()) {
-                if ramp {
-                    for (gain, d) in g.iter_mut().zip(delta) {
-                        *gain += d;
-                    }
-                }
-                send_left.push(l * g[0] + r * g[2]);
-                send_right.push(r * g[1] + l * g[3]);
+            let cap = (0.001 * 44_100.0 / self.hz) as f32;
+            let mut m = [0.0; 4];
+            let mut step = [0.0; 4];
+            for k in 0..4 {
+                (m[k], step[k]) = glide(&mut self.now[k], self.aim[k], cap, len);
             }
+            for (l, r) in left.iter().zip(right.iter()) {
+                let (sl, sr) = Matrix::mix(&m, *l, *r);
+                send_left.push(sl);
+                send_right.push(sr);
+                for (gain, step) in m.iter_mut().zip(step) {
+                    *gain += step;
+                }
+            }
+        } else {
+            self.now = self.aim;
         }
-        self.now = self.aim;
         if self.dry != 1.0 {
             for v in left.iter_mut().chain(right.iter_mut()) {
                 *v *= self.dry;
@@ -254,13 +265,28 @@ mod tests {
     }
 
     #[test]
-    fn a_moved_volume_ramps_over_one_block() {
+    fn a_moved_volume_ramps_at_most_a_thousandth_a_frame_at_44_1_khz() {
         let mut plugin = with(&[0, 0, 256, 1]);
+        plugin.set_sample_rate(44_100.0);
         plugin.set_param(1, 256.0);
         let (mut left, mut right) = ([1.0; 4], [1.0; 4]);
         plugin.process(&mut left, &mut right);
         let (send_left, _) = plugin.aux_output().unwrap();
-        assert_eq!(send_left, [0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(send_left, [0.0, 0.001, 0.002, 0.003]);
+        // The next block goes on from where this one ended.
+        let (mut left, mut right) = ([1.0; 2], [1.0; 2]);
+        plugin.process(&mut left, &mut right);
+        assert_eq!(plugin.aux_output().unwrap().0[0], 0.004);
+        // A small move gets there in one block, in a straight line.
+        let mut plugin = with(&[0, 255, 256, 1]);
+        plugin.set_param(1, 256.0);
+        let (mut left, mut right) = ([1.0; 64], [1.0; 64]);
+        plugin.process(&mut left, &mut right);
+        let start = knob(255);
+        let step = (1.0 - start) / 64.0;
+        let send = plugin.aux_output().unwrap().0;
+        assert_eq!(send[0], start);
+        assert!((send[63] - (start + 63.0 * step)).abs() < 1e-5);
         let (mut left, mut right) = ([1.0; 2], [1.0; 2]);
         plugin.process(&mut left, &mut right);
         assert_eq!(plugin.aux_output().unwrap().0, [1.0, 1.0]);
