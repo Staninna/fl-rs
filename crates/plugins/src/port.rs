@@ -22,6 +22,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::autogun::NAME, Port::Approximate),
     (crate::balance::NAME, Port::Exact),
     (crate::bassdrum::NAME, Port::Exact),
+    (crate::beepmap::NAME, Port::Gaps),
     (crate::blood_overdrive::NAME, Port::Exact),
     (crate::boobass::NAME, Port::Exact),
     (crate::chorus::NAME, Port::Exact),

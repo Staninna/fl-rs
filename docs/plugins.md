@@ -104,7 +104,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity dB Meter | 3576 |  | 1 | |
 | Effect | Razer Chroma | 3952 |  | 1 | |
 | Effect | Vintage Phaser | 3880 |  | 1 | |
-| Generator | BeepMap | 4186 | yes | 1 | |
+| Generator | BeepMap | 4186 | yes | 1 | implemented in crates/plugins (state, the picture inside it, the three scales, blue, grainy, loop and widen, the column ramps and the host sine as read; the instrument tab only at the defaults every shipped state has, a picture over the row limit shrunk by averaging, 16-bit colours widened as guessed, phases from a seed of the instance's own), docs/plugins/beepmap.md |
 | Generator | Drumaxx | 4319 | yes | 1 | |
 | Generator | Fruity DrumSynth Live | 1062 |  | 1 | |
 | Generator | Fruity Keyboard Controller | 3923 |  | 1 | |

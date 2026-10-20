@@ -36,6 +36,7 @@ pub mod autogun;
 mod autogun_engine;
 pub mod balance;
 pub mod bassdrum;
+pub mod beepmap;
 pub mod blood_overdrive;
 pub mod boobass;
 pub mod chorus;
