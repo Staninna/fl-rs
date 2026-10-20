@@ -59,7 +59,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), docs/plugins/ogun.md |
 | Effect | Emphasis | 4045 | yes | 5 | implemented in crates/plugins (the limiter of Shared/ildsp_x64.dll: slow adaptive stage, oversampled brickwall, M/S and true-peak stages, halfbands, lookaheads, delta, level matching, bypass and rebuild fades exact; Versatile and Loud follow the input once a 512-sample block where FL uses its own blocks; meters left out), docs/plugins/emphasis.md |
 | Effect | Vintage Chorus | 3849 | yes | 5 | implemented in crates/plugins (the engine_x64.dll chorus exact; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-chorus.md |
-| Generator | Fruity Slicer | 4483 | yes | 5 | |
+| Generator | Fruity Slicer | 4483 | yes | 5 | implemented in crates/plugins (state, key map, slice lengths, play to end, reverse, slice declicker, attack and decay fades, pan law and the note-off declick exact; Elastique's time stretch left out, a stretched slice plays unstretched in its new place; the volume release runs per frame, not per tick; the other envelopes and LFOs left out; FL's resampler stands in as a Hermite curve), docs/plugins/fruity-slicer.md |
 | Generator | GMS | 1516 | yes | 5 | |
 | Effect | Edison | 6077 |  | 4 | |
 | Effect | Frequency Shifter | 3786 | yes | 4 | |

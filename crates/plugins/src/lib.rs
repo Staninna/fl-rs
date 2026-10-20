@@ -71,6 +71,7 @@ pub mod fpc;
 pub mod free_filter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
+pub mod fruity_slicer;
 mod generator;
 pub mod gross_beat;
 pub mod harmless;
