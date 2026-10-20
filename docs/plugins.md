@@ -64,7 +64,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Edison | 6077 |  | 4 | |
 | Effect | Frequency Shifter | 3786 | yes | 4 | |
 | Effect | Fruity Filter | 3692 | yes | 4 | implemented in crates/plugins, docs/plugins/fruity-filter.md |
-| Effect | Fruity Flanger | 3629 | yes | 4 | |
+| Effect | Fruity Flanger | 3629 | yes | 4 | implemented in crates/plugins (exact; a new sample rate empties the lines where FL keeps them), docs/plugins/fruity-flanger.md |
 | Generator | Morphine | 1704 |  | 4 | |
 | Effect | Distructor | 3571 |  | 3 | |
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
