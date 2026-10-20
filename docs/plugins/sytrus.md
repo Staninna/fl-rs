@@ -758,7 +758,7 @@ left out (its target is -1 in every corpus state; `fidelity` names it),
 and the classes as `fl_fx.rs` has them (the chorus there is the x87
 renderer).
 
-## 10. The control tick and the wavetable size
+## 10. The control tick, the wavetable size and the ramps
 
 The control tick is set with the rate (`0x8629d0` -> `0x8657b0`): `p =
 0x8fc9c4[i]` with `i` the i32 at 0x430 while playing (DQEnvBtn) or 0x434
@@ -778,6 +778,16 @@ The operator wavetable is `2^14 = 16384` samples (`0x848980(14, 12)` from
 the constructor's `0x848a50` sets `0x911b90` and the two FFTs, orders 14
 and 12, the second for the band-limited copies). The implementation had
 2048.
+
+Ramps. At each tick `0x872290` aims an operator's volume and modulation
+with `0x62bbf0`: `step = (aim - now) / tick`, no larger than
+`TAudioRenderer+0x38` (`0.01 x 44100 / SR`); the kernel (`0x877270`, the
+SSE one `0x877760` installs; `0x870580` is the x87 one) steps the volume
+before it multiplies by it. The row gains into the output and the send
+are aims too: every render call (`0x870820` -> `0x616e20`) glides them
+with `0x62bb20` (`parts::glide`) over the call, by no more than
+`TAudioRenderer+0x34 x voice+0x40` (`0.001 x 44100 / SR` times the unison
+gain) a frame; the voice's first tick takes them as they are.
 
 ## Corrections
 

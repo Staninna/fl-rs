@@ -1787,7 +1787,7 @@ struct Voice {
     /// Every row's gain into the left and the right output and the left
     /// and the right send, and the steps.
     gains: [[f32; 4]; ROWS],
-    gain_steps: [[f32; 4]; ROWS],
+    aims: [[f32; 4]; ROWS],
     released: bool,
     /// The fade of a note with no envelope, from 1 to 0 after its release.
     fade: f32,
@@ -1811,9 +1811,13 @@ struct Timing {
     scale: f32,
     /// What a fade loses a sample.
     fade_step: f32,
-    /// The most a waveshaper's mix moves a sample: `TAudioRenderer+0x38`,
-    /// `0.01 * 44100 / rate` (`0x62bcd0`).
+    /// The most a waveshaper's mix, an operator's volume or modulation
+    /// moves a sample: `TAudioRenderer+0x38`, `0.01 * 44100 / rate`
+    /// (`0x62bcd0`).
     shaper_cap: f32,
+    /// The most an output gain moves a sample for a voice at gain 1:
+    /// `TAudioRenderer+0x34`, `0.001 * 44100 / rate`.
+    out_cap: f32,
     /// What is left a tick of the way Mod X and Mod Y have to go: 1 % in
     /// 0.209 s (`0x8658b7`).
     mod_glide: f32,
@@ -2123,7 +2127,7 @@ impl Voice {
             filters: [FilterRun::rest(); FILTERS],
             articulators,
             gains: [[0.0; 4]; ROWS],
-            gain_steps: [[0.0; 4]; ROWS],
+            aims: [[0.0; 4]; ROWS],
             released: false,
             fade: 1.0,
             over: false,
@@ -2209,8 +2213,11 @@ impl Voice {
                 run.modulation_step = 0.0;
                 run.rm = modulation;
             } else {
-                run.volume_step = (volume - run.volume) / len;
-                run.modulation_step = (modulation - run.modulation) / len;
+                // `0x62bbf0`: no more than `TAudioRenderer+0x38` a
+                // sample.
+                let cap = timing.shaper_cap;
+                run.volume_step = ((volume - run.volume) / len).clamp(-cap, cap);
+                run.modulation_step = ((modulation - run.modulation) / len).clamp(-cap, cap);
             }
         }
         for f in 0..FILTERS {
@@ -2253,14 +2260,10 @@ impl Voice {
             let send = gain * state.send[row] * value(ROWS, 1);
             let [l, r] = pan_law((pan * 2.0 - 1.0).clamp(-1.0, 1.0), gain * state.out[row]);
             let [sl, sr] = pan_law((send_pan * 2.0 - 1.0).clamp(-1.0, 1.0), send);
-            let aim = [l, r, sl, sr];
-            for side in 0..4 {
-                if snap {
-                    self.gains[row][side] = aim[side];
-                    self.gain_steps[row][side] = 0.0;
-                } else {
-                    self.gain_steps[row][side] = (aim[side] - self.gains[row][side]) / len;
-                }
+            // The render glides to these (`0x616e20`).
+            self.aims[row] = [l, r, sl, sr];
+            if snap {
+                self.gains[row] = self.aims[row];
             }
         }
         if self.released {
@@ -2350,7 +2353,9 @@ impl Voice {
                 }
                 let gain = run.rm + 1.0 - run.modulation;
                 y *= gain;
-                let out = y * run.volume;
+                // The kernel steps the volume before it takes it
+                // (`0x877270`).
+                let out = y * (run.volume + run.volume_step);
                 scratch[op * CHUNK + i] = out;
                 let targets = &state.rm_targets[op];
                 for k in 0..targets.len() {
@@ -2447,8 +2452,16 @@ impl Voice {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
             }
-            let mut gains = self.gains[row];
-            let steps = self.gain_steps[row];
+            // Each gain glides to its aim over the frames, by no more than
+            // `TAudioRenderer+0x34` times the voice's gain a frame
+            // (`0x870820` -> `0x616e20`).
+            let cap = timing.out_cap * self.unison.gain;
+            let mut gains = [0.0; 4];
+            let mut steps = [0.0; 4];
+            for side in 0..4 {
+                let aim = self.aims[row][side];
+                (gains[side], steps[side]) = glide(&mut self.gains[row][side], aim, cap, len);
+            }
             let sends = state.send[row] != 0.0;
             fade = self.fade;
             for i in 0..len {
@@ -2466,7 +2479,6 @@ impl Voice {
                     fade = (fade - timing.fade_step).max(0.0);
                 }
             }
-            self.gains[row] = gains;
         }
         if fading {
             self.fade = fade;
@@ -2553,6 +2565,7 @@ impl Sytrus {
             scale: (44_100.0 / f64::from(self.rate)) as f32,
             fade_step: (1.0 / (FADE * f64::from(self.rate))) as f32,
             shaper_cap: ((44_100.0 / f64::from(self.rate) * 0.001) as f32) * 10.0,
+            out_cap: (44_100.0 / f64::from(self.rate) * 0.001) as f32,
             mod_glide: 0.01f64.powf(seconds * 44_100.0 / (96.0 * 96.0)) as f32,
         }
     }
@@ -3455,6 +3468,25 @@ mod tests {
         let half = play_with(64);
         let mid = partial(&half[8192..], turns * 3.0);
         assert!((mid / third - 0.5).abs() < 0.05, "{mid} {third}");
+    }
+
+    #[test]
+    fn the_output_gains_glide_by_no_more_than_the_renderer_s_cap() {
+        let mut sytrus = blank();
+        play(&mut sytrus, 60, 4096);
+        // The tick is 96 samples at 44.1 kHz in fours: 104 at 48 kHz.
+        assert_eq!(sytrus.timing().tick, 104.0);
+        let before = sytrus.voices[0].gains[0][0];
+        assert!((before - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        // The main volume to 0: the next tick aims the gains at 0, and
+        // they fall by 0.001 x 44100 / 48000 a frame.
+        sytrus.set_param(0, 0.0);
+        let (mut left, mut right) = (vec![0.0; 500], vec![0.0; 500]);
+        sytrus.process(&mut left, &mut right);
+        let cap = (44_100.0 / f64::from(RATE) * 0.001) as f32;
+        let after = sytrus.voices[0].gains[0][0];
+        let fell = (before - after) / cap;
+        assert!((396.0..=500.5).contains(&fell), "{fell}");
     }
 
     #[test]
