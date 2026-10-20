@@ -93,7 +93,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::squeeze::NAME, Port::Exact),
     (crate::stereo_enhancer::NAME, Port::Exact),
     (crate::stereo_shaper::NAME, Port::Exact),
-    (crate::sytrus::NAME, Port::Approximate),
+    (crate::sytrus::NAME, Port::Gaps),
     (crate::three_osc::NAME, Port::Gaps),
     (crate::transient_processor::NAME, Port::Exact),
     (crate::vintage_chorus::NAME, Port::Gaps),

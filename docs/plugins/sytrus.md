@@ -72,7 +72,7 @@ Plugin object:
 | 0x5f00 / 0x5f04 / 0x5f08 | i32 | main part REC base (547) / direct count 0x18 / kind 2 |
 | 0x5f0c + 0x38 e | delay | three delay units: +0x24 i32[5] params, +0x38 u8[3] flags, +0x18 delay object |
 | 0x5f18 | u8 | (v25+) saved |
-| 0x5f20 / 0x5f28 | ptr, u8 | reverb object / reverb also on the dry path |
+| 0x5f20 / 0x5f28 | ptr, u8 | chorus object (`TStereoFlanger`) / the chorus also feeds the send bus (section 9) |
 | 0x5fec | i32[9] + u8 + u8 | reverb params and enable (saved as 38 bytes) |
 | 0x6018 + 0x90 b | eq band | three EQ bands: +0 level, +4 freq, +8 width, +0xc type (0, 1, 2), +0x18 ... |
 | 0x61cc | i32 | EQ mode (0 off; 1; 2 / 3 select the buffer in Gen_Render) |
@@ -117,7 +117,7 @@ main      0x3c2 bytes at 0x12c (v < 1: 9 fewer; v < 2: 0xa2 fewer)        // REC
 v > 3:    i32 0x4f0
 v > 5:    u8 0x4f4;  v > 6: u8 0x4f5;  v > 12: u8 0x4f6
 v > 13:   u8[k] at 0x4f7, k = 1 (v14), 5 (v15..17), 8 (v18), 9 (v19+)
-3 x       23 bytes at 0x5f30 + 0x38 e: i32 feedback 64, i32 time 144, i32 time offset 0, i32 volume 64, i32 mode 0, u8 enable 1, u8 serial 0, u8 tempo 0
+3 x       23 bytes at 0x5f30 + 0x38 e: i32 feedback 64, i32 time 144, i32 time offset 0, i32 volume 64, i32 mode 0, u8 tempo 1, u8 serial 0, u8 on 0 (section 9)
 v >= 10:  reverb 37 (v10) / 38 bytes at 0x5fec: i32 lowcut 75, highcut 40, predelay 0, room 40, diffusion 100, decay 15, high damp 40, color 2, volume 25, u8 enable 0, u8 tempo-based (v11+)
           (v < 10: FUN_00865a90 writes those defaults)
 v > 2:    i32 EQ mode 0x61cc; 3 x (12 bytes (v < 14) or 16: level 0, freq, width 17500, type b)      // code defaults freq 5777 / 33145 / 55825, DFM says 8950 / 33145 / 49305
@@ -200,7 +200,7 @@ so k = 0 is the untagged wheel of each panel):
 | filter | 0 | `FTypeSelect` (Tag -1 in the DFM; corpus 1, 2, 3) | 0..12 | 1 | header[0] |
 | filter | 1..9 | `FEnvWheel` 0..256 (128), `FCutWheel` 0..256 (128), `FResWheel` 0..256 (128), `FGainWheel` / `FLowSlider` 0..128 (128 / 0), `FBandSlider` 0..128 (0), `FHighSlider` 0..128 (0), `WSPreAmpWheel` 64..192 (128), `WSMixWheel` 0..128 (0), `ToNextFWheel` -256..256 (0) | | | header[k]; `FUN_00869e80`; k = 9 also `FUN_00865120` (routing) |
 | filter | (not REC) | `FFlatBtn`, `FQualityBtn`, `WSEnableBtn`, `WSBipolarBtn`, mode / order selectors | | | the 0x30 block at part+0x880 |
-| main | 0 | Tag-0 wheel | | 0 | 0x3fc |
+| main | 0 | Tag-0 wheel: the send's pan, 0x61e4 = v / 256 (`0x86a130`) | | 0 | 0x3fc |
 | main | 1..8 | `ChOrderSelect` 0..9 (4), `ChDepthWheel` 0..1024 (512), `ChSpeedWheel` 0..1024 (768), `ChDelayWheel` 0..128 (8), `ChSpreadWheel` 0..128 (128), `ChCrossWheel` -128..128 (-32), `ChVolWheel` -128..128 (128), `FXSendVolWheel` 0..128 (128) | | | 0x3fc + 4 k; bit mask `DAT_008681bc` picks `FUN_0086a130` (chorus) or `FUN_00869a80` |
 | main | 9 + 5 e + j | delay unit e (0..2), j: `DelFBWheel` 0..127 (64), `DelTimeWheel` 0..384 (144), `DelTimeOfsWheel` -512..512 (0), `DelVolWheel` -128..128 (64), `DelModeSelect` (0) | | | 0x5f30 + 0x38 e + 4 j; `FUN_00869540` |
 | main | (not REC) | `DelEnableBtn`, `DelSerialBtn`, `DelTempoBtn` per unit; reverb `RevEnableBtn`, `RevLCWheel` 19..3000 (75), `RevHCWheel` 5..221 (40), `RevDelWheel` 0..384 (0), `RevRoomWheel` 1..100 (40), `RevDiffWheel` 0..100 (100), `RevDecWheel` 1..200 (15), `RevHDWheel` 5..221 (40), `RevColWheel` 0..4 (2), `RevVolWheel` -128..128 (25), `RevTempoBtn`; `EQModeSelect`, `MixEQType1..3Select`; `DQOverSelect` 0..6 (0), `RQOverSelect` 0..6 (3), `DQEnvBtn`, `RQEnvBtn`, `GlobalCenterBtn`, `ModSmoothBtn`, `MonoKeyBtn`, `RandBtn`, `SoftenWheel` 0..128, `FXSendSelect` -125..125 | | | the three u8 after each delay's ints; the 38-byte reverb block; 0x61cc and the EQ types; the 0x4f0 / 0x4f4.. flags |
@@ -459,16 +459,16 @@ Reads every version 8..25 state to the last byte (268 project states, 744
 preset states across `Data`, 733 of them in Sytrus's own directory; the
 presets of versions 5..7, 229 in that directory and 252 across `Data`, are
 refused with a `Version` error, their articulator stream is another
-format). Of the 1012 states that load, 1000 are heard within the first
-2048 frames of three notes; the rest start with a silent attack. Renders operators with
-the kernel above over a 2048-sample table without band limiting, the FM
-and RM matrix, the three filters for types 0..10, every articulator's
-envelope, LFO and six maps (the unison map is read but not used), the pan
-law and the output levels, and the send path folded into the output at
-half, dry. Left out, each named in `fidelity`: unison sub-voices, plucked
-operators, the waveshaper, the comb and the phaser, the delays, chorus,
-reverb and EQ, the shape morph articulator, the harmonics filter wheel,
-the arpeggiator and portamento. Every state reports `Approximate`. The 597
+format). Of the 1012 states that load, 1003 are heard within the first
+2048 frames of three notes; the rest start with a silent attack. Renders
+operators with the kernel above over a 16384-sample table (section 10),
+band limited and filtered as section 11 has it, plucked as section 12 has
+it, the FM and RM matrix, the three filters of every type (section 13)
+with their waveshapers (section 8), every articulator's envelope, LFO and
+six maps, the unison (section 7), the pan law and the output levels, the
+effects (section 9) and the oversampling. Section 14 lists what is left
+out and what `fidelity` names; 696 of the states ask for none of it and
+report `Exact`. The 597
 REC parameters are the host's (section 6).
 
 ## 6. The REC parameters as a host moves them
@@ -535,15 +535,499 @@ The voice side (`0x872290`, read for this):
 Implemented: every index reads back and stores inside its range; the main
 volume, the LFO level, the main pitch, the quick ADSR (on the envelopes it
 covers, for the voices that start after it), Mod X and Mod Y with their
-glide, the operators' phase, volume and pitch range, every filter wheel
-but the waveshaper's pre-amp, the "to next" wheel with the routing, the FX
-send level and every articulator knob. Kept but not heard, as the parts
-they move are not built: the unison, the chorus, the delays, the EQ,
-portamento and the waveshaper's pre-amp. FL's saved LFO amounts differ
+glide, the operators' phase, volume and pitch range, every filter wheel,
+the "to next" wheel with the routing, the FX send level, every
+articulator knob and the unison's pan, volume and pitch (sections 7 and
+8), and the chorus, delay and EQ wheels (section 9). Kept but not
+heard: portamento. FL's saved LFO amounts differ
 from `level` by up to a bit of the f32 in some states (0.5633213 against
 0.56332123 for 101), and an f32 port of `0x86a1d0` misses others, so the
 LFO level is worked out with `level` and the state's own amounts stand
 until the host moves it.
+
+## 7. Unison (`TriggerVoice` `0x86c7d0`, `0x871fd0`, `0x86af20`, `0x872290`, `0x870820`)
+
+Read in run 6 (`/root/ghidra/sytrus/out/b1`, the project re-imported on the
+cloud machine with the same addresses). The wheels are REC 11..17 at
+`0x3e0`: order N (1..9), pan, volume, pitch, sub, phase, envelope. Two
+saved bytes go with them: u8 `0x4ff`, the unison type (the last of the
+`0x4f7` flags; 1 in most corpus states, 0 in the rest), and u8 `0x4f4`
+(saved from version 6), which makes the voices share one set of filters.
+
+`TriggerVoice` makes `N` voices for a note, and `N` more an octave down
+when the sub wheel is not 0 (round `d` = 0, 1; voice `e` = 0..N-1), each a
+full voice record (`GetMem(0x6728)`). With `c = 1/128` (`0x8ff8c0`):
+
+```
+range   = type 0: (float)(exp(ln 11 (p / 256)) - 1) * 5 * ln2/1200      // 0x86d4d0, 0x86d4e0; 0x90e508 = ln2/1200 (0x62e5f0)
+          else:   (float)(exp(ln 41 (p / 256)) - 1) * 1.875 * ln2/1200  // 0x86d4e8, 0x86d4f0
+g       = N > 1 ? 1 - (3^(1 - 1/N) - 1) / 2 : 1                         // 0x86d4f8 = 3
+lev[0]  = g; with a sub wheel s: lev[1] = g s c, lev[0] = g (1 - s c)
+shared  = 0x4f4 and (N >= 2 or s >= 1)
+per voice (d, e):
+  +0x54  = lev[d]
+  N == 1: pan +0x3c = 0.5, +0x40 = +0x54, detune +0x4c = 0, pitch +0x44 = 1, phase +0x38 = 0, place 0.5, scale k = c
+  else:   +0x38 = (e / N) phase c;  t = e / (N - 1);  x = 2t - 1
+          +0x50 = shared ? 0 : x / 256;  +0x3c = +0x50 pan + 0.5
+          a = |x|;  +0x58 = (type == 0 or N != 2) ? 2 +0x54 (1 - a) : +0x54
+          +0x40 = +0x54 vol c + +0x58 (1 - vol c)
+          a = -a for odd e; again for type != 0, odd N and N < 2e
+          +0x4c = a T[type][(e + d) mod 9];  +0x44 = exp(+0x4c range)    // T at 0x8fcad8 + 0x24 type
+          type 3: +0x38 = frac((phase c)^8 +0x44 100000 (d > 0 ? 0.5 : 1))   // 0x40acf0, 0x86d530
+          k = ((|x| - 0.5) env E[(e + d) mod 9] c + 1) c                       // E at 0x8fcb68
+          place = t
+  d > 0:  +0x44 *= 0.5; the key the maps read drops 12 semitones (not under 0)
+  +0x34 = +0x40; the first voice of a shared unison then +0x40 = 1
+  role +0x2c: 0 alone, or shared: -1 the first voice (master), 1 the rest (slaves)
+```
+
+`T` = 0.877 1.069 0.929 1.181 1.031 1.129 0.887 1.117 0.977 for types 0
+and 1, all 1 for type 2, 0.89047 1.07643 0.91158 1.10254 1.03413 1.16686
+0.85397 1.20627 1 for type 3. `E` = 0.9877 1.0069 0.9929 1.0181 1.0031
+1.0129 0.9887 1.0117 0.9977. Type 0 detunes every even voice up and every
+odd one down; the other types also turn the upper half of an odd unison
+down.
+
+Where each value goes:
+
+- `+0x44` multiplies the operators' frequency (`0x872210`: `exp(pitch
+  ln2/1200) x part+0x8d8 x +0x44 + part+0x8d0`).
+- `+0x38` adds to every operator's start phase, with the phase wheel and
+  the phase articulator (`0x86af20`).
+- `place` is where the articulators' unison maps (sub-object 6) are read,
+  combined in the articulator's mode after the key, velocity and random
+  maps (`0x86af20` calls `0x7897d0(art+0x58, place)`); `0x78bbc0` reads the
+  key map at the dropped key / 120.
+- `k` scales the voice's copy of the attack and decay knobs of the
+  envelopes under the quick ADSR, unless the envelope is global (flag 2):
+  attack `x ADSR.att x k`, decay `x ADSR.dec x (1/64 - k)` (`0x86c748`), so
+  `k = 1/128` leaves them.
+- `+0x3c` replaces the 0.5 in the output pan, `(FinalPan / 2 + +0x3c +
+  part+0x28 + pan art) x 2 - 1`, and `+0x40` multiplies the output gain
+  (`0x872290`).
+
+Alone (`0x2c = 0`) every voice runs on its own: articulators, operators,
+filters, output. Shared, the master's render (`0x872290`) ticks each
+slave's articulators and calls `0x870820` for every slave in its `+0x60`
+chain before its own: the second voice (`+0x30 = 0`) writes its operators'
+outputs times `+0x34` into the operator buffers, the others and the master
+(`+0x30 = 6`) render into the buffers past them and add those times
+`+0x34`, and only the master runs the filters and the output on the sum. A
+slave goes when its master does.
+
+When a pan, volume or pitch wheel moves, `0x871fd0` works out `+0x3c` (for
+a voice alone), `+0x40`, `+0x34` and `+0x44` again for every voice and
+forces the pitch to be taken again (`+0x18 = 2^31`). Order, sub, phase and
+envelope wait for the next note.
+
+Implemented as read (`Unison` in `sytrus.rs`). Not built: the velocity
+flags `0x4fd` (attack by velocity, `0x86af20`; 0 in every corpus state),
+global envelopes shared between voices (flag 2), portamento.
+
+## 8. The filters' waveshaper (`0x874040`, `0x870820`)
+
+The switch is the byte at filter block +0x28 (`part+0x8a8`); the curve is
+the kind-3 `TCustomMEnvelope` at `part+0x8b0`, read after the block, and the
+u8 after it (version 12 on) makes it bipolar: `0x781b90` stores `u8 x 0.5`
+at curve+0x18 and `0x781b70` asks whether that is 0.5. The pre-amp and mix
+wheels are header[7] / 128 (`part+0x8c8`) and header[8] / 128
+(`part+0x8c4`).
+
+`0x874040` bakes the curve when the switch is on: `N = (bipolar + 1) x
+0x4000` i16 steps at `part+0x8b8`, `last = N - 1` at `part+0x8c0`, walked
+from 0 to 1 in steps of `1 / last` (`0x874218`), each `round(level x
+((bipolar + 1) x 0x8000 - 1))` kept to i16, with the first and the last
+once more at either end. It is Love Philter's table (`FUN_0085c340` there).
+
+`0x870820` runs it after the filter (and its x2 downsampling), on the
+voice's buffer, into the scratch buffer `0x6250`, then mixes:
+
+```
+kernel (x, pre = part+0x8c8, dry weight 0 = 0x871f90, wet weight 1 = 0x871fb8, x 1/32768 = 0x8d568c)
+  unipolar  0x62d980: i = trunc(|x| (pre last)), at most last;      y = sign(x) t[i]
+  bipolar   0x62e090: i = round(x pre last / 2 + last / 2), 0..last; y = t[i]
+  HQ uni    0x62d800: f = x pre last, i = trunc(f), r = f - i;  i >= 0: y = t[min(i, last)] + (t[.+1] - t[.]) r
+                                                             i < 0:  y = -(t[j] - (t[j+1] - t[j]) r), j = min(-i, last)
+  HQ bi     0x62daa0: f = x pre last / 2 + last / 2, i = trunc(f), k = clamp(i, 0, last), r = f - i; y = t[k] (1 - r) + t[k+1] r
+mix     = clamp(art[7] x part+0x8c4, 0, 1); the voice's first tick takes it as it is
+glide   = 0x62bb20 (parts::glide) from the mix before to it over the call, by no more than TAudioRenderer+0x38 a sample
+out     = mix 1 and no glide: the shaped buffer; else x (1 - m) + y m, m stepping
+HQ      = u8 0x5f18 (saved from version 25) or FL rendering to a file (0x6336)
+```
+
+These are the SSE kernels; `0x62e5f0` puts them in the table at
+`0x90e640..0x90e698` when the CPU byte +0x16 is set and the x87 ones
+(`0x62af60`, `0x62b130`, `0x62afe0`, `0x62b1b0`, which round where the SSE
+unipolar ones truncate) otherwise. `TAudioRenderer` (`0x62bcd0`) keeps
+`+0x34 = 0.001 x 44100 / SR` and `+0x38` ten times it, `+0x3c` 32768 times
+it.
+
+Implemented as read (`Shaper` in `sytrus.rs`). The HQ kernels run when the
+state's byte asks; FL's switch to them while it renders to a file is not
+followed, as for Love Philter.
+
+## 9. The effects (`Gen_Render` `0x8737a0`)
+
+Read in run 6 with the setters: `0x869540` (delays), `0x869480` (serial
+routing), `0x869840` (reverb), `0x869a80` (chorus), `0x86a130` (send pan
+and FX send level), `0x86a440` / `0x86a5b0` / `0x625990` / `0x6253c0`
+(EQ), `0x862b80` (oversampling), the kernels `0x625db0` (EQ),
+`0x62a490` (L + R), `0x62e190` (high pass), and the classes of
+`docs/plugins/fl-fx.md`: the chorus `TStereoFlanger` (constructor
+`0x840700`, set up `0x840920`, write `0x841060`, renderer at +0x60, sleep
+`0x841020`), the delay `TDelay_32FS` (`0x83d140`, size `0x83cfe0`, input
+`0x83d480`), the reverb `TFruityReverb` (`0x8402d0`, process
+`0x8404b0`). After a load `0x862c50` runs every setter.
+
+The voices render into two stereo buses: dry (`0x6298`) and send
+(`0x62a0`). For each row in the output list the gains are
+`FinalVol x main volume x +0x40 x part+0x30` at the pan `(FinalPan / 2 +
++0x3c + part+0x28 + pan art) x 2 - 1`; for each row in the send list
+`FinalVol x main volume x +0x40 x part+0x2c x main art 1` at the pan with
+`0x61e4` (main wheel 0 / 256) and main art 0 added (`0x872290`). The send
+bus is heard only through the effects; the FX send wheel (`0x61e0 =
+level(main wheel 8 / 128)`) scales only the copy to a mixer track.
+
+```
+countdown 0x6308: 0 when the voice has no send rows (0x632c); while voices sound = 0x630c; after, -= n
+          0x630c = SR x 100 / 44100 (int), plus the chorus ring (block + longest + 8) when the chorus is on
+voices -> dry, send                                      (the list from its end)
+EQ mode 2 / 3: the bands on dry / send                   (0x8736f0)
+chorus (0x5f20, order >= 1): countdown < 1: sleep n (LFOs on);
+          else ring += send, render -> tmp, dry += tmp, and send += tmp when 0x5f28
+          0x5f28 = a delay on, or the reverb on, or an FX send target           (0x869480)
+FX send (0x420 != -1, countdown > 0): mixer track 0x420 + 1 += send x 0x61e0
+delays e = 0..2 (object when on): gate = countdown
+          gate > 0: ring[write + off L] += send L, ring[write + off R] += send R
+          kernel by mode (0 +0x40 straight, 1 +0x50 swapped, 2 +0x60 ping-pong) -> tmp
+          serial (+0x30): send += tmp x vol, gate = 0x630c;  else dry += tmp x vol
+reverb (0x5fe0, on): mono = send L + R; process -> send (stereo); dry += send x 0x5fe8
+EQ mode 1: the bands on dry
+0x4f5: dry through the high pass
+dry -> out
+```
+
+Delay unit `e` (`0x5f30 + 0x38 e`): wheels feedback, time, offset,
+volume, mode (REC 556 + 5 e + j); bytes +0x14 tempo, +0x15 serial, +0x16
+on (`0x869540` makes the object when +0x16 is set and frees it when not):
+
+```
+offset  = (float)((float)(exp((|o| / 512) ln 1001) - 1) x 50)        // +0x2c, in 10 us (0x8697f0, 0x8697f8, 0x869808)
+frames  = round(offset x SR / 100000)                                  // 0x869810
+time    = tempo ? round(t x SR x 0.3125 / tempo) : round(t x SR / 384)  // 0x869818, 0x869820; tempo is 0x627c
+ring    = block + frames + time;  the offset on the right side when o > 0, else on the left
+feedback = fb / 128 (+0x30, ramped by TAudioRenderer+0x34);  volume = level(|v| / 128) with v's sign (+0x28)
+serial  = +0x15 and e < (reverb on ? 3 : the last unit on)            // 0x869480
+```
+
+Reverb (`0x5fec`: low cut, high cut, predelay, room, diffusion, decay,
+high damping, colour, volume; u8 0x6010 on, u8 0x6011 tempo), into the
+`TFruityReverb` wrapper at the effects rate: low cut 0 (off) at 19, else
+Hz; high cut 0 (off) at 221, else in 100 Hz; damping likewise at 221;
+predelay `round(p x SR / 384)` or `round(p x SR x 0.3125 / tempo)`;
+room, diffusion and colour as they are; decay `(float)(d x SR / 10)`
+samples; wet `0x5fe8 = volume / 256` (`0x869840`).
+
+Chorus: on with order (main wheel 1) >= 1; the flanger's six wheels are
+main wheels 1..6 (order, depth / 1024, speed / 1024, delay / 128, spread
+/ 128, cross / 128, `0x869c30 = 1/1024`) and its gain +0x50 = main wheel
+7 / 128 (`0x869a80`), set up for the block and the rate.
+
+EQ band `b` (`0x6018 + 0x90 b`, saved: level, frequency, width, type):
+design type `+0x18 = type + 6` (`0x86a5b0`; the constructor's table
+`0x8fc9b8` is 6, 7, 8), `Hz = (float)((101^(f / 65536) - 1) x 159.9 + 10)`
+clamped to `0.4999 SR`, `dB = level x 0.01`, `w = width / 65536`;
+`A = 10^(dB / 40)`; type 7 a peak with `alpha = sin / ((q x 0.0999 + 0.1)
+x 2)`, `q = 1001^w - 1` (`0x62b260`); types 6 and 8 the low and high
+shelves with `beta sin`, `beta = sqrt((A^2 + 1) / (w x 1.9 + 0.1) - (A -
+1)^2)`; the RBJ coefficients of `0x6253c0` (`Coefficients64` has the same
+code), run in f64 direct form I per side (`0x625db0`). A band at level 0
+runs 0.2 s more (`0x62dc = SR / 5`) and stops; at level 0 it passes its
+input as it is.
+
+High pass (u8 0x4f5, saved from version 7): per side `speed += (x - low)
+g; low += speed; speed *= k; y = x - low` in f64 with `g = (float)(1.0070235
+/ SR)` and `k = 0.96f` (`0x8629d0`, `0x62e190`), states under 2^-24 made
+0: a two-pole high pass near 33 Hz.
+
+Oversampling: `0x862b80` sets `L = 0x438` (DQOverSelect while playing,
+`0x43c` RQOverSelect while rendering), the voices run at `2^L` times the
+rate (`0x62f4`) and the effects at `min(2^L, 4)` times (`0x62f8`), the
+decimators at `0x61e8..0x61f8` (`0x842100`) bringing the buses down
+between. In the corpus `0x438` is 0 in 218 states and 1..3 in 50.
+
+A block of `n` host frames: the voices render `n 2^L` frames into both
+buses at `2^L` times the rate (the control tick, the filters' tables and
+caps, the band limit and the strings all take that rate). For each
+halving `l` from `L - 1` down to 2 both buses are halved (dry `0x61e8`,
+send `0x61f0`), then the effects run at `min(2^L, 4)` times the rate
+(their delays, reverb times, chorus, EQ, glide cap and countdown in its
+frames), then the dry bus alone is halved for `l` from `min(L, 2) - 1`
+down to 0, then the high pass runs at the host's rate. A halving
+(`0x842100` sets it up, `0x841e40` runs it, the SSE kernel `0x841cd0`)
+is a half-band filter per side: two chains of three first-order
+allpasses, the even samples through one and the odd through the other,
+each allpass `y = x_prev + (x - y_prev) c`, and `out = (A + B) 0.5`, with
+the coefficients (`0x8f71e0`, copied by `0x8421d0`)
+
+```
+even: 0.147377113601046, 0.482468542769700, 0.883005025769373
+odd:  0.039151597734460, 0.302646848328493, 0.674615918546964
+```
+
+Implemented as read (`sytrus/fx.rs`), with the FX send to a mixer track
+left out (its target is -1 in every corpus state; `fidelity` names it),
+and the classes as `fl_fx.rs` has them (the chorus there is the x87
+renderer).
+
+## 10. The control tick, the wavetable size and the ramps
+
+The control tick is set with the rate (`0x8629d0` -> `0x8657b0`): `p =
+0x8fc9c4[i]` with `i` the i32 at 0x430 while playing (DQEnvBtn) or 0x434
+while rendering (RQEnvBtn), the table being 96, 8; then `0x62d0 = p x SR /
+44100`, the tick `0x62cc = max(4, round(0x62d0 / 4) x 4)` samples, and
+`0x62d0 = tick x 44100 / (SR x 96)`. `0x8656a0` gives every articulator
+`seconds = 0x62d0 x 96 / 44100` a tick: `2 x seconds` half seconds and
+`seconds x tempo / 60` beats (what the implementation had), and Mod X / Y
+glide by `0.01^(0x62d0 / 96)` a tick. Each voice counts its own ticks from
+its start (`voice+0x14 = -0x62cc` in `0x86af20`): the first tick moves the
+envelopes and LFOs by 0 (`0x8736d4`), the others by 1 (`0x8736d8`), and
+the levels ramp over the whole tick. The implementation ticked every
+voice together at the tempo's PPQ; it now does as FL does, with the
+playing switch.
+
+The operator wavetable is `2^14 = 16384` samples (`0x848980(14, 12)` from
+the constructor's `0x848a50` sets `0x911b90` and the two FFTs, orders 14
+and 12, the second for the band-limited copies). The implementation had
+2048.
+
+Ramps. At each tick `0x872290` aims an operator's volume and modulation
+with `0x62bbf0`: `step = (aim - now) / tick`, no larger than
+`TAudioRenderer+0x38` (`0.01 x 44100 / SR`); the kernel (`0x877270`, the
+SSE one `0x877760` installs; `0x870580` is the x87 one) steps the volume
+before it multiplies by it. The row gains into the output and the send
+are aims too: every render call (`0x870820` -> `0x616e20`) glides them
+with `0x62bb20` (`parts::glide`) over the call, by no more than
+`TAudioRenderer+0x34 x voice+0x40` (`0.001 x 44100 / SR` times the unison
+gain) a frame; the voice's first tick takes them as they are.
+
+Release and end (`Voice_Release` `0x86d5a0`, `0x872290`). A release sets
+the voice's stage to 5 and lets every envelope and LFO run go
+(`0x787c90`); with u8 0x4fe on (the default) the release segments first
+take the host's release time for the note (`Voice_ProcessEvent` 5,
+`GetRelTime`; 1 for an ordinary note, and not followed here). At each
+tick a released voice's stage is 9 unless an envelope is still running;
+at stage 9 the row gains aim at 0, so they glide down at the output cap,
+and once every output and send gain is 0 the voice is freed (stage 10).
+The implementation had cut a voice when its envelopes ended and faded
+one without envelopes over 10 ms.
+
+Free run (operator switch 3, `part+0x863`): the start phase adds
+`0x62b8 x f`, the frames the plugin has played times the operator's
+frequency (`0x86af20`); the implementation had a random phase.
+
+## 11. The harmonics filter and the band limit (`0x847900`, `0x86ace0`, `0x8471d0`)
+
+`TSytrusShape` keeps two IPP real FFTs, orders 14 and 12 (`0x848980`;
+`0x617960` asks `ippsFFTGetSize_R_32f(order, flag 1, hint 2)`, so the
+forward transform is divided by N and the inverse is not), and works in
+IPP's Pack format (DC, then re/im pairs, then N/2). `0x8477f0` copies
+the operator's block into the shape object (object offset = part offset
+- 0x18) and takes four switches: half (`part+0x860`), half silent
+(`+0x861`), abs (`+0x862`) and the sigma switch at shape `+0x84b`, which
+is `part+0x868`, the copy of the global u8 0x4f6.
+
+Filter (`0x847900`, the last step of the table build `0x847df0`, with
+the filter wheel `part+0x85c` / 128):
+
+```
+X       = FFT(table, 16384) / 16384
+c       = round((float)(1e10^(w 0.35 + 0.65) - 1) x 1.6384e-6)        // 0x869c90: 0x869cf8, 0x869cfc, 0x869d00, 0x869d10; w = 1 gives 16384
+c <= 8192: X[k] = 0 for k >= c
+spectrum at shape+0x858 = X[0..2048] (the imaginary part of 2048 dropped)
+c <= 8192: 0x4f6: X[k] *= (c-1)/pi x sin(k pi / (c-1)) / k for k = 1..c-1  // Lanczos sigma
+           table = IFFT(X); every |v| < 2^-24 is 0 (0x628bc0); table[16384] = table[0]
+```
+
+Band limit (`BandLimitBtn`, the operator's switch 7 at `part+0x867`, not
+for a plucked operator): when the voice first renders the operator
+(`0x870820` calls `0x86ace0` while its table is null), with `hz =
+voice+0x368 x SR` (the frequency with the pitch articulator), `nyq =
+0x4f6 ? 22050 : SR / 2` (`0x86af00`), `d = (nyq - 18000) / 4`
+(`0x86af08`, `0x8fec10`):
+
+```
+low  = trunc((d + 18000) / hz) + 1;  high = trunc((3 d + 18000) / hz) + 1    // 0x86af10 = 3
+low > 2048: the whole table
+else: the copy for (low, high) from the operator's list (made once, shared, counted):
+      w[k] = 1 for k < low; 1 - (k - low + 1) / (high' - low + 1) for low <= k <= high' = min(high, 2048); 0 above
+      0x4f6: w[k] = (w[k] x high'/pi) sin(k pi / high') / k for k = 1..high'
+      copy = IFFT(spectrum x w, 4096), flushed, copy[4096] = copy[0]   (ippsSet, ippsVectorSlope, ippsMul_32f32fc)
+then: table size 4096, the phase and the FM depths into this operator times the new size
+```
+
+Implemented as read (`sytrus/band.rs`) with an f64 FFT where FL's is
+f32. FL keeps every copy it ever made; here each band-limited operator
+has room for 32, made on the audio thread without allocating, and a note
+that finds all 32 in use reads the one with the nearest low limit.
+
+## 12. The plucked operator (`0x86a810`, `0x86aba0`, the kernel's pluck branch)
+
+`PluckModeBtn` is the operator's switch 6 (`part+0x866`). When the voice
+starts (`0x86af20`), `0x86a810` draws the string into memory of its own
+(`GetMem`, the operator state's +0x130..+0x140), with `f` the operator's
+frequency in cycles a sample before its pitch articulator (+0x40):
+
+```
+len    = max(2, round(88200 / (f x SR)))                   // 0x86ab6c: the string is drawn at 88.2 kHz
+noise  = part+0x48 (the noise wheel): n = level(v / 128) (1 at 128); then dry 1 - n, wet 1.5 n (0x86ab80)
+phase  = round(+0x38 x 2^32)  (the start phase in cycles: the phase wheel, the unison's and the phase articulator)
+step   = round(2^32 / len)
+noise != 0: buffer = ippsRandUniform_Direct_32f(-1, 1, seed = phase)
+buffer[i] = t[p >> 18 & 0x3fff] + (t[(p + 2^18) >> 18] - t[.]) x (p & 0x3ffff) 2^-18 ( x dry + buffer[i] x wet ), p += step
+buffer -= its mean;  held (+0x148) = buffer[len - 1];  owed (+0x164) = 1
+```
+
+`t` is the operator's 16384-sample table after the filter wheel (shape
+`+0x868`). `0x86aba0` runs then and whenever the damping articulator
+(operator articulator 5, kept to 0..1, +0x370) or the pitch (+0x368) moves:
+
+```
+take (+0x14c) = d x 0.99 + 0.01; keep (+0x150) = 1 - take                    // 0x86acc0, 0x86acc4
+keep changed: (s, c) = sincos(1 / len); period (+0x12c) = len x (keep s / (1 - keep c) + 1)
+step = period x max(f x pitch art, 0): whole (+0x15c) and fraction (+0x160) of trunc(step x 2^32)   // 0x62de80
+```
+
+The kernel's pluck branch (`0x877270`), a sample: `frac += fraction`;
+`n = owed + whole + carry`; n times: `previous = current; current =
+buffer[at]; buffer[at] = held = current x take + held x keep; at++`
+(wrapping); then `out = previous + (current - previous) x (int)frac x
+2^-32` (the SSE kernel takes the fraction as signed; the x87 one,
+`0x870580`, as unsigned). The rest is the kernel's: the RM gain, the
+volume, the FM and RM sends; a plucked operator takes no FM and no
+per-sample noise.
+
+Implemented as read (`sytrus/pluck.rs`), the noise burst from Sytrus's
+own generator (`0x8088405 x + 1`) rather than IPP's, each plucked
+operator with room for 64 strings of up to 16384 samples (5.4 Hz) made
+with the state; a note that finds none free plays the operator silent.
+
+## 13. The filters (`0x86ebe0`, `0x870820`, `0x86af20`, `0x86ea60`)
+
+Read in run 6 line by line, with the SSE kernels `0x627010` / `0x6270d0`
+(state variable), `0x626e80` / `0x626f40` (ladder low / high), `0x625bd0`
+(biquad), `0x6274e0` / `0x6275c0` (four pole ladder, without and with
+drive) and `0x780d90` (phaser), all installed by `0x628580` when the CPU
+flag is set. Types (`+0x170`, the block's i32 at +0x2c): 0 state variable,
+1 / 2 ladder low / high, 3 low pass, 4 band pass, 5 notch, 6 high pass, 7
+all pass, 8 low shelf, 9 peak, 10 high shelf (the cookbook kinds 1..8 of
+`0x6253c0`, by the table at `0x8fd29c`), 11 a four pole ladder with drive
+(Love Philter's Mango) and 12 a phaser. Types 1..10 have the Love Philter
+constants the implementation already had (`0x870380..0x8704c0`).
+
+Voice start (`0x86af20`), per filter: `+0x174 = order - 1`; detuned
+(`+0x178`) when that is above 2, which takes 2 off; spread `+0x17c = 1 /
+(+0x174 + 1)`, for type 11 `1 / (+0x174 / 4 + 1)`; width `+0x180 =
+order` (its reciprocal for type 5) times `ln 2 / 2` (`0x90e500`); the
+alternate switch `+0x189 = part+0x881`; twice the rate `+0x188 =
+(part+0x880 and SR <= 176399) or (type 11 and SR <= 88199)`; scale
+`+0x184 = 44100 / SR`, halved at twice the rate; every stage's frequency
+at 0.5 and damping at 1 (0.1 for the ladders); for type 12 the phaser's
+`order` pairs of allpasses (`order + 5` with the alternate switch,
+`0x780c80`).
+
+Design, a tick (`c` cutoff and `r` resonance with their articulators):
+
+```
+alternate (types 1..10): r *= (c + 1) / 2;  the detuned rows' earlier stages: fc^0.5 (2) or fc^0.75 (3) (0x8fd2a0)
+0 state variable: f = (26^c - 1) x 0.0396; stage k (last first) frequency = T[min(round(f x 2048), len - 1)], f detuned
+                  damping (stage 0) = 1 (r <= 0), 0.2 (r >= 1), else 1 - 0.8 r; squared with the alternate switch
+                  T (0x86ea60, at the rate and at twice it) = 2 sin(asin(min(1, (i / 2048 + 0.01) / 2)) x 44100 / SR), i = 0..4095,
+                  up to the first value >= 1.175, which is 1.175
+                  gains: level(slider / 128) x articulator 4..6; with more than one stage each to the power of the spread (0 at <= 0)
+11 ladder:        fc = min((201^c - 1) 0.01495, 3); drive = (251^(low x art4 / 128) - 1) 0.12
+                  feedback = r > 0 ? (0.6 min(drive, 1) + 1.9) min(r, 1) : 0, with stages (fb + 1)^spread - 1
+                  g = min((fc + 0.01) x scale / 2, 0.65); pole = 1 - exp(-pi (1.873 g^3 + 0.4955 g^2 - 0.649 g + 0.9988) g)
+                  stage feedback = -fb (-3.9364 g^2 + 1.8409 g + 0.9968); drive >= 0.001: pole /= drive, heat = tanh(4 / drive),
+                  alternate: feedback x heat; gain = (1 / heat) (1 - feedback) / 2; else gain = (1 - feedback) / 2
+12 phaser:        fc = (151^c - 1) x 0.006666; feedback = 0 (r <= 0), 0.9 (r >= 1), else ln(10 r + 1) / ln 11 x 0.9
+                  w = min((fc + 1e-4) x scale, 1); a = (1 - w) / (1 + w)
+8..10 gain:       (8^(low x art4 / 64) - 1) / 8 + 1 / 8 (0x871f90, 0x871f98, 0x871fa8)
+```
+
+A render call (`0x870820`), per filter: the inputs summed; the volume
+(articulator 1) glided from where it was by no more than
+`TAudioRenderer+0x38` a sample (`0x62bb20`) and applied; with no stage
+that is all. At twice the rate every sample is written twice
+(`0x62c6d0`) and the pairs averaged afterwards (`0x62d280`). Type 0: the
+three gains glide (the same start and step for every stage), every
+stage's frequency glides and stage 0's damping glides (the others keep
+theirs, 1), all over the doubled frames and capped; with the alternate
+switch each stage's damping becomes `(stage 0: damping x scale; others:
+scale) / max(frequency start, end)`; per stage `low += band f; high = x -
+(band q + low); band += high f` in f64 with f and q stepping, then `out =
+low g0 + band g1 + high g2` in f32. Types 1, 2: frequency and keep glide,
+`speed += (x - low) g; low += speed; out = low (or x - low); speed *=
+k`. Types 3..10: the biquads, a stage after another. Type 11: per stage
+`p0 += ((y fb + x) - p0) pole; p1..p3 the same; y = p3 old + p3 new; out =
+gain y`, with drive every pole through `x (a^2 + 3a + 6) / (a^3 + 3a^2 +
+6a + 12)` of its value times the drive. Type 12: `s = s fb + x`, then per
+pair of allpasses `y = -a s + z0; z0 = s + a y; t = -a y + z1; z1 = y + a
+t; s = t`, `out = s`. Then the waveshaper (section 8).
+
+Implemented as read (`sytrus/filter.rs`).
+
+## 14. The switches and what is left out (`0x86c7d0`, `0x86af20`, `0x86d770`)
+
+Read in run 6. The main block's u8 0x440..0x443 and 0x4f7..0x4ff
+(defaults from the constructor `0x865c10` and the loader `0x862d70`):
+
+| byte | default | what it does |
+|---|---|---|
+| 0x440 | 1 | Mod X and Mod Y glide (built) |
+| 0x441 | 1 | the random maps apply at voice start (`0x86af20`, `0x7897d0` of `random()`) |
+| 0x442 | 0 | the levels of the operators after the first (part index > 0) are multiplied by the voice's +0xd0 at start and in every render call (`0x86af20`, `0x870820`) |
+| 0x443 | 0 | a note cuts the voices of its key (built, below) |
+| 0x4f8 | 0 | portamento, REC 596 |
+| 0x4f9, 0x4fa, 0x4fb | 1, 0, 0 | portamento: the glide scaled by its distance, the start from the last note (0x62e0), and its kind (`< 2`: wrap by 1200 cents; else limit to `(6 - v) x 100` cents) |
+| 0x4fc | 1 | off: the voice calls the host's `Voice_ProcessEvent(FPV_SetLinkVelocity = 6, 0)` |
+| 0x4fd | 0 | bit 0: the attack by velocity (`x voice+0xa8`); bit 1: the envelope by velocity (`0x789770` with `voice+0xa4`) |
+| 0x4fe | 1 | a release takes the host's release time (`FPV_GetRelTime`) |
+| 0x4ff | 0 | the unison's kind (section 7) |
+
+The key cut (`0x86c7d0`, u8 0x443): a note's key is `round(max(0, (pitch
+x 0.01) + 60))` with `pitch` its cents from C5 plus the main pitch (and
+the last note's under portamento); every voice filed under that key
+(`voice+0x28`) whose stage is under 9 goes through `0x86d770`, which sets
+its stage to 9 and every envelope's and LFO level's run to 9 (+0, +8,
++0x60, +0x68 of each 200-byte articulator run) and does the same to the
+voice it is linked to (+0x60), so its gains glide to 0 at the output cap
+(section 10). Built so (`Voice::cut`).
+
+Global envelopes (articulator flag 2, `0x86af20`): an envelope with the
+flag that is on links its run (+0xc0) to the same articulator's run of the
+first voice in the list whose stage is under 5, and takes that voice's
+tick countdown (`+0x14`); then the quick ADSR does not scale it. Only with
+no such voice does it run its own. The link's reading in the tick
+(`0x78b720` and its callees) is not read, so this is left out.
+
+What `fidelity` names, the first that a state asks for:
+
+- `Sytrus FX send`: the send to a mixer track (0x420 not -1 with the send
+  on); 1 corpus state.
+- `Sytrus portamento`: 0x4f8 on (and its 0x4f9..0x4fb); 28 states. A
+  slide or portamento note with the switch off is not followed either.
+- `Sytrus global envelopes`: an active envelope with flag 2; 99 states.
+- `Sytrus voice switches`: 0x441, 0x442, 0x4fc or 0x4fd off their
+  defaults; 166 states.
+- `Sytrus plucked noise`: a plucked operator with noise, whose buffer is
+  IPP's `ippsRandUniform_Direct_32f` seeded by the phase, here Delphi's
+  generator; 22 states.
+
+The rest, 696 of the 1012 states, play as this document has them. Also
+not followed: the host's release time (0x4fe; 1 for an ordinary note),
+the arpeggiator (FL's, outside the plugin), and versions 5 to 7, which
+are turned down.
 
 ## Corrections
 
@@ -565,3 +1049,19 @@ until the host moves it.
   under the base.
 - The saved main block's last 162 bytes (0x44c..0x4ee) are the matrix mute
   flags, which section 1 did not name.
+- `0x5f20` is the chorus (`TStereoFlanger`) and `0x5fe0` the reverb;
+  section 3 had them the other way round. `0x5f28` is "the chorus also
+  feeds the send bus". The three bytes after each delay unit's ints are
+  tempo (+0x14, 1 by default), serial (+0x15) and on (+0x16), not on,
+  serial, tempo. `FUN_00842100` is the decimator of the oversampling,
+  not the EQ, whose kernel is `0x625db0`.
+- Main wheel 0 (REC 547) is the send's pan, `0x61e4 = v / 256`.
+- Operator articulator 5 is the plucked operator's damping, which
+  `0x86aba0` turns into the pluck's loop filter; it is no shape morph, and
+  it does nothing for an operator that is not plucked.
+- Filter types 11 and 12 are a four pole ladder with drive (Love
+  Philter's Mango) and a phaser, not a comb and a phaser; the state
+  variable filter (type 0) has its own frequency table and damping, not
+  Love Philter's.
+- Articulator flag 2 links a new voice's envelope to an earlier voice's
+  run; section 7 named it only as keeping the unison's stretch off.
