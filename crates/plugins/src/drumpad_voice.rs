@@ -4,6 +4,10 @@
 //! [`Voice::trigger`] starts it (`FUN_18001fca0`), [`Voice::play`] reads it
 //! out at the host's rate (`FUN_180020f50`) and `Voice::render` makes its
 //! samples at 38 kHz (`FUN_180020460`).
+//!
+//! Drumaxx's pads are the same voice in another build
+//! (`docs/plugins/drumaxx.md` section 4): [`Voice::whole`] keeps all 128
+//! lines apart as its pads do, and [`Voice::cut`] is its cut groups'.
 
 // Limits are `max` then `min` in the binary's order, which turns a NaN into
 // the lower limit where `clamp` would keep it.
@@ -427,20 +431,28 @@ pub struct Voice {
     /// to go above [`QUIET`] (`+0x49e5`).
     pub active: bool,
     fresh: bool,
-    /// The lines the note runs, one after the other in `lines`: four
-    /// floats a slot. FL keeps all 128 apart; one note never runs more
-    /// than [`MAX_LINES`] of them.
+    /// The lines, four floats a slot. FL keeps all 128 apart. A voice
+    /// made by [`Voice::whole`] does too; one made by [`Voice::new`] lays
+    /// out only the lines the note runs, one after the other, and one note
+    /// never runs more than [`MAX_LINES`] of them.
     lines: Vec<f32>,
+    whole: bool,
     first_line: usize,
     line_count: usize,
+    /// The line that the arrays below hold at 0: none for a whole voice,
+    /// the first the note runs for the other.
+    base: usize,
     /// Where each line starts in `lines`, how many slots it has and the
     /// slot it is at.
-    at: [usize; MAX_LINES],
-    len: [usize; MAX_LINES],
-    slot: [usize; MAX_LINES],
+    at: [usize; LINES],
+    len: [usize; LINES],
+    slot: [usize; LINES],
     /// The lowpass of every lane, and its gain.
-    low_pass: [[f32; 4]; MAX_LINES],
-    gains: [[f32; 4]; MAX_LINES],
+    low_pass: [[f32; 4]; LINES],
+    gains: [[f32; 4]; LINES],
+    /// Whether another pad of a cut group has cut the note (`+0x4c`): its
+    /// hold ends now. Drumpad never sets it.
+    pub cut: bool,
     rng: u32,
     mallet: f32,
     low: Low,
@@ -481,13 +493,16 @@ impl Voice {
             active: false,
             fresh: false,
             lines: vec![0.0; floats],
+            whole: false,
             first_line: 0,
             line_count: 0,
-            at: [0; MAX_LINES],
-            len: [0; MAX_LINES],
-            slot: [0; MAX_LINES],
-            low_pass: [[0.0; 4]; MAX_LINES],
-            gains: [[0.0; 4]; MAX_LINES],
+            base: 0,
+            at: [0; LINES],
+            len: [0; LINES],
+            slot: [0; LINES],
+            low_pass: [[0.0; 4]; LINES],
+            gains: [[0.0; 4]; LINES],
+            cut: false,
             rng: seed,
             mallet: 0.0,
             low: Low::default(),
@@ -511,6 +526,19 @@ impl Voice {
             bend: 1.0,
         };
         voice.set_rate(rate);
+        voice
+    }
+
+    /// A silent voice that keeps all 128 lines apart, as FL's does: a note
+    /// runs on with what the lines it runs still hold, whatever the note
+    /// before ran. Its lines take half a megabyte.
+    pub fn whole(rate: f32, seed: u32) -> Self {
+        let mut voice = Voice::new(line_floats(0, LINES), rate, seed);
+        voice.whole = true;
+        for line in 0..LINES {
+            voice.at[line] = line_floats(0, line);
+            voice.len[line] = LANES - 4 * line;
+        }
         voice
     }
 
@@ -551,33 +579,41 @@ impl Voice {
 
         let (first, mut count) = patch.lines();
         let mut cut = false;
-        while count > 0 && line_floats(first, count) > self.lines.len() {
-            count -= 1;
-            cut = true;
-        }
-        if (first, count) != (self.first_line, self.line_count) {
-            // The lines a note runs are laid out for it: one that runs
-            // others starts them from silence.
-            self.lines.fill(0.0);
-            self.low_pass = [[0.0; 4]; MAX_LINES];
-            let mut at = 0;
-            for line in 0..count {
-                // Line `i` holds lanes `4i` to `4i + 3`, the longest a
-                // delay of `512 - 4i` samples, as `line_floats` sizes it.
-                let len = LANES - 4 * (first + line);
-                self.at[line] = at;
-                self.len[line] = len;
-                self.slot[line] = 0;
-                at += len * 4;
-            }
+        if self.whole {
             self.first_line = first;
             self.line_count = count;
+        } else {
+            while count > 0 && line_floats(first, count) > self.lines.len() {
+                count -= 1;
+                cut = true;
+            }
+            if (first, count) != (self.first_line, self.line_count) {
+                // The lines a note runs are laid out for it: one that runs
+                // others starts them from silence.
+                self.lines.fill(0.0);
+                self.low_pass = [[0.0; 4]; LINES];
+                let mut at = 0;
+                for line in 0..count {
+                    // Line `i` holds lanes `4i` to `4i + 3`, the longest a
+                    // delay of `512 - 4i` samples, as `line_floats` sizes it.
+                    let len = LANES - 4 * (first + line);
+                    self.at[line] = at;
+                    self.len[line] = len;
+                    self.slot[line] = 0;
+                    at += len * 4;
+                }
+                self.first_line = first;
+                self.line_count = count;
+                self.base = first;
+            }
         }
         let mut gains = [0.0; MAX_LINES * 4];
         lane_gains(&patch, first * 4, &mut gains[..count * 4]);
-        for (line, quad) in self.gains.iter_mut().enumerate().take(count) {
+        let from = first - self.base;
+        for (line, quad) in self.gains[from..from + count].iter_mut().enumerate() {
             quad.copy_from_slice(&gains[line * 4..line * 4 + 4]);
         }
+        self.cut = false;
 
         self.low.tune(patch.low_freq, patch.low_q);
         self.high.tune(
@@ -601,10 +637,15 @@ impl Voice {
     pub fn clear(&mut self) {
         self.active = false;
         self.fresh = false;
-        let used = line_floats(self.first_line, self.line_count).min(self.lines.len());
-        self.lines[..used].fill(0.0);
-        self.slot = [0; MAX_LINES];
-        self.low_pass = [[0.0; 4]; MAX_LINES];
+        if self.whole {
+            // FL's reset clears every line (`FUN_1800201c0`).
+            self.lines.fill(0.0);
+        } else {
+            let used = line_floats(self.first_line, self.line_count).min(self.lines.len());
+            self.lines[..used].fill(0.0);
+        }
+        self.slot = [0; LINES];
+        self.low_pass = [[0.0; 4]; LINES];
         self.buffer.fill(0.0);
         self.mid.clear();
         self.hold = 1.0;
@@ -624,7 +665,8 @@ impl Voice {
     fn membrane(&mut self, mallet: f32) -> f32 {
         let (cutoff, feedback) = (self.patch.cutoff, self.patch.feedback);
         let mut sum = [0.0f32; 4];
-        for line in 0..self.line_count {
+        let from = self.first_line - self.base;
+        for line in from..from + self.line_count {
             let at = self.at[line];
             let len = self.len[line];
             let lane = &mut self.lines[at..at + len * 4];
@@ -727,7 +769,7 @@ impl Voice {
             }
             x = x.min(1.0).max(-1.0);
             let hold = f64::from(self.hold);
-            let hold = if self.time >= patch.hold {
+            let hold = if self.cut || self.time >= patch.hold {
                 hold - hold * 0.001
             } else {
                 f64::from(1.0 - self.hold) * 0.1 + hold
