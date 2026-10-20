@@ -2,6 +2,13 @@
 
 The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed and CI is green on Linux, macOS and Windows. fmt, clippy and `cargo test -p plugins` with the corpus pass at `20f0570`, where a release corpus render hears 112 of 165 projects and 33 play in full. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
 
+## Parametric EQs, 2026-10-20
+
+- Fruity Parametric EQ 2's engine resampler (204 corpus states) and its matched HQ designer (61 states) are read from Frequency Splitter's `engine_x64.dll` and rebuilt in `crates/plugins/src/parametric_eq_2_engine.rs`. The designer was checked against the DLL's own code run under unicorn (`tools/plugstate/engine_emu.py`): the same to the bit with the DLL's libm. The plugin now reports 44 frames of latency with the engine resampler, and sleeps as FL does (only bands counting down are emptied).
+- Fruity Parametric EQ (the first one) is rebuilt, Exact.
+- Linear phase (8 states, 3 hosted slots) is the one part of Parametric EQ 2 left stood in for. `.scratch/notes/fruity-parametric-eq-2.md` hands it over; the same engine convolver is Frequency Splitter's, whose window guess it confirms and whose scaling it settles (IPP FFTs that do not scale).
+- Corpus render at `c8145a9`: 112 with sound, 34 play in full (was 33), 932 effect slots hosted (was 928), 46 approximated (was 113).
+
 ## Perf work, 2026-10-19
 
 Heavy demo projects dropped out in the app. Done so far, each measured with `crates/engine/examples/profile.rs` (README, Tests):

@@ -6,7 +6,7 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
-| Effect | Fruity Parametric EQ 2 | 3942 | yes | 54 | implemented in crates/plugins (cookbook path exact; HQ matched, linear phase and FIR oversampling approximated), docs/plugins/fruity-parametric-eq-2.md |
+| Effect | Fruity Parametric EQ 2 | 3942 | yes | 54 | implemented in crates/plugins (cookbook and matched HQ filters and both 2x resamplers exact; linear phase approximated), docs/plugins/fruity-parametric-eq-2.md |
 | Effect | Fruity Limiter | 3777 | yes | 52 | implemented in crates/plugins, docs/plugins/fruity-limiter.md |
 | Effect | Maximus | 5766 | yes | 40 | implemented in crates/plugins (IIR and FIR crossovers, curves, detectors, saturators and low cut exact; 2x oversampling and the linear-phase crossover approximated), docs/plugins/maximus.md |
 | Generator | 3x Osc | 4247 | yes | 39 | implemented in crates/plugins (HQ tables approximated), docs/plugins/3x-osc.md |
@@ -68,7 +68,7 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Morphine | 1704 |  | 4 | |
 | Effect | Distructor | 3571 |  | 3 | |
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
-| Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
+| Effect | Fruity Parametric EQ | 3727 | yes | 3 | implemented in crates/plugins, docs/plugins/fruity-parametric-eq.md |
 | Effect | Fruity Phaser | 3622 | yes | 3 | implemented in crates/plugins (exact), docs/plugins/fruity-phaser.md |
 | Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its two controller outputs are not driven, so the 60 corpus links from it in 3 projects play nothing, and it says so as approximated), docs/plugins/fruity-x-y-controller.md |
 | Effect | Low Lifter | 3704 | yes | 3 | |
