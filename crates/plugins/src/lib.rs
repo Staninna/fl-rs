@@ -457,11 +457,9 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
     } else if PASS_THROUGH.iter().any(|known| is(known)) {
         Some(Box::new(pass_through::PassThrough::new()))
     } else if is(control_surface::NAME) {
-        let left_out = control_surface::LEFT_OUT;
-        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+        Some(Box::new(control_surface::ControlSurface::default()))
     } else if is(xy_controller::NAME) {
-        let left_out = xy_controller::LEFT_OUT;
-        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+        Some(Box::new(xy_controller::XyController::default()))
     } else if is(wrapper::NAME) {
         Some(Box::new(wrapper::Wrapper::default()))
     } else {
@@ -801,13 +799,12 @@ mod tests {
             "vocodex",
             // Counted in `wrapper::tests`.
             "fruity wrapper",
+            // Counted in their own tests.
+            "control surface",
+            "fruity x-y controller",
         ];
         // Any state does for an effect that leaves the sound alone.
-        let controllers = [control_surface::NAME, xy_controller::NAME];
-        let passes = |plugin: &str| {
-            let mut passing = PASS_THROUGH.iter().chain(&controllers);
-            passing.any(|n| n.eq_ignore_ascii_case(plugin))
-        };
+        let passes = |plugin: &str| PASS_THROUGH.iter().any(|n| n.eq_ignore_ascii_case(plugin));
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
