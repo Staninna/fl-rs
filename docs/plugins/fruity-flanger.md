@@ -164,9 +164,9 @@ The plugin adds no latency.
 
 ## Implementation notes (crates/plugins/src/flanger.rs)
 
-- Bit for bit as above but for `sin` (Rust's, then truncated) and `v`,
-  which FL gets by multiplying with the wheel's f64 scale and this by
-  dividing by Max.
+- Bit for bit as above but for `sin` (Rust's, then truncated). `v` is the
+  value times the wheel's f64 scale, `1 / (Max - Min)` (`0x00651f80` in
+  the Vintage Chorus DLL, the same VCL code), as FL has it.
 - A new sample rate makes new, empty rings, where FL's `ReallocMem` keeps
   what was there.
 - The right phase is kept as the left plus the offset, which is what FL's
