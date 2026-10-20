@@ -227,7 +227,7 @@ width `Round(w01 * 100) %`, type and order by name. Typed-in values
 ## 3. Signal chain (`Eff_Render` @ 0x006f0da0)
 
 ```
-FUN_006eddc0: report latency (0x1e): 44 when oversampling, 3N/4 when linear phase, else 0;
+FUN_006eddc0: report latency (0x1e): 3N/4 when linear phase, else 44 when oversampling by the engine (0x37c), else 0;
               rebuild the linear-phase kernel if a band changed (below)
 if monitor == 1: scope(Source)
 silent = every |sample| < 1e-6 (FUN_005f1500, 0x006f1614)
@@ -244,7 +244,9 @@ if tail > -Length:
         else: FUN_006f0790: per frame: smoother tick, redesign dirty bands, run every section for one frame
         if 0x37c: engine op 0xc per 2 frames (FIR decimate) else TPolyphase down (FUN_006ea2c0)
     else: engine op 4 per frame on Dest (FFT convolver, context 0x20c0)
-else: copy Source -> Dest if needed; tick smoother; clear band states once; tail = asleep
+else: copy Source -> Dest if needed; tick smoother; once (FUN_006edbf0): clear the states of the bands
+      still counting down (tail > 0; a band at -1 keeps its states), clear both TPolyphase halves,
+      flag the main gain to jump to its target on waking, engine op 0xd (linear phase only); tail = asleep
 if monitor == 2: scope(Dest)
 ```
 
@@ -269,16 +271,39 @@ path), coefficients from the 13 doubles at `0x0074e290` (copied pairwise into
 stage is `y = y1 + (x - x1) * c` on L and R together (SSE2 doubles). Up:
 one input frame produces two outputs, path A then path B. Down: path A takes
 the even sample, path B the odd, output `(A + B) * 0.5`. State 0xc0 bytes per
-stage set. The 44-sample latency reported in this mode comes from the engine
-FIR, not from this filter; with `0x37c == 0` the report is still 44.
+stage set. This path reports no latency: `FUN_006eddc0` (`0x006ee493`)
+reports 0x2c only when `0x37c` is set too.
 
-### Engine resampler (`mydispatcher` ops 7/9/10/11/12)
+### Engine resampler (`mydispatcher` @ `0x1801e1e50`, ops 7/9/10/11/12)
 
-Op 9 is zero-stuffing with a gain of 2 (`out = {2x, 0}`); op 10 builds a
-176-float windowed-sinc low pass (`sin(pi (i - 89)/2) / (pi (i - 89)/2) *
-0.5`, then a raised-cosine window), op 0xc pushes two samples into a 256-entry
-ring and returns one filtered sample. Half the FIR length is the 44 samples of
-latency (`0x2c` in `FUN_006eddc0`).
+Read from the disassembly and checked by running the DLL's code under an
+emulator (unicorn, outside the repo).
+
+- Up, op 9 (`0x1801e2080`), per frame and side: `{x, _} -> {x + x, 0}` in
+  floats; `x` is also kept in the 4-byte context op 7 made, and nothing
+  reads it. There is no filter on the way up: the bands see the
+  zero-stuffed signal with its image, and the low pass on the way down
+  takes the image out. `Eff_Render` (`0x006f11a7`) lays the wide buffer out
+  as `2L, 2R, 0, 0` per frame.
+- Op 10 (`0x1801e20a0`) builds the low pass: `h[i] = float(0.5 sin(x) / x)`
+  with `x = (i - 89) pi/2` (`0.5` at `x = 0`), `i = 0..175`, then
+  `h[i] = float(h[i] * sin(i pi/176))` by the vector sine at `0x1801eb080`
+  over pairs. Its small-angle branch and its odd symmetry show a sine, not a
+  raised cosine. The context holds a 256-float ring (`+0`), the write index
+  (`+0x20`, from 0), the tap offset (`+0x24`, 0) and the tap count (`+0x28`,
+  176). The taps an even way from 89 are not 0 but what is left of
+  `sin(k pi)`, about 1e-17.
+- Down, op 0xc (`0x1801e224c`), per frame and side with `{even, odd}`:
+  `ring[at] = even; at = (at - 1) & 255; ring[at] = odd;` then
+  `y = sum_j h[j] ring[(at + j) & 255]` in two runs either side of the wrap,
+  each by `FUN_1801e0fe0`: four float lanes over the whole groups of four,
+  added to the running sum lane by lane, then the rest one at a time; then
+  `at = (at - 1) & 255`. So `y[n] = sum_k 2 x[k] h[2n + 1 - 2k]`, and only
+  `h[89]` is on the odd taps: a click comes out as `2 h[89] = 0.99996` 44
+  frames later. That is the 44 (`0x2c`) the plugin reports. The rings are
+  never cleared while the plugin runs, not even when it sleeps.
+- The taps sum to 0.99984; the pass band holds to 18 kHz at 44.1 kHz
+  within 0.01 dB.
 
 ### Linear phase (`FUN_006eddc0`, engine ops 0, 2, 3, 4, 5, 6, 0xd, 0xe)
 
@@ -330,4 +355,6 @@ first.
 
 - Sizes accepted: 305, 309, 326, 330, 350, 354 (versions 2 to 8); the corpus holds 1,138 states, not 1,117.
 - The steep peak width table and the polyphase coefficients are not transcribed; steep peak sections clamp at 0.8π. The allpass is `y = x1 + (x − y1)·c`.
-- Approximated in the corpus: HQ "matched" designer (59 slots, run as 1× cookbook), linear phase (8, run minimum phase), the engine FIR resampler (204, run as the built-in polyphase). 867 slots are exact.
+- The engine resampler is in `crates/plugins/src/parametric_eq_2_engine.rs`. Rust's `sin` gives the DLL's taps to the bit, and the dot product keeps the DLL's four lanes. The plugin reports 44 frames of latency with it.
+- A band counts its 0 dB tail down once a block, after the whole block, as FL does. Going to sleep empties only the bands still counting down and the built-in polyphase, and the main level jumps to its target on waking.
+- Approximated in the corpus: HQ "matched" designer (59 slots, run as 1× cookbook), linear phase (8, run minimum phase). 1,071 slots are exact.

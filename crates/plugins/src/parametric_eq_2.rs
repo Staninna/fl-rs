@@ -33,11 +33,14 @@
 //! input on.
 //!
 //! With HQ on in its first mode the bands run at twice the rate, between
-//! the two halves of FL's own 2x resampler: two paths of three allpasses.
-//! The doc leaves its coefficients and the widths of the steep peaks
-//! open. Both are read from the DLL here.
+//! the two halves of a 2x resampler. The plugin's own is two paths of
+//! three allpasses. The doc leaves its coefficients and the widths of the
+//! steep peaks open. Both are read from the DLL here. A state can ask for
+//! the engine's instead: each sample twice over and a 0 going up, and a
+//! 176 tap FIR going down, 44 frames late
+//! (`crate::parametric_eq_2_engine`).
 //!
-//! Three things a state can ask for are stood in for, and
+//! Two things a state can ask for are stood in for, and
 //! [`Effect::fidelity`] says which one a state has:
 //!
 //! - HQ in its second mode, "matched" filters that the doc does not give
@@ -45,13 +48,12 @@
 //!   differ from the matched ones near the top of the band.
 //! - Linear phase runs the same filters as they are: the same gains with
 //!   another phase, and no delay.
-//! - The 2x resampler of FL's engine, a 176 tap FIR, runs as the plugin's
-//!   own.
 //!
 //! The parameter smoothing of version 7 on is not here either: a moved
 //! parameter counts at once, as it does in FL with the smoothing off, and
 //! every state FL's own projects hold has it off.
 
+use crate::parametric_eq_2_engine::{Decimator, RESAMPLER_LATENCY, TAPS, half_band};
 use crate::parts::Matrix;
 use crate::{Effect, Fidelity, StateError, knob_value, read_state, state_version};
 use dsp::biquad::{Biquad64, Coefficients64, bandwidth_alpha, shelf_beta};
@@ -324,8 +326,8 @@ struct Band {
 }
 
 impl Band {
-    /// Run a block of both sides through the band's filters, one filter
-    /// after the other.
+    /// Run both sides through the band's filters, one filter after the
+    /// other.
     fn run(&mut self, left: &mut [f32], right: &mut [f32]) {
         let filters = self.filters.iter().zip(&mut self.state);
         for (filter, [l, r]) in filters.take(self.count) {
@@ -334,8 +336,14 @@ impl Band {
             l.flush();
             r.flush();
         }
+    }
+
+    /// Count a peak or a shelf at 0 dB down by the frames of a block it
+    /// has run, and drop it when it gets to 0. FL counts once a block,
+    /// after the whole of it.
+    fn count(&mut self, frames: usize) {
         if self.tail > 0 {
-            let frames = i32::try_from(left.len()).unwrap_or(i32::MAX);
+            let frames = i32::try_from(frames).unwrap_or(i32::MAX);
             self.tail = self.tail.saturating_sub(frames).max(0);
             if self.tail == 0 {
                 self.state = Default::default();
@@ -418,6 +426,30 @@ impl HalfBand {
     }
 }
 
+/// One side of the engine's resampler: going up it puts each sample twice
+/// over and a 0 after it, and going down it takes the pair through its
+/// low pass.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct EngineResampler {
+    down: Decimator,
+}
+
+impl EngineResampler {
+    /// Two samples in `wide` for each one in `input` (op 9).
+    fn up(input: &[f32], wide: &mut [f32]) {
+        for (x, pair) in input.iter().zip(wide.as_chunks_mut::<2>().0) {
+            *pair = [x + x, 0.0];
+        }
+    }
+
+    /// One sample in `out` for each two in `wide` (op 12).
+    fn down(&mut self, taps: &[f32; TAPS], wide: &[f32], out: &mut [f32]) {
+        for (pair, y) in wide.as_chunks::<2>().0.iter().zip(out) {
+            *y = self.down.step(taps, pair[0], pair[1]);
+        }
+    }
+}
+
 /// How many frames go through the resampler at a time.
 const CHUNK: usize = 128;
 
@@ -451,8 +483,14 @@ pub struct ParametricEq2 {
     /// The resampler of each side, up and down.
     up: [HalfBand; 2],
     down: [HalfBand; 2],
+    /// The engine's resampler of each side, and its low pass.
+    engine: [EngineResampler; 2],
+    taps: [f32; TAPS],
     /// How many frames of silence are left before the plugin sleeps.
     awake: i32,
+    /// The plugin has slept, and the main level jumps to where it is put
+    /// when it wakes.
+    woken: bool,
 }
 
 impl Default for ParametricEq2 {
@@ -476,7 +514,10 @@ impl Default for ParametricEq2 {
             bands: [band; BANDS],
             up: Default::default(),
             down: Default::default(),
+            engine: Default::default(),
+            taps: half_band(),
             awake: ASLEEP,
+            woken: false,
         };
         plugin.design_all();
         plugin
@@ -493,6 +534,11 @@ impl ParametricEq2 {
     /// Whether the bands run at twice the rate.
     fn oversampled(&self) -> bool {
         self.hq && self.mode == 0
+    }
+
+    /// Whether they get there by the engine's resampler.
+    fn by_engine(&self) -> bool {
+        self.oversampled() && self.engine_resampler
     }
 
     /// The rate the bands run at.
@@ -549,20 +595,52 @@ impl ParametricEq2 {
         (0..BANDS).any(|band| self.is_on(band) && self.bands[band].tail < 0)
     }
 
-    /// Empty every filter and the resampler.
+    /// Empty every filter and both resamplers.
     fn clear(&mut self) {
         for band in &mut self.bands {
             band.state = Default::default();
         }
         self.up = Default::default();
         self.down = Default::default();
+        self.engine = Default::default();
     }
 
-    /// Run a block through every band that is on, first band first.
+    /// What FL empties as it falls asleep (`FUN_006edbf0`): the bands that
+    /// are counting down and its own resampler. A band that shapes the
+    /// sound for good keeps what it holds, and so does the engine's
+    /// resampler.
+    fn sleep(&mut self) {
+        for band in &mut self.bands {
+            if band.tail > 0 {
+                band.state = Default::default();
+            }
+        }
+        self.up = Default::default();
+        self.down = Default::default();
+        self.woken = true;
+    }
+
+    /// The bands that run: on, and not dropped out.
+    fn running(&self, band: usize) -> bool {
+        self.bands[band].tail != 0 && self.is_on(band)
+    }
+
+    /// Run a stretch of a block through every band that runs, first band
+    /// first.
     fn run(&mut self, left: &mut [f32], right: &mut [f32]) {
         for band in 0..BANDS {
-            if self.bands[band].tail != 0 && self.is_on(band) {
+            if self.running(band) {
                 self.bands[band].run(left, right);
+            }
+        }
+    }
+
+    /// Count the bands down by the frames of a whole block, at the rate
+    /// they run at.
+    fn count(&mut self, frames: usize) {
+        for band in 0..BANDS {
+            if self.running(band) {
+                self.bands[band].count(frames);
             }
         }
     }
@@ -638,26 +716,43 @@ impl Effect for ParametricEq2 {
         }
         if self.awake <= -frames {
             if self.awake != ASLEEP {
-                self.clear();
+                self.sleep();
                 self.awake = ASLEEP;
             }
             return;
         }
 
+        if self.woken {
+            self.main.settle();
+            self.woken = false;
+        }
         self.main.apply(left, right);
         if !self.oversampled() {
             self.run(left, right);
+            self.count(len);
             return;
         }
+        let engine = self.engine_resampler;
         for (l, r) in left.chunks_mut(CHUNK).zip(right.chunks_mut(CHUNK)) {
             let (mut wide_l, mut wide_r) = ([0.0; 2 * CHUNK], [0.0; 2 * CHUNK]);
             let (wide_l, wide_r) = (&mut wide_l[..2 * l.len()], &mut wide_r[..2 * r.len()]);
-            self.up[0].up(l, wide_l);
-            self.up[1].up(r, wide_r);
+            if engine {
+                EngineResampler::up(l, wide_l);
+                EngineResampler::up(r, wide_r);
+            } else {
+                self.up[0].up(l, wide_l);
+                self.up[1].up(r, wide_r);
+            }
             self.run(wide_l, wide_r);
-            self.down[0].down(wide_l, l);
-            self.down[1].down(wide_r, r);
+            if engine {
+                self.engine[0].down(&self.taps, wide_l, l);
+                self.engine[1].down(&self.taps, wide_r, r);
+            } else {
+                self.down[0].down(wide_l, l);
+                self.down[1].down(wide_r, r);
+            }
         }
+        self.count(2 * len);
     }
 
     fn param_count(&self) -> usize {
@@ -699,18 +794,21 @@ impl Effect for ParametricEq2 {
             Fidelity::Approximate("linear phase runs as the same filters with their own phase")
         } else if self.hq && self.mode == 1 && self.shapes() {
             Fidelity::Approximate("the matched HQ filters run as the cookbook ones")
-        } else if self.oversampled() && self.engine_resampler {
-            Fidelity::Approximate("the engine's 2x resampler runs as the plugin's own")
         } else {
             Fidelity::Exact
         }
     }
 
-    /// 0 in every mode. FL's convolver is `3N/4` frames late with linear
+    /// 44 frames with the engine's resampler, which FL tells its host,
+    /// and 0 otherwise. FL's convolver is `3N/4` frames late with linear
     /// phase on, and FL tells its host so. The filters that stand in for
     /// it here are not late, so a host has nothing to make up for.
     fn latency(&self) -> usize {
-        0
+        if self.by_engine() {
+            RESAMPLER_LATENCY
+        } else {
+            0
+        }
     }
 
     /// Empties every filter and the resampler, ends a ramp of the main
@@ -1197,12 +1295,11 @@ mod tests {
         assert!(note(&linear(&peak, MATCHED)).contains("linear phase"));
         assert_eq!(linear(&flat, PLAIN).fidelity(), Fidelity::Exact);
         // The engine's resampler is asked for by its bit, and it only
-        // runs with HQ at twice the rate. It then runs with nothing to
-        // filter too.
+        // runs with HQ at twice the rate. It is FL's.
         let engine =
             |params: &[i32; PARAMS], flags: i32| with(&saved(8, params, flags, 0x42, 0x7f));
-        assert!(note(&engine(&flat, TWICE)).contains("resampler"));
-        assert!(note(&engine(&peak, TWICE)).contains("resampler"));
+        assert_eq!(engine(&flat, TWICE).fidelity(), Fidelity::Exact);
+        assert_eq!(engine(&peak, TWICE).fidelity(), Fidelity::Exact);
         assert_eq!(engine(&peak, PLAIN).fidelity(), Fidelity::Exact);
         assert!(note(&engine(&peak, MATCHED)).contains("matched"));
         // A moved level changes what is said.
@@ -1214,8 +1311,10 @@ mod tests {
         let want = measured(&mut eq(&peak, PLAIN), 2_000);
         assert_eq!(measured(&mut eq(&peak, MATCHED), 2_000), want);
         assert_eq!(measured(&mut linear(&peak, PLAIN), 2_000), want);
+        // The two resamplers pass 2 kHz alike, to a hundredth of a dB.
         let twice = measured(&mut eq(&peak, TWICE), 2_000);
-        assert_eq!(measured(&mut engine(&peak, TWICE), 2_000), twice);
+        let by_engine = measured(&mut engine(&peak, TWICE), 2_000);
+        assert!((by_engine - twice).abs() < 0.01, "{by_engine} and {twice}");
     }
 
     #[test]
@@ -1324,7 +1423,7 @@ mod tests {
             plugin.process(&mut left, &mut right);
             left
         };
-        let first = click(&mut plugin);
+        click(&mut plugin);
         // 8820 frames of silence in blocks of 512: the 18th block still
         // rings, and from the 19th on the input is passed on.
         for block in 1..=24 {
@@ -1337,8 +1436,30 @@ mod tests {
                 assert_eq!(loudest, 0.0, "block {block}");
             }
         }
-        // It wakes with nothing left in its filters.
-        assert_eq!(bits(&click(&mut plugin)), bits(&first));
+        // It wakes with what the low pass still held as it fell asleep,
+        // as FL empties only the bands that are counting down: the ring
+        // goes on where it stopped.
+        let held = plugin.bands[0].state;
+        assert_ne!(held, <[[Biquad64; 2]; 4]>::default());
+        let mut fresh = eq(&params, PLAIN);
+        fresh.bands[0].state = held;
+        assert_eq!(bits(&click(&mut plugin)), bits(&click(&mut fresh)));
+        // Asleep, a peak at 0 dB that has just been put there is emptied.
+        let mut plugin = eq(&one_band(PEAK, 1_000.0, 600, 25412, 0), PLAIN);
+        plugin.process(&mut [0.5; 64], &mut [0.5; 64]);
+        plugin.process(&mut [0.0; 8_820], &mut [0.0; 8_820]);
+        plugin.set_param(0, 0.0);
+        assert_eq!(plugin.bands[0].tail, 8_820);
+        assert_ne!(plugin.bands[0].state, <[[Biquad64; 2]; 4]>::default());
+        plugin.process(&mut [0.0; 64], &mut [0.0; 64]);
+        assert_eq!(plugin.awake, ASLEEP);
+        assert_eq!(plugin.bands[0].state, <[[Biquad64; 2]; 4]>::default());
+        // A main level moved while it sleeps is there at once when it
+        // wakes, with no ramp.
+        plugin.set_param(MAIN, -602.0);
+        let (mut left, mut right) = ([1.0; 4], [1.0; 4]);
+        plugin.process(&mut left, &mut right);
+        assert_eq!(left, [main_gain(-602); 4]);
         // What is under a millionth of full scale is silence too.
         let mut plugin = eq(&params, PLAIN);
         plugin.process(&mut [9e-7; 512], &mut [-9e-7; 512]);
@@ -1385,6 +1506,78 @@ mod tests {
         let mut wide = [0.0; 400];
         HalfBand::default().up(&[0.5; 200], &mut wide);
         assert!(wide[300..].iter().all(|v| (v - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn the_engine_s_resampler_is_its_half_band_fir_44_frames_late() {
+        // The taps, to the bit, as the DLL builds them: a sinc of half
+        // the band under a half sine, centred on tap 89. The taps an even
+        // way from the centre are what is left of sin(k pi).
+        let taps = half_band();
+        for (tap, want) in [
+            (0, 0x0000_0000u32),
+            (1, 0xa1ba_bcd7),
+            (2, 0xb908_eea8),
+            (3, 0x2200_e8f5),
+            (87, 0x23b3_be28),
+            (88, 0x3ea2_f983),
+            (89, 0x3eff_f58f),
+            (90, 0x3ea2_deee),
+            (91, 0x23b3_8385),
+            (174, 0x390c_2779),
+            (175, 0x212b_f3f9),
+        ] {
+            assert_eq!(taps[tap].to_bits(), want, "tap {tap}");
+        }
+        assert_eq!(taps[89], (0.5 * (89.0 * PI / 176.0).sin()) as f32);
+        let sum: f64 = taps.iter().map(|tap| f64::from(*tap)).sum();
+        assert!((sum - 0.999_841_4).abs() < 1e-7, "{sum}");
+
+        // Up is each sample twice over and a 0, so with no band in the
+        // way a click comes out as the odd taps doubled: the centre one
+        // 44 frames on, the rest under 1e-15.
+        let mut params = DEFAULTS;
+        params[KIND..ORDER].fill(OFF);
+        let mut plugin = with(&saved(8, &params, TWICE, 0x42, 0x7f));
+        assert_eq!(plugin.latency(), 44);
+        let (mut left, mut right) = ([0.0; 100], [0.0; 100]);
+        (left[0], right[0]) = (1.0, -1.0);
+        plugin.process(&mut left, &mut right);
+        for (n, (l, r)) in left.iter().zip(&right).enumerate() {
+            let want = if n < 88 { 2.0 * taps[2 * n + 1] } else { 0.0 };
+            assert_eq!((l.to_bits(), *r), (want.to_bits(), -want), "frame {n}");
+            if n != 44 {
+                assert!(l.abs() < 1e-15, "frame {n}");
+            }
+        }
+        assert_eq!(left[44], 2.0 * taps[89]);
+
+        // A tone passes at its size below 18 kHz, and it is the same a
+        // block at a time as in one go: the ring carries on.
+        for hz in [100usize, 1_000, 10_000, 18_000] {
+            let mut plugin = with(&saved(8, &params, TWICE, 0x42, 0x7f));
+            let got = measured(&mut plugin, hz);
+            assert!(got.abs() < 0.01, "{hz} Hz: {got} dB");
+        }
+        let input = noise(3_000);
+        let mut whole = with(&saved(8, &params, TWICE, 0x42, 0x7f));
+        let mut blocks = whole.clone();
+        let (mut left, mut right) = (input.clone(), input.clone());
+        whole.process(&mut left, &mut right);
+        let (mut l2, mut r2) = (input.clone(), input.clone());
+        for (l, r) in l2.chunks_mut(77).zip(r2.chunks_mut(77)) {
+            blocks.process(l, r);
+        }
+        assert_eq!(bits(&left), bits(&l2));
+        // A peak at twice the rate is the same filter by either way up.
+        let peak = one_band(PEAK, 1_000.0, 600, 25412, 0);
+        let mut plugin = with(&saved(8, &peak, TWICE, 0x42, 0x7f));
+        let got = measured(&mut plugin, 1_000);
+        assert!((got - 6.0).abs() < 0.01, "{got}");
+        // The rest of HQ runs on time.
+        for (flags, bits) in [(TWICE, 0x40), (PLAIN, 0x42), (MATCHED, 0x42)] {
+            assert_eq!(with(&saved(8, &peak, flags, bits, 0x7f)).latency(), 0);
+        }
     }
 
     #[test]
@@ -1486,9 +1679,9 @@ mod tests {
             *counts.entry((asks, exact)).or_insert(0) += 1;
             total += 1;
         }
-        // 867 of the 1138 are FL's own filters, and 271 are stood in for.
+        // 1071 of the 1138 are FL's own filters, and 67 are stood in for.
         let want = [
-            (("engine resampler", false), 204),
+            (("engine resampler", true), 204),
             (("linear phase", false), 8),
             (("matched", false), 59),
             (("matched", true), 2),

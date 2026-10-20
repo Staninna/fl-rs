@@ -76,6 +76,7 @@ pub mod multiband_compressor;
 pub mod ogun;
 pub mod panomatic;
 pub mod parametric_eq_2;
+mod parametric_eq_2_engine;
 mod parts;
 pub mod peak_controller;
 pub mod pitch_shifter;
