@@ -459,14 +459,16 @@ Reads every version 8..25 state to the last byte (268 project states, 744
 preset states across `Data`, 733 of them in Sytrus's own directory; the
 presets of versions 5..7, 229 in that directory and 252 across `Data`, are
 refused with a `Version` error, their articulator stream is another
-format). Of the 1012 states that load, 1000 are heard within the first
-2048 frames of three notes; the rest start with a silent attack. Renders operators with
-the kernel above over a 16384-sample table (section 10), band limited and filtered as section 11 has it, the FM
-and RM matrix, the three filters for types 0..10, every articulator's
-envelope, LFO and six maps (the unison map is read but not used), the pan
-law and the output levels; the send path goes through the effects
-(section 9). Left out: the arpeggiator and portamento (section 14 lists what
-`fidelity` names). Every state reports `Approximate`. The 597
+format). Of the 1012 states that load, 1003 are heard within the first
+2048 frames of three notes; the rest start with a silent attack. Renders
+operators with the kernel above over a 16384-sample table (section 10),
+band limited and filtered as section 11 has it, plucked as section 12 has
+it, the FM and RM matrix, the three filters of every type (section 13)
+with their waveshapers (section 8), every articulator's envelope, LFO and
+six maps, the unison (section 7), the pan law and the output levels, the
+effects (section 9) and the oversampling. Section 14 lists what is left
+out and what `fidelity` names; 696 of the states ask for none of it and
+report `Exact`. The 597
 REC parameters are the host's (section 6).
 
 ## 6. The REC parameters as a host moves them
@@ -972,6 +974,58 @@ t; s = t`, `out = s`. Then the waveshaper (section 8).
 
 Implemented as read (`sytrus/filter.rs`).
 
+## 14. The switches and what is left out (`0x86c7d0`, `0x86af20`, `0x86d770`)
+
+Read in run 6. The main block's u8 0x440..0x443 and 0x4f7..0x4ff
+(defaults from the constructor `0x865c10` and the loader `0x862d70`):
+
+| byte | default | what it does |
+|---|---|---|
+| 0x440 | 1 | Mod X and Mod Y glide (built) |
+| 0x441 | 1 | the random maps apply at voice start (`0x86af20`, `0x7897d0` of `random()`) |
+| 0x442 | 0 | the levels of the operators after the first (part index > 0) are multiplied by the voice's +0xd0 at start and in every render call (`0x86af20`, `0x870820`) |
+| 0x443 | 0 | a note cuts the voices of its key (built, below) |
+| 0x4f8 | 0 | portamento, REC 596 |
+| 0x4f9, 0x4fa, 0x4fb | 1, 0, 0 | portamento: the glide scaled by its distance, the start from the last note (0x62e0), and its kind (`< 2`: wrap by 1200 cents; else limit to `(6 - v) x 100` cents) |
+| 0x4fc | 1 | off: the voice calls the host's `Voice_ProcessEvent(FPV_SetLinkVelocity = 6, 0)` |
+| 0x4fd | 0 | bit 0: the attack by velocity (`x voice+0xa8`); bit 1: the envelope by velocity (`0x789770` with `voice+0xa4`) |
+| 0x4fe | 1 | a release takes the host's release time (`FPV_GetRelTime`) |
+| 0x4ff | 0 | the unison's kind (section 7) |
+
+The key cut (`0x86c7d0`, u8 0x443): a note's key is `round(max(0, (pitch
+x 0.01) + 60))` with `pitch` its cents from C5 plus the main pitch (and
+the last note's under portamento); every voice filed under that key
+(`voice+0x28`) whose stage is under 9 goes through `0x86d770`, which sets
+its stage to 9 and every envelope's and LFO level's run to 9 (+0, +8,
++0x60, +0x68 of each 200-byte articulator run) and does the same to the
+voice it is linked to (+0x60), so its gains glide to 0 at the output cap
+(section 10). Built so (`Voice::cut`).
+
+Global envelopes (articulator flag 2, `0x86af20`): an envelope with the
+flag that is on links its run (+0xc0) to the same articulator's run of the
+first voice in the list whose stage is under 5, and takes that voice's
+tick countdown (`+0x14`); then the quick ADSR does not scale it. Only with
+no such voice does it run its own. The link's reading in the tick
+(`0x78b720` and its callees) is not read, so this is left out.
+
+What `fidelity` names, the first that a state asks for:
+
+- `Sytrus FX send`: the send to a mixer track (0x420 not -1 with the send
+  on); 1 corpus state.
+- `Sytrus portamento`: 0x4f8 on (and its 0x4f9..0x4fb); 28 states. A
+  slide or portamento note with the switch off is not followed either.
+- `Sytrus global envelopes`: an active envelope with flag 2; 99 states.
+- `Sytrus voice switches`: 0x441, 0x442, 0x4fc or 0x4fd off their
+  defaults; 166 states.
+- `Sytrus plucked noise`: a plucked operator with noise, whose buffer is
+  IPP's `ippsRandUniform_Direct_32f` seeded by the phase, here Delphi's
+  generator; 22 states.
+
+The rest, 696 of the 1012 states, play as this document has them. Also
+not followed: the host's release time (0x4fe; 1 for an ordinary note),
+the arpeggiator (FL's, outside the plugin), and versions 5 to 7, which
+are turned down.
+
 ## Corrections
 
 - Operator `header[0]` is the phase wheel, not an output level: the voice
@@ -1006,3 +1060,5 @@ Implemented as read (`sytrus/filter.rs`).
   Philter's Mango) and a phaser, not a comb and a phaser; the state
   variable filter (type 0) has its own frequency table and damping, not
   Love Philter's.
+- Articulator flag 2 links a new voice's envelope to an earlier voice's
+  run; section 7 named it only as keeping the unison's stretch off.

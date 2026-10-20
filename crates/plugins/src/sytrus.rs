@@ -5,19 +5,17 @@
 //! with the envelope, the LFO and the six maps of `TOpArticulator`.
 //!
 //! The state is read as FL writes it, to the last byte, for every version
-//! from 8 to 25. The sound is an approximation: the operators, the matrix,
-//! the filters, the envelopes and the output levels follow what the voice
-//! kernel does: the band-limited and filtered wavetables and the plucked
-//! (Karplus-Strong) operators are FL's (sections 11 and 12 of the doc).
-//! The filters' waveshapers are FL's kernels
-//! over the baked curve (section 8 of the doc), and the chorus, the three
-//! delays, the reverb and the EQ after the voices are FL's chain on its
-//! send bus (`sytrus/fx.rs`, section 9). The unison is FL's: up to nine
-//! voices a note and nine more an octave down, detuned, panned, phased and
-//! stretched by `TriggerVoice`'s tables, alone or sharing one set of
-//! filters (section 7 of the doc). A state
-//! that asks for one of those says so in [`Generator::fidelity`], and
-//! every state says the operators are approximate.
+//! from 8 to 25, and played as the voice kernel plays it: the band-limited
+//! and filtered wavetables and the plucked (Karplus-Strong) operators
+//! (sections 10 to 12 of the doc), the matrix, the filters and their
+//! waveshapers (sections 8 and 13), the envelopes, the output levels, the
+//! unison of up to nine voices a note and nine more an octave down, alone
+//! or sharing one set of filters (section 7), the chorus, delays, reverb
+//! and EQ on the send bus (`sytrus/fx.rs`, section 9), and the voices
+//! oversampled as `DQOverSelect` asks. Left out, and named by
+//! [`Generator::fidelity`] when a state asks for it (section 14): the
+//! send to a mixer track, portamento, global envelopes, four of the voice
+//! switches and the noise of a plucked operator.
 //!
 //! A host moves FL's 597 REC parameters, numbered and ranged as
 //! `ProcessParam` has them (section 6 of the doc): the main volume, LFO
@@ -92,6 +90,14 @@ const HARMONICS: usize = 256;
 const MAP: usize = 512;
 /// The most frames rendered at once.
 const CHUNK: usize = 256;
+/// The key a note of `pitch` cents from C5 is filed under (`0x86c7d0`):
+/// `round(max(0, pitch / 100 + 60))`.
+fn filed_key(pitch: f32) -> i32 {
+    (pitch * 0.01 + 60.0).max(0.0).round_ties_even() as i32
+}
+
+/// The defaults of `State::switches`.
+const SWITCHES: [u8; 5] = [1, 0, 0, 1, 0];
 /// What FL calls C5, the note at pitch 0, in Hz.
 const C5: f64 = 523.251_130_601_197_3;
 const PPQ: f64 = 96.0;
@@ -863,6 +869,12 @@ struct State {
     /// The voices run at `2^oversample` times the rate (`DQOverSelect`,
     /// i32 0x438, 0 to 6).
     oversample: usize,
+    /// The switches a voice start reads, defaults in [`SWITCHES`]: u8
+    /// 0x441 (the random maps), 0x442 (the operators after the first by
+    /// the voice's factor at +0xd0), 0x443 (a note cuts the voices of its
+    /// key, `0x86c7d0`), 0x4fc (off: `FPV_SetLinkVelocity` to the host)
+    /// and 0x4fd (the attack and decay by velocity). Only 0x443 is built.
+    switches: [u8; 5],
     /// u8 0x4f6 (section 11 of the doc).
     smooth: bool,
     /// The waveshapers read between their steps (u8 0x5f18; FL also does
@@ -970,6 +982,7 @@ impl State {
             mod_smooth: true,
             envelope_hq: false,
             oversample: 0,
+            switches: SWITCHES,
             smooth: false,
             hq_shaper: false,
             fm: [[0.0; OPERATORS]; OPERATORS],
@@ -1063,6 +1076,7 @@ impl State {
         let _rendering = reader.i32()?;
         let flags = reader.bytes(4)?;
         state.mod_smooth = flags[0] != 0;
+        state.switches[..3].copy_from_slice(&flags[1..]);
         reader.bytes(8)?;
         let mutes = reader.bytes(2 * ROWS * ROWS)?;
         for (cell, mute) in fm.iter_mut().zip(mutes) {
@@ -1130,6 +1144,10 @@ impl State {
             }
             if let Some(kind) = flags.get(8) {
                 state.unison_kind = *kind;
+            }
+            // 0x4fc and 0x4fd.
+            for (switch, flag) in state.switches[3..].iter_mut().zip(flags.iter().skip(5)) {
+                *switch = *flag;
             }
         }
         for unit in 0..3 {
@@ -1539,6 +1557,9 @@ struct Voice {
     /// The note's pitch in cents from C5, without and with the main pitch.
     key_pitch: f32,
     pitch: f32,
+    /// The key FL files the voice under (`voice+0x28`): its pitch in
+    /// semitones from C0, rounded.
+    key: i32,
     velocity: f32,
     pan: f32,
     /// Mod X and Mod Y as they glide to the wheels, the note's own on top
@@ -1830,6 +1851,7 @@ impl Voice {
     ) -> Self {
         let key_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         let pitch = key_pitch + state.main_pitch;
+        let filed = filed_key(pitch);
         let key = f64::from(((pitch / 100.0 + 60.0).max(0.0) - unison.drop).max(0.0) / 120.0)
             .clamp(0.0, 1.0);
         // FL's velocity of a note is the host's gain turned back into 0..1
@@ -1887,6 +1909,7 @@ impl Voice {
             group,
             unison,
             key_pitch,
+            key: filed,
             pitch,
             velocity: note.velocity,
             pan: note.pan,
@@ -1920,6 +1943,16 @@ impl Voice {
             if pluck.slot != pluck::NONE {
                 strings.give_back(pluck.slot);
             }
+        }
+    }
+
+    /// Cut the voice (`0x86d770`): every articulator at its last stage,
+    /// so that the gains glide to 0 from the next tick.
+    fn cut(&mut self) {
+        self.released = true;
+        for run in &mut self.articulators {
+            run.run.end();
+            run.lfo.end();
         }
     }
 
@@ -2506,6 +2539,16 @@ impl Generator for Sytrus {
             let oldest = self.voices[0].group;
             self.drop_group(oldest);
         }
+        // With u8 0x443 a note cuts the voices of its key that are not
+        // already ending (`0x86c7d0`).
+        if self.state.switches[2] != 0 {
+            let key = filed_key(
+                f32::from(note.key - 60) * 100.0 + note.fine_pitch + self.state.main_pitch,
+            );
+            for voice in self.voices.iter_mut().filter(|v| v.key == key && !v.ending) {
+                voice.cut();
+            }
+        }
         self.notes = self.notes.wrapping_add(1);
         let timing = self.timing();
         let shared = unison[0].role == Role::Master;
@@ -2640,14 +2683,39 @@ impl Generator for Sytrus {
         (voice_frames >> self.state.oversample) + 1 + self.fx.tail()
     }
 
+    /// What is left out (section 15 of the doc), as far as a state asks
+    /// for it.
     fn fidelity(&self) -> Fidelity {
         let state = &self.state;
+        let global = (0..PARTS).any(|part| {
+            (part >= ROWS || state.active[part])
+                && state
+                    .articulators(part)
+                    .iter()
+                    .any(|a| a.global && a.envelope.active())
+        });
+        let pluck_noise = (0..OPERATORS).any(|op| {
+            let operator = &state.operators[op];
+            state.active[op] && operator.plucked && operator.noise != 0.0
+        });
         if state.send_on && state.fx.send_target != -1 {
             // The send to a mixer track (`Gen_Render`'s GetInBuffer) has no
             // way out of a generator here.
             Fidelity::Approximate("Sytrus FX send")
+        } else if state.params[PARAMS - 1] != 0 {
+            Fidelity::Approximate("Sytrus portamento")
+        } else if global {
+            Fidelity::Approximate("Sytrus global envelopes")
+        } else if [0, 1, 3, 4]
+            .iter()
+            .any(|&k| state.switches[k] != SWITCHES[k])
+        {
+            Fidelity::Approximate("Sytrus voice switches")
+        } else if pluck_noise {
+            // IPP's uniform generator, seeded by the phase.
+            Fidelity::Approximate("Sytrus plucked noise")
         } else {
-            Fidelity::Approximate("Sytrus operators")
+            Fidelity::Exact
         }
     }
 }
@@ -3147,7 +3215,7 @@ mod tests {
             Err(StateError::Length { .. })
         ));
         assert_eq!(sytrus.param(18), 256.0);
-        assert_eq!(sytrus.fidelity(), Fidelity::Approximate("Sytrus operators"));
+        assert_eq!(sytrus.fidelity(), Fidelity::Exact);
     }
 
     #[test]
@@ -3187,6 +3255,7 @@ mod tests {
                 Fidelity::Approximate(what) => what,
             };
             *fidelity.entry(said).or_insert(0) += 1;
+
             // Every state plays: three notes on, a block, and off.
             for (id, key) in [(1, 48), (2, 60), (3, 67)] {
                 sytrus.note_on(note(id, key));
@@ -3219,7 +3288,36 @@ mod tests {
         // across FL's files) are the old articulator stream.
         assert_eq!(loaded, presets.len() + 268 - old);
         assert!(old >= 229, "{old}");
-        assert_eq!(fidelity.get("exact"), None);
+        assert!(fidelity.get("exact").is_some_and(|n| *n > 0));
+    }
+
+    #[test]
+    fn with_its_switch_a_note_cuts_the_voices_of_its_key() {
+        for (switch, left) in [(0, 2), (1, 1)] {
+            let mut sytrus = blank();
+            sytrus.state.switches[2] = switch;
+            let (mut l, mut r) = (vec![0.0; 2048], vec![0.0; 2048]);
+            sytrus.note_on(note(1, 60));
+            sytrus.process(&mut l, &mut r);
+            // Another key leaves it be; the same key cuts it, and it
+            // glides out at the output cap.
+            sytrus.note_on(note(2, 64));
+            sytrus.note_on(note(3, 60));
+            sytrus.process(&mut l, &mut r);
+            assert_eq!(sytrus.voices.len(), left + 1, "{switch}");
+            assert!(sytrus.voices.iter().any(|v| v.id == 2));
+            assert_eq!(sytrus.fidelity(), Fidelity::Exact);
+        }
+        assert_eq!(filed_key(-6000.0), 0);
+        assert_eq!(filed_key(-7000.0), 0);
+        assert_eq!(filed_key(50.0), 60);
+        assert_eq!(filed_key(150.0), 62);
+        let mut sytrus = blank();
+        sytrus.state.switches[4] = 2;
+        assert_eq!(
+            sytrus.fidelity(),
+            Fidelity::Approximate("Sytrus voice switches")
+        );
     }
 
     #[test]
