@@ -58,13 +58,19 @@
 //! The curves are the envelopes FL's plugins share, read by
 //! [`crate::menvelope`] and drawn by [`dsp::curve`].
 //!
+//! Oversampling (an order of 1 in 19 shipped states) runs the crossover
+//! and the three bands at twice the rate or more, between the stages of
+//! FL's polyphase half band, the one Parametric EQ 2 has, and their times
+//! are rounded at the project rate and multiplied. The master runs at the
+//! project rate.
+//!
 //! What a state can ask for that is stood in for, which [`Effect::fidelity`]
-//! says: oversampling runs at the project's rate, and the linear-phase
-//! crossover, which FL builds in its engine from the IIR response, runs as
-//! the IIR crossover.
+//! says: the linear-phase crossover, which FL builds in its engine from
+//! the IIR response, runs as the IIR crossover.
 
 use crate::limiter::{Highest, Mean, coef, frames, gain};
 use crate::menvelope::{Class, MEnvelope, Reader};
+use crate::parametric_eq_2::HalfBand;
 use crate::parts::Matrix;
 use crate::{Effect, Fidelity, StateError, knob_value, state_version};
 use dsp::biquad::{Biquad64, Coefficients64};
@@ -186,6 +192,10 @@ const STAGES: usize = 8;
 
 /// A block with no sample above this is silence.
 const QUIET: f32 = 1e-6;
+
+/// The highest oversampling order run as FL runs it: eight times. The
+/// corpus and the presets ask for 0 or 1.
+const MAX_ORDER: usize = 3;
 
 /// The low cut's four sections: their `1 / (2 Q)` at 0.8 of the wheel's
 /// frequency.
@@ -410,6 +420,68 @@ fn run(sections: &mut [Section], mut frame: [f32; 2]) -> [f32; 2] {
         frame = section.run(frame);
     }
     frame
+}
+
+/// FL's oversampler (`0x7cc` up, `0x7d4` down, `FUN_0083b340` and
+/// `FUN_0083b3e0`): `order` stages of the 2x polyphase half band
+/// (`FUN_0083ae10` up, `FUN_0083afe0` down, the 13 doubles at
+/// `0x008bb648`, which are Parametric EQ 2's) up before the crossover and
+/// as many down after the band sum. FL reports no latency for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Oversampler {
+    up: [[HalfBand; 2]; MAX_ORDER],
+    down: [[HalfBand; 2]; MAX_ORDER],
+}
+
+/// Frames at the highest band rate a frame at the project rate makes.
+const WIDEST: usize = 1 << MAX_ORDER;
+
+impl Oversampler {
+    /// One frame up through `order` stages into `wide`, `1 << order`
+    /// frames in time order.
+    fn up(&mut self, order: usize, frame: [f32; 2], wide: &mut [[f32; 2]; WIDEST]) {
+        wide[0] = frame;
+        let mut scratch = [[0.0f32; 2]; WIDEST];
+        for (stage, sides) in self.up[..order].iter_mut().enumerate() {
+            let n = 1 << stage;
+            for (i, frame) in wide[..n].iter().enumerate() {
+                let [l0, l1] = sides[0].up_one(frame[0]);
+                let [r0, r1] = sides[1].up_one(frame[1]);
+                scratch[2 * i] = [l0, r0];
+                scratch[2 * i + 1] = [l1, r1];
+            }
+            wide[..2 * n].copy_from_slice(&scratch[..2 * n]);
+        }
+    }
+
+    /// The `1 << order` frames of `wide` down through `order` stages to one.
+    fn down(&mut self, order: usize, wide: &mut [[f32; 2]; WIDEST]) -> [f32; 2] {
+        for (stage, sides) in self.down[..order].iter_mut().enumerate() {
+            let n = 1 << (order - stage - 1);
+            for i in 0..n {
+                let (even, odd) = (wide[2 * i], wide[2 * i + 1]);
+                wide[i] = [
+                    sides[0].down_one([even[0], odd[0]]),
+                    sides[1].down_one([even[1], odd[1]]),
+                ];
+            }
+        }
+        wide[0]
+    }
+
+    /// FL's denormal flush after each block.
+    fn end_block(&mut self) {
+        for side in self.up.as_flattened_mut().iter_mut() {
+            side.flush();
+        }
+        for side in self.down.as_flattened_mut().iter_mut() {
+            side.flush();
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Oversampler::default();
+    }
 }
 
 /// A finite impulse response on a stereo signal, with a history a channel.
@@ -708,6 +780,8 @@ pub struct Maximus {
     /// The low cut's four sections, when it is on.
     low_cut: Vec<Section>,
     low_cut_on: bool,
+    /// The halves that take the three bands to the band rate and back.
+    oversampler: Oversampler,
     mix: f32,
     /// The frames the output is late by, and how many frames of silence
     /// put the plugin to sleep.
@@ -733,6 +807,7 @@ impl Default for Maximus {
             firs: std::array::from_fn(|_| Fir::default()),
             low_cut: Vec::with_capacity(LOW_CUT_ALPHAS.len()),
             low_cut_on: false,
+            oversampler: Oversampler::default(),
             mix: 1.0,
             latency: 0,
             hold: 0,
@@ -754,11 +829,12 @@ fn sign(slope: i32) -> f32 {
 
 impl Maximus {
     /// Have the memory for the longest time a wheel can ask for at this
-    /// rate, a second, and for the longest FIR.
+    /// rate and oversampling, a second, and for the longest FIR.
     fn make_room(&mut self) {
         let longest = frames(10_000, self.hz).max(1);
-        for band in &mut self.bands {
-            band.make_room(longest);
+        let os = self.os();
+        for (b, band) in self.bands.iter_mut().enumerate() {
+            band.make_room(if b == MASTER { longest } else { longest * os });
         }
         let taps = self.fir_len();
         for fir in &mut self.firs {
@@ -766,9 +842,26 @@ impl Maximus {
         }
     }
 
-    /// How many taps the FIR crossover has: 4 ms, odd, five at least.
+    /// The oversampling order the three bands run at, and what it
+    /// multiplies the rate by. An order past [`MAX_ORDER`] runs at that.
+    fn order(&self) -> usize {
+        self.switches.oversample.clamp(0, MAX_ORDER as i32) as usize
+    }
+
+    fn os(&self) -> usize {
+        1 << self.order()
+    }
+
+    /// The rate the crossover and the three bands run at (FL's band
+    /// renderer, `0xcc`): the project rate times the oversampling.
+    fn band_hz(&self) -> f64 {
+        self.hz * self.os() as f64
+    }
+
+    /// How many taps the FIR crossover has: 4 ms at the band rate, odd,
+    /// five at least.
     fn fir_len(&self) -> usize {
-        ((self.hz * 0.004).round_ties_even() as usize | 1).max(5)
+        ((self.band_hz() * 0.004).round_ties_even() as usize | 1).max(5)
     }
 
     fn band_params(&self, band: usize) -> &[i32] {
@@ -801,7 +894,9 @@ impl Maximus {
         } else {
             (self.fir_len() - 1) / 2
         };
-        self.latency = fir_half + band_delay.unwrap_or(0) + self.bands[MASTER].delay.frames.len();
+        // The bands' frames are at the band rate (`FUN_00841340`).
+        self.latency = (fir_half + band_delay.unwrap_or(0)) / self.os()
+            + self.bands[MASTER].delay.frames.len();
         self.hold = self.latency as i64 + (1.5 * self.hz).round_ties_even() as i64;
     }
 
@@ -854,7 +949,7 @@ impl Maximus {
         );
         let mut low = low;
         if high_slope > 0 {
-            low.push(section(Kind::All, high_hz, 0, self.hz));
+            low.push(section(Kind::All, high_hz, 0, self.band_hz()));
         }
         // A section keeps the state of the one in its place before, as
         // FL's do when a frequency moves.
@@ -883,12 +978,13 @@ impl Maximus {
 
         if fir {
             let total = self.fir_len();
+            let (os, rate) = (self.os() as f64, self.band_hz());
             let taps = |slope: i32, hz: f64| -> usize {
-                let n = (27_500.0 * f64::from(slope + 1) / hz).round_ties_even() as usize | 1;
+                let n = (os * 27_500.0 * f64::from(slope + 1) / hz).round_ties_even() as usize | 1;
                 n.max(5).min(total)
             };
             let (n_low, n_high) = (taps(low_slope, low_hz), taps(high_slope, high_hz));
-            let (f_low, f_high) = (low_hz / self.hz, high_hz / self.hz);
+            let (f_low, f_high) = (low_hz / rate, high_hz / rate);
             let mut buffer = vec![0.0; total];
             let mut other = vec![0.0; total];
             sinc_low_pass(&mut buffer, total, n_low, f_low);
@@ -927,7 +1023,7 @@ impl Maximus {
     /// count under 1.
     fn sections(&self, kind: Kind, hz: f64, slope: i32, count: i32) -> Vec<Section> {
         (0..count.max(0))
-            .map(|_| section(kind, hz, slope, self.hz))
+            .map(|_| section(kind, hz, slope, self.band_hz()))
             .collect()
     }
 
@@ -953,20 +1049,22 @@ impl Maximus {
     fn tune_band(&mut self, b: usize) {
         let p: [i32; PER_BAND] = self.band_params(b).try_into().unwrap();
         let hz = self.hz;
+        // FL rounds a time at the project rate, then multiplies it by the
+        // oversampling for the three bands; the master runs at the project
+        // rate.
+        let os = if b == MASTER { 1 } else { self.os() };
+        let at = |value: i32| frames(value, hz) * os;
         let compressing = (0..MASTER).any(|k| self.bands[k].effective == 0);
         let band = &mut self.bands[b];
         let held = band.effective < 2
             && (b != MASTER || band.effective < 1)
             && (b == MASTER || compressing);
         let lookahead = if held {
-            frames(
-                if b == MASTER {
-                    p[ATTACK]
-                } else {
-                    self.params[LMH_DELAY]
-                },
-                hz,
-            )
+            at(if b == MASTER {
+                p[ATTACK]
+            } else {
+                self.params[LMH_DELAY]
+            })
         } else {
             0
         };
@@ -978,13 +1076,13 @@ impl Maximus {
         let attack = if p[ATTACK] == 0 {
             lookahead as f64
         } else {
-            frames(p[ATTACK], hz) as f64
+            at(p[ATTACK]) as f64
         };
         let attack = attack * 0.8 / root(p[ATTACK_STAGES]);
         let release_2 = if p[RELEASE_2] == 0 {
             attack
         } else {
-            frames(p[RELEASE_2], hz) as f64 * 2.0 / root(p[ATTACK_STAGES])
+            at(p[RELEASE_2]) as f64 * 2.0 / root(p[ATTACK_STAGES])
         };
         let count = p[ATTACK_STAGES] as usize;
         if band.attack.count != count {
@@ -994,7 +1092,7 @@ impl Maximus {
         band.attack.rise = coef(release_2);
         band.attack.fall = coef(attack);
 
-        let window = lookahead.max(1).max(frames(p[WINDOW], hz));
+        let window = lookahead.max(1).max(at(p[WINDOW]));
         let rms = p[ENV_MODE] != 0;
         if band.window != window || band.rms_mode != rms {
             band.window = window;
@@ -1003,7 +1101,7 @@ impl Maximus {
             band.rms.start(window);
         }
 
-        let release = frames(p[RELEASE], hz);
+        let release = at(p[RELEASE]);
         let count = if release > 0 {
             p[RELEASE_STAGES] as usize
         } else {
@@ -1049,14 +1147,52 @@ impl Maximus {
         [low, mid, high]
     }
 
-    /// One frame through the plugin, with each band's separation gains
-    /// for this frame.
-    fn frame(&mut self, frame: [f32; 2], gains: &[[f32; 4]; BANDS]) -> [f32; 2] {
+    /// One frame at the project rate through the plugin: the low cut,
+    /// up to the band rate, the three bands, down again, the master. Each
+    /// band's separation gains move on by their step after each of its
+    /// frames.
+    fn frame(
+        &mut self,
+        frame: [f32; 2],
+        gains: &mut [[f32; 4]; BANDS],
+        steps: &[[f32; 4]; BANDS],
+    ) -> [f32; 2] {
         let frame = if self.low_cut_on {
             run(&mut self.low_cut, frame)
         } else {
             frame
         };
+        let order = self.order();
+        let sum = if order == 0 {
+            self.bands_frame(frame, gains, steps)
+        } else {
+            let mut wide = [[0.0f32; 2]; WIDEST];
+            self.oversampler.up(order, frame, &mut wide);
+            for frame in wide.iter_mut().take(1 << order) {
+                *frame = self.bands_frame(*frame, gains, steps);
+            }
+            self.oversampler.down(order, &mut wide)
+        };
+        let master = &mut self.bands[MASTER];
+        let gain = gains[MASTER];
+        for (g, s) in gains[MASTER].iter_mut().zip(&steps[MASTER]) {
+            *g += s;
+        }
+        if master.effective >= 2 {
+            return [0.0; 2];
+        }
+        let (l, r) = Matrix::mix(&gain, sum[0], sum[1]);
+        master.run([l, r]).0
+    }
+
+    /// One frame at the band rate through the crossover and the three
+    /// bands: their sum.
+    fn bands_frame(
+        &mut self,
+        frame: [f32; 2],
+        gains: &mut [[f32; 4]; BANDS],
+        steps: &[[f32; 4]; BANDS],
+    ) -> [f32; 2] {
         let split = self.split(frame);
         let (mix, mix_on) = (self.mix, self.mix != 1.0);
         let linear = self.switches.linear;
@@ -1081,12 +1217,12 @@ impl Maximus {
                 sum[k] += out;
             }
         }
-        let master = &mut self.bands[MASTER];
-        if master.effective >= 2 {
-            return [0.0; 2];
+        for (gain, step) in gains.iter_mut().zip(steps).take(MASTER) {
+            for (g, s) in gain.iter_mut().zip(step) {
+                *g += s;
+            }
         }
-        let (l, r) = Matrix::mix(&gains[MASTER], sum[0], sum[1]);
-        master.run([l, r]).0
+        sum
     }
 
     /// Forget the frames so far, as FL's flush does.
@@ -1094,6 +1230,7 @@ impl Maximus {
         for band in &mut self.bands {
             band.flush();
         }
+        self.oversampler.reset();
         let sections = (self.low.iter_mut())
             .chain(&mut self.mid_high)
             .chain(&mut self.mid_low)
@@ -1323,6 +1460,8 @@ impl Effect for Maximus {
         self.params = parsed.params;
         self.switches = parsed.switches;
         self.curves = parsed.curves;
+        // The oversampling sets how long the bands' memory has to be.
+        self.make_room();
         self.rebuild_tables();
         self.reset();
         Ok(())
@@ -1362,25 +1501,24 @@ impl Effect for Maximus {
             return;
         }
         self.asleep = false;
-        // Each band's separation ramps over the block.
+        // Each band's separation ramps over the block, the three bands'
+        // over its frames at the band rate.
+        let os = self.os();
         let mut ramps = [([1.0, 1.0, 0.0, 0.0], [0.0; 4]); BANDS];
-        for (ramp, band) in ramps.iter_mut().zip(&mut self.bands) {
+        for (b, (ramp, band)) in ramps.iter_mut().zip(&mut self.bands).enumerate() {
             if band.effective < 2 {
-                *ramp = band.matrix.ramp(len);
+                *ramp = band.matrix.ramp(if b == MASTER { len } else { len * os });
             }
         }
         let mut gains = ramps.map(|(from, _)| from);
+        let steps = ramps.map(|(_, step)| step);
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-            [*l, *r] = self.frame([*l, *r], &gains);
-            for (gain, (_, step)) in gains.iter_mut().zip(&ramps) {
-                for (g, s) in gain.iter_mut().zip(step) {
-                    *g += s;
-                }
-            }
+            [*l, *r] = self.frame([*l, *r], &mut gains, &steps);
         }
         for band in &mut self.bands {
             band.end_block();
         }
+        self.oversampler.end_block();
         let sections = (self.low.iter_mut())
             .chain(&mut self.mid_high)
             .chain(&mut self.mid_low)
@@ -1406,7 +1544,8 @@ impl Effect for Maximus {
         }
     }
 
-    /// The crossover's FIR half-length, the LMH delay and the master's
+    /// The crossover's FIR half-length and the LMH delay, both at the
+    /// band rate and so divided by the oversampling, and the master's
     /// attack, in frames.
     fn latency(&self) -> usize {
         self.latency
@@ -1414,7 +1553,8 @@ impl Effect for Maximus {
 
     /// Two time wheels at their end and the longest FIR.
     fn max_latency(&self) -> usize {
-        2 * frames(10_000, self.hz) + (self.fir_len() - 1) / 2
+        let wheel = frames(10_000, self.hz);
+        (wheel * self.os() + (self.fir_len() - 1) / 2) / self.os() + wheel
     }
 
     fn reset(&mut self) {
@@ -1425,8 +1565,8 @@ impl Effect for Maximus {
     }
 
     fn fidelity(&self) -> Fidelity {
-        if self.switches.oversample > 0 {
-            Fidelity::Approximate("Maximus oversampling runs at the project rate")
+        if self.switches.oversample > MAX_ORDER as i32 {
+            Fidelity::Approximate("Maximus oversampling past 8x runs at 8x")
         } else if self.switches.linear {
             Fidelity::Approximate("Maximus linear phase runs as the IIR crossover")
         } else {
@@ -1766,6 +1906,141 @@ mod tests {
     }
 
     #[test]
+    fn the_oversampler_is_parametric_eq_2_s_half_band_a_frame_at_a_time() {
+        // A frame at a time through order 1 is the block form FL runs,
+        // to the bit, both ways.
+        let input: Vec<f32> = (0..1000)
+            .map(|n| ((n * 7919 % 1009) as f32 / 1009.0 - 0.5) * 0.8)
+            .collect();
+        let mut block_wide = vec![0.0f32; 2000];
+        HalfBand::default().up(&input, &mut block_wide);
+        let mut block_back = vec![0.0f32; 1000];
+        HalfBand::default().down(&block_wide, &mut block_back);
+        let mut over = Oversampler::default();
+        for (n, x) in input.iter().enumerate() {
+            let mut wide = [[0.0; 2]; WIDEST];
+            over.up(1, [*x, -*x], &mut wide);
+            assert_eq!(
+                wide[..2],
+                [
+                    [block_wide[2 * n], -block_wide[2 * n]],
+                    [block_wide[2 * n + 1], -block_wide[2 * n + 1]]
+                ]
+            );
+            let mut pair = wide;
+            pair[0] = [block_wide[2 * n]; 2];
+            pair[1] = [block_wide[2 * n + 1]; 2];
+            assert_eq!(over.down(1, &mut pair), [block_back[n]; 2]);
+        }
+        // Up and down through four or eight times passes a tone in the
+        // band at its level and stops one in the top octave's image.
+        for order in [2, 3] {
+            let mut over = Oversampler::default();
+            let tone = testing::sine(0.02, 24_000);
+            let out: Vec<f32> = tone
+                .iter()
+                .map(|x| {
+                    let mut wide = [[0.0; 2]; WIDEST];
+                    over.up(order, [*x; 2], &mut wide);
+                    over.down(order, &mut wide)[0]
+                })
+                .collect();
+            let level = testing::partial(&out[12_000..], 0.02);
+            assert!(db(level).abs() < 0.01, "{order}: {} dB", db(level));
+        }
+        // A tone just under the project's Nyquist comes up as itself and
+        // its image at the band rate, the image 40 dB and more down.
+        let mut over = Oversampler::default();
+        let tone = testing::sine(0.3, 24_000);
+        let mut wide_left = Vec::with_capacity(48_000);
+        for x in &tone {
+            let mut wide = [[0.0; 2]; WIDEST];
+            over.up(1, [*x; 2], &mut wide);
+            wide_left.extend([wide[0][0], wide[1][0]]);
+        }
+        let tone_level = testing::partial(&wide_left[24_000..], 0.15);
+        let image = testing::partial(&wide_left[24_000..], 0.35);
+        assert!(db(tone_level).abs() < 0.01, "{}", db(tone_level));
+        assert!(db(image) < -40.0, "{}", db(image));
+    }
+
+    #[test]
+    fn oversampling_runs_the_bands_at_the_band_rate() {
+        let mut params = moved(&[(band(1, RELEASE), 4000), (band(1, WINDOW), 3000)]);
+        params[band(3, RELEASE)] = 4000;
+        let once = at_48k(&v15(params, defaults()));
+        let mut bytes = v15(params, defaults());
+        bytes[PARAMS_AT + OVERSAMPLE_AT] = 1;
+        let twice = at_48k(&bytes);
+        assert_eq!((twice.os(), twice.band_hz()), (2, 96_000.0));
+        // The times are rounded at the project rate and doubled for the
+        // three bands, not for the master.
+        for b in 0..MASTER {
+            let (a, b2) = (&once.bands[b], &twice.bands[b]);
+            assert_eq!(b2.delay.frames.len(), 2 * a.delay.frames.len());
+            assert_eq!(b2.window, 2 * a.window);
+        }
+        let mid = &twice.bands[1];
+        assert_eq!(
+            mid.release.fall,
+            coef((2 * frames(4000, HZ)) as f64 * 2.0 / 3f64.sqrt())
+        );
+        assert_eq!(twice.bands[MASTER], once.bands[MASTER]);
+        // The crossover is designed at the band rate.
+        assert_eq!(
+            twice.low[0].coefficients,
+            section(Kind::Low, crossover_hz(19_800), 1, 96_000.0).coefficients
+        );
+        // FL divides the bands' delay by the oversampling: the same
+        // latency, 96 + 96 frames.
+        assert_eq!((once.latency(), twice.latency()), (192, 192));
+        // The FIR crossover is 4 ms at the band rate, its taps for a
+        // frequency twice as many: 385 taps, 192 of them late at 96 kHz,
+        // 96 at 48 kHz.
+        let mut fir = bytes.clone();
+        fir[PARAMS_AT + FIR_AT] = 1;
+        let fir = at_48k(&fir);
+        assert_eq!((fir.fir_len(), fir.latency()), (385, 96 + 96 + 96));
+        assert!(fir.latency() <= fir.max_latency());
+
+        // Every band passing: the crossover and the resampler in the way,
+        // and both pass a tone at its level.
+        let mut params = DEFAULTS;
+        for b in 0..BANDS {
+            params[band(b, MODE)] = 1;
+        }
+        params[LOW_CUT] = -1;
+        let mut bytes = v15(params, defaults());
+        bytes[PARAMS_AT + OVERSAMPLE_AT] = 1;
+        let mut plugin = at_48k(&bytes);
+        assert_eq!(plugin.latency(), 0);
+        for turns in [0.01, 0.05, 0.2] {
+            let out = run(&mut plugin, &testing::sine(turns, 48_000));
+            let level = testing::partial(&out[24_000..], turns);
+            assert!(db(level).abs() < 0.1, "{turns}: {} dB", db(level));
+        }
+        // The MID band alone clamps a 1 kHz sine 6 dB over to its
+        // ceiling at twice the rate as well, with the master passing.
+        let alone = [
+            (band(0, MODE), 3),
+            (band(2, MODE), 3),
+            (band(MASTER, MODE), 1),
+            (LOW_CUT, -1),
+        ];
+        let mut bytes = v15(moved(&alone), defaults());
+        bytes[PARAMS_AT + OVERSAMPLE_AT] = 1;
+        let mut plugin = at_48k(&bytes);
+        let loud: Vec<f32> = testing::sine(1000.0 / HZ, 48_000)
+            .iter()
+            .map(|v| v * 2.0)
+            .collect();
+        let out = run(&mut plugin, &loud);
+        assert!(out.iter().all(|v| v.is_finite()));
+        let level = testing::partial(&out[24_000..], 1000.0 / HZ);
+        assert!(db(level / 0.975).abs() < 0.1, "{}", db(level));
+    }
+
+    #[test]
     fn the_times_and_the_stages_are_the_limiter_s() {
         let plugin = at_48k(&v15(
             moved(&[
@@ -2019,9 +2294,12 @@ mod tests {
         );
         let mut over = bytes.clone();
         over[PARAMS_AT + OVERSAMPLE_AT] = 1;
+        let plugin = at_48k(&over);
+        assert_eq!((plugin.order(), plugin.fidelity()), (1, Fidelity::Exact));
+        over[PARAMS_AT + OVERSAMPLE_AT] = 4;
         assert_eq!(
             at_48k(&over).fidelity(),
-            Fidelity::Approximate("Maximus oversampling runs at the project rate")
+            Fidelity::Approximate("Maximus oversampling past 8x runs at 8x")
         );
         // Wrong lengths and ranges.
         let mut plugin = at_48k(&bytes);
@@ -2139,16 +2417,14 @@ mod tests {
             );
             assert!(plugin.latency() <= plugin.max_latency());
         }
-        // 17 project states and two more oversample, and four project
-        // states ask for the linear-phase crossover.
+        // 17 project states and two presets oversample, all of them at
+        // order 1, which runs as FL runs it; four project states ask for
+        // the linear-phase crossover.
         assert_eq!(
             approximated,
-            [
-                ("Maximus linear phase runs as the IIR crossover", 4),
-                ("Maximus oversampling runs at the project rate", 19),
-            ]
-            .into_iter()
-            .collect(),
+            [("Maximus linear phase runs as the IIR crossover", 4)]
+                .into_iter()
+                .collect(),
             "{}",
             stood_in.join("; ")
         );
