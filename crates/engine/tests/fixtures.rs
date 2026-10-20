@@ -2444,6 +2444,156 @@ fn clip_item(position: i32) -> PlaylistItem {
     clip(position, BEAT)
 }
 
+/// A channel's pitch knob, control 4: -4800 to 4800 cents over the clip's
+/// whole range, so 0.625 is an octave up and 0.375 an octave down.
+const PITCH: u32 = 4;
+/// A channel's pan offset and volume multiplier, its 229 @0 and @4.
+const PAN_OFFSET: u32 = 0x10;
+const VOLUME_MULTIPLIER: u32 = 0x11;
+
+/// The fixture's sampler channel playing `ramp.wav` on one step sequencer
+/// note, which plays the sample to its end.
+fn ramp_note() -> Project {
+    let mut project = project(&[(1, &[note(0)])], &[item(0, 1)]);
+    project.channels[0].sample_path = Some("ramp.wav".to_owned());
+    project
+}
+
+#[test]
+fn a_clip_on_a_channel_s_pitch_moves_the_speed_of_its_voices() {
+    let dir = Dir::new("automation-pitch");
+    dir.ramp();
+    // An octave up from the start: every other frame, for 500 samples.
+    let mut up = ramp_note();
+    let clip = add_automation(&mut up, &[Point::new(0.0, 0.625)], FULL);
+    bind(&mut up, clip, PITCH);
+    place(&mut up, clip, 0, BAR);
+    let out = render(&up, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    for i in 0..500 {
+        assert_eq!(out.left[i], ramp(2 * i), "sample {i}");
+    }
+    assert!(out.left[500..].iter().all(|v| *v == 0.0));
+
+    // A voice that is sounding speeds up where the controls are read
+    // next, the 512th sample, and goes on from the frame it is at.
+    let jump = [
+        Point::new(0.0, 0.5),
+        hold(0.01, 0.625),
+        Point::new(1.0, 0.625),
+    ];
+    let mut late = ramp_note();
+    let clip = add_automation(&mut late, &jump, FULL);
+    bind(&mut late, clip, PITCH);
+    place(&mut late, clip, 0, BAR);
+    let out = render(&late, &dir);
+    assert_ramp(&out.left, 0, 0..512, 1.0);
+    assert_ramp(&out.left, 512, (512..RAMP).step_by(2), 1.0);
+    assert!(out.left[756..].iter().all(|v| *v == 0.0));
+
+    // An octave down lasts twice as long, and the render runs to its end.
+    let mut down = ramp_note();
+    let clip = add_automation(&mut down, &[Point::new(0.0, 0.375)], FULL);
+    bind(&mut down, clip, PITCH);
+    place(&mut down, clip, 0, BAR);
+    let out = render(&down, &dir);
+    for i in 0..RAMP {
+        assert_eq!(out.left[2 * i], ramp(i), "sample {}", 2 * i);
+    }
+    assert!(out.left[1001] > out.left[1000] && out.left[1999] != 0.0);
+    assert!(out.left[2000..].iter().all(|v| *v == 0.0));
+
+    // An audio clip channel's pitch moves its clips the same way.
+    let mut clips = clips(&[clip_item(0)]);
+    let clip = add_automation(&mut clips, &[Point::new(0.0, 0.625)], FULL);
+    bind(&mut clips, clip, (1 << 16) + PITCH);
+    place(&mut clips, clip, 0, BAR);
+    let out = render(&clips, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    for i in 0..500 {
+        assert_eq!(out.left[i], ramp(2 * i), "sample {i}");
+    }
+    assert!(out.left[500..24_000].iter().all(|v| *v == 0.0));
+}
+
+#[test]
+fn a_clip_on_a_channel_s_pitch_moves_a_generator_s_notes_as_they_start() {
+    let dir = Dir::new("automation-generator-pitch");
+    // The pitch knob is at 0 for the first note and an octave up for the
+    // second, from beat 1 on.
+    let steps = [
+        Point::new(0.0, 0.5),
+        hold(1.0, 0.625),
+        Point::new(3.0, 0.625),
+    ];
+    let mut song = sine_song(&[sine_note(0, BEAT, 69), sine_note(2 * BEAT, BEAT, 69)]);
+    let clip = add_automation(&mut song, &steps, FULL);
+    bind(&mut song, clip, (1 << 16) + PITCH);
+    place(&mut song, clip, 0, BAR);
+    let out = render(&song, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    for n in (0..24_000).step_by(7) {
+        assert_eq!(out.left[n], sine_frame(69, n), "frame {n}");
+        assert_eq!(out.left[48_000 + n], sine_frame(81, n), "frame {n}");
+    }
+}
+
+#[test]
+fn a_channel_s_pan_offset_adds_to_its_pan_and_a_clip_moves_it() {
+    let dir = Dir::new("automation-pan-offset");
+    // The 229 of the project puts the channel hard left.
+    let mut left = project(&[(1, &four_beats())], &[item(0, 1)]);
+    left.channels[0].level_adjusts = Some(layout::LevelAdjusts {
+        unknown_0: (-6400i32).to_le_bytes(),
+        unknown_4: 12_800i32.to_le_bytes(),
+        unknown_8: [0; 12],
+    });
+    left.channels[0].order.push(Placed {
+        pos: 150,
+        item: Item::Field(Id::LevelAdjusts),
+    });
+    let out = render(&left, &dir);
+    assert_impulses(&out.left, &[0, 24_000, 48_000, 72_000]);
+    assert_impulses(&out.right, &[]);
+
+    // A clip takes it to the right from beat 2 on.
+    let sides = [Point::new(0.0, 0.0), hold(2.0, 1.0), Point::new(2.0, 1.0)];
+    let clip = add_automation(&mut left, &sides, FULL);
+    bind(&mut left, clip, PAN_OFFSET);
+    place(&mut left, clip, 0, BAR);
+    let out = render(&left, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    assert_impulses(&out.left, &[0, 24_000]);
+    assert_impulses(&out.right, &[48_000, 72_000]);
+}
+
+#[test]
+fn a_clip_on_a_channel_s_volume_multiplier_scales_its_voices() {
+    let dir = Dir::new("automation-volume-multiplier");
+    dir.tone(96_000);
+    // The multiplier at unity for two beats, then at half of it.
+    let steps = [Point::new(0.0, 0.5), hold(2.0, 0.25), Point::new(2.0, 0.25)];
+    let mut held = note(0);
+    held.length = BAR;
+    let mut sung = project(&[(1, &[held])], &[item(0, 1)]);
+    sung.channels[0].sample_path = Some("tone.wav".to_owned());
+    let clip = add_automation(&mut sung, &steps, FULL);
+    bind(&mut sung, clip, VOLUME_MULTIPLIER);
+    place(&mut sung, clip, 0, BAR);
+    let out = render_exact(&sung, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    let unity = out.left[0];
+    assert!(unity > 0.0);
+    assert!(out.left[..48_000].iter().all(|v| *v == unity));
+    let half = unity * engine::FlExact.volume_adjust_gain(6400);
+    // Beat 2 is 128 samples before a 512th sample.
+    let after = out.left[48_128];
+    assert!((after - half).abs() < 1e-6, "{after} {half}");
+    assert!(out.left[48_128..96_000].iter().all(|v| *v == after));
+    assert!(out.left[48_000..48_128].iter().all(|v| *v == unity));
+    assert!(half < 0.5 * unity);
+}
+
 #[test]
 fn a_clip_on_an_insert_s_pan_and_on_a_send_moves_them() {
     let dir = Dir::new("automation-mixer");

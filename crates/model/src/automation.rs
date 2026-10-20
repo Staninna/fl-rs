@@ -43,7 +43,8 @@ impl Project {
     /// A binding is a 227 whose source is `channel << 16` for a channel of
     /// the automation kind. One clip can have several, and a clip without
     /// a link has none. The target is decoded as a 225 record's ID is,
-    /// with the remap for a legacy project.
+    /// after the rewrites FL's loader runs on the links of an old project
+    /// ([`Project::link_target`]).
     pub fn automation_bindings(&self) -> Vec<Binding> {
         let remote = |link: &&crate::ControllerLink| link.kind == LinkKind::Remote;
         let links = self.controller_links.iter().filter(remote);
@@ -57,7 +58,7 @@ impl Project {
             if channel.kind != Some(ChannelKind::Automation) {
                 return None;
             }
-            let target = self.rec_target(link.target);
+            let target = self.link_target(link.target);
             let (min, max) = channel.automation_range();
             let raw = |part: i32| {
                 let (low, high) = target.raw_range()?;
