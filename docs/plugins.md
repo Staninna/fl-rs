@@ -76,7 +76,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Generator | BooBass | 3599 | yes | 3 | implemented in crates/plugins (samples read from FL's BooBass_Eng_x64.dll at runtime), docs/plugins/boobass.md |
 | Generator | Fruit Kick | 4168 | yes | 3 | implemented in crates/plugins (articulation block approximated), docs/plugins/fruit-kick.md |
 | Generator | Fruity Envelope Controller | 6105 |  | 3 | |
-| Generator | Kepler | 3770 |  | 3 | |
+| Generator | Kepler | 3770 |  | 3 | implemented in crates/plugins (Kepler-1 state versions 1..4 onto the engine's 258 parameters and their defaults, 8 voices and their allocation, BLIT DCO with saw, pulse, PWM and sub, the engine's recorded noise and LFO wave read from its DLL, LFO 1 with delay, sync and trigger, the ADSR, the ladder with its tanh stages, 2x/4x oversampling and the halfband decimator, highpass, chorus I/II/I+II, main volume, the arpeggiator up/up-down/down over 1/2/4 octaves free or synced; approximated: the step table normalised by an exact reciprocal, no crossfade on a chorus mode change, FL's MIDI volume and pan not read (output gain 6.309), the sync position counted from the first frame, hold, the chorus noise and automation smoothing not built), docs/plugins/kepler.md |
 | Generator | MIDI Out | 3953 |  | 3 | |
 | Generator | Sakura | 4194 | yes | 3 | |
 | Effect | Fruity Fast LP | 3664 | yes | 2 | implemented in crates/plugins, docs/plugins/fruity-fast-lp.md |
