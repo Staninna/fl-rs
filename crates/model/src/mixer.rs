@@ -118,14 +118,25 @@ impl Slot {
 /// calls the same function with 1. PyFLP calls the bit `Enabled`.
 pub(crate) const ENABLED: u32 = 1 << 3;
 
+/// Bit 0 of 236's flags word and of 27: the insert's polarity is reversed.
+/// The loader stores it at insert `+0x390`, and `FUN_0127b050` turns the
+/// insert's gain negative for it (`docs/mixer-insert.md`).
+pub(crate) const POLARITY: u32 = 1 << 0;
+
+/// Bit 1 of 236's flags word and of 27: the insert swaps its left and
+/// right outputs. The loader stores it at insert `+0x391`, and
+/// `FUN_0127b050` swaps the outputs of the insert's gain matrix for it.
+pub(crate) const SWAP: u32 = 1 << 1;
+
 /// The three raw values of one band of an insert's EQ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EqBand {
     /// Hundredths of a dB.
     pub gain: i32,
-    /// 0..=65536 on a scale `docs/rec-225.md` does not map to Hz.
+    /// 0..=65536, which `FUN_0127b390` maps to
+    /// `(101^(raw / 65536) - 1) * 159.9 + 10` Hz: 10 Hz to 16 kHz.
     pub frequency: i32,
-    /// 65536ths.
+    /// 65536ths: a shelf's slope or a peak's Q, `docs/mixer-insert.md`.
     pub width: i32,
 }
 
@@ -321,15 +332,16 @@ impl<'a> InsertMix<'a> {
         })
     }
 
-    /// Whether the insert is switched on: bit 3 of 236, or of the last 27
-    /// in a file whose 236 is the 5-byte kind and has no flags. On when the
-    /// insert has neither.
-    pub fn enabled(&self) -> bool {
+    /// The insert's flag bits: the flags word of 236, or the byte of the
+    /// last 27 in a file whose 236 is the 5-byte kind and has no flags.
+    /// What FL's insert reset leaves, bit 3 alone, when the insert has
+    /// neither.
+    pub fn flag_bits(&self) -> u32 {
         let Some(insert) = self.insert() else {
-            return true;
+            return ENABLED;
         };
         if let Some(flags) = insert.flags.filter(|flags| flags.len != 5) {
-            return flags.flags & ENABLED != 0;
+            return flags.flags;
         }
         let old = insert
             .order
@@ -339,7 +351,25 @@ impl<'a> InsertMix<'a> {
                 Item::Raw(e) if e.id == Id::FXProperties.0 => e.data.first().copied(),
                 _ => None,
             });
-        old.is_none_or(|bits| u32::from(bits) & ENABLED != 0)
+        old.map_or(ENABLED, u32::from)
+    }
+
+    /// Whether the insert is switched on: bit 3 of
+    /// [`InsertMix::flag_bits`].
+    pub fn enabled(&self) -> bool {
+        self.flag_bits() & ENABLED != 0
+    }
+
+    /// Whether the insert's polarity is reversed: bit 0 of
+    /// [`InsertMix::flag_bits`].
+    pub fn polarity_reversed(&self) -> bool {
+        self.flag_bits() & POLARITY != 0
+    }
+
+    /// Whether the insert swaps left and right: bit 1 of
+    /// [`InsertMix::flag_bits`].
+    pub fn swapped(&self) -> bool {
+        self.flag_bits() & SWAP != 0
     }
 
     /// The inserts this one sends to, in rising order.
@@ -650,5 +680,36 @@ mod tests {
         assert!(!p.insert_mix(2).enabled());
         p.inserts[2].order.pop();
         assert!(p.insert_mix(2).enabled());
+    }
+
+    #[test]
+    fn bits_0_and_1_reverse_the_polarity_and_swap_the_sides() {
+        let flags = |flags: u32, len: usize| layout::InsertFlags {
+            unknown_0: [0; 4],
+            flags,
+            unknown_8: [0; 4],
+            len,
+        };
+        let mut p = project("20.8.4.2576", None, 127);
+        let strip = p.insert_mix(2);
+        assert!(!strip.polarity_reversed() && !strip.swapped());
+        assert_eq!(p.insert_mix(400).flag_bits(), ENABLED);
+        p.inserts[2].flags = Some(flags(0b1101, 12));
+        let strip = p.insert_mix(2);
+        assert!(strip.polarity_reversed() && !strip.swapped());
+        p.inserts[2].flags = Some(flags(0b0110, 12));
+        let strip = p.insert_mix(2);
+        assert!(!strip.polarity_reversed() && strip.swapped() && !strip.enabled());
+        // With a 5-byte 236 they come from the last 27, as the switch does.
+        p.inserts[2].flags = Some(flags(0, 5));
+        p.inserts[2].order.push(Placed {
+            pos: 0,
+            item: Item::Raw(RawEvent {
+                id: Id::FXProperties.0,
+                data: vec![0b1011],
+            }),
+        });
+        assert_eq!(p.insert_mix(2).flag_bits(), 0b1011);
+        assert!(p.insert_mix(2).swapped() && p.insert_mix(2).polarity_reversed());
     }
 }

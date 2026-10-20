@@ -160,8 +160,8 @@ impl RecTarget {
     }
 
     /// The lowest and the highest raw value of the control, for the
-    /// controls the engine plays: insert volume, pan and send level,
-    /// channel volume, pan, pitch, pan offset and volume multiplier, and
+    /// controls the engine plays: insert volume, pan, stereo separation,
+    /// EQ and send level, channel volume, pan, pitch, pan offset and volume multiplier, and
     /// the tempo. `None` for any other.
     ///
     /// The mixer and channel ranges are the dispatcher's clamps in
@@ -169,6 +169,10 @@ impl RecTarget {
     /// read for it: with that range the 219 of all seven corpus clips that
     /// drive the tempo says 60 to 180 BPM, which is what FL's "create
     /// automation clip" writes for a tempo (`docs/automation-234.md`).
+    ///
+    /// An insert's EQ has the range of its knobs in FL's mixer form: a
+    /// band's gain -1800..=1800, its frequency and width 0..=65536
+    /// (`docs/mixer-insert.md`).
     ///
     /// A channel's pitch is the dispatcher's fixed -4800..=4800 cents, and
     /// its pan offset and volume multiplier the range of their knobs in
@@ -183,6 +187,15 @@ impl RecTarget {
             } => match control {
                 control::VOLUME => Some((0, 16_000)),
                 control::PAN => Some((-6400, 6400)),
+                control::SEPARATION => Some((-64, 64)),
+                gain if (control::EQ_GAIN..control::EQ_GAIN + 3).contains(&gain) => {
+                    Some((-1800, 1800))
+                }
+                eq if (control::EQ_FREQUENCY..control::EQ_FREQUENCY + 3).contains(&eq)
+                    || (control::EQ_WIDTH..control::EQ_WIDTH + 3).contains(&eq) =>
+                {
+                    Some((0, 65_536))
+                }
                 send if sends.contains(&send) => Some((0, 16_000)),
                 _ => None,
             },
@@ -397,10 +410,14 @@ mod tests {
         assert_eq!(range(0x0002_0004), Some((-4800, 4800)));
         assert_eq!(range(0x0002_0010), Some((-6400, 6400)));
         assert_eq!(range(0x0002_0011), Some((0, 25_600)));
-        // Separation, a slot's mix, a plugin parameter, the main volume,
+        assert_eq!(range(id(1, 0, control::SEPARATION)), Some((-64, 64)));
+        assert_eq!(range(id(1, 0, control::EQ_GAIN + 2)), Some((-1800, 1800)));
+        assert_eq!(range(id(1, 0, control::EQ_FREQUENCY)), Some((0, 65_536)));
+        assert_eq!(range(id(1, 0, control::EQ_WIDTH + 1)), Some((0, 65_536)));
+        // A fourth EQ band, a slot's mix, a plugin parameter, the main volume,
         // a channel's mod X and a channel's arpeggio time.
         for other in [
-            id(1, 0, control::SEPARATION),
+            id(1, 0, control::EQ_GAIN + 3),
             id(1, 3, control::SLOT_MIX),
             id(1, 3, 0x8000),
             0x4000_0000,

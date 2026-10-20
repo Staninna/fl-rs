@@ -3,6 +3,7 @@
 //! between them, the sidechain inputs those sends feed, and the delay lines
 //! that make up for the plugins that are late.
 
+use crate::eq::InsertEq;
 use crate::generator::{Cue, Hosted as Generator, Signal};
 use crate::voice::Voice;
 use crate::{Curves, Error, pool};
@@ -328,11 +329,22 @@ struct Strip {
     effects: Vec<Hosted>,
     /// Gain of the insert's volume.
     volume: f32,
-    /// Left and right gain of its pan.
+    /// Left and right gain of its pan and stereo separation.
     pan: (f32, f32),
-    /// What its pan feeds across: the gain of the right side of its bus in
-    /// its left output, and of the left side in its right output.
+    /// What its pan and separation feed across: the gain of the right
+    /// side of its bus in its left output, and of the left side in its
+    /// right output.
     cross: (f32, f32),
+    /// The raw pan and separation `pan` and `cross` come from, so that
+    /// either can be set without the other.
+    pan_raw: i32,
+    separation_raw: i32,
+    /// Bit 0 of the insert's flags: its gain is negative.
+    polarity: bool,
+    /// Bit 1 of its flags: its outputs change sides.
+    swap: bool,
+    /// The insert's three-band EQ, after its slots and before its volume.
+    eq: InsertEq,
     /// Where the insert sends to. Every destination comes after its
     /// sender.
     sends: Vec<Send>,
@@ -586,13 +598,28 @@ fn mix_strip(strip: &mut Strip, generators: &mut [Generator], len: usize) {
         }
         aux.line.write(aux_left, aux_right);
     }
-    let (gain_left, gain_right) = (strip.volume * strip.pan.0, strip.volume * strip.pan.1);
-    if strip.cross == (0.0, 0.0) {
+    if strip.eq.running() {
+        strip.eq.process(bus_left, bus_right);
+    }
+    // FL's insert gain matrix (`FUN_0127b050`, applied by `0x6a13a0`):
+    // polarity turns the gain round, and the swap trades the outputs, so
+    // the left output gets what the right one would have.
+    let volume = if strip.polarity {
+        -strip.volume
+    } else {
+        strip.volume
+    };
+    let (pan, cross) = match strip.swap {
+        false => (strip.pan, strip.cross),
+        true => ((strip.cross.1, strip.cross.0), (strip.pan.1, strip.pan.0)),
+    };
+    let (gain_left, gain_right) = (volume * pan.0, volume * pan.1);
+    if cross == (0.0, 0.0) {
         bus_left.iter_mut().for_each(|v| *v *= gain_left);
         bus_right.iter_mut().for_each(|v| *v *= gain_right);
     } else {
-        let from_right = strip.volume * strip.cross.0;
-        let from_left = strip.volume * strip.cross.1;
+        let from_right = volume * cross.0;
+        let from_left = volume * cross.1;
         for (l, r) in bus_left.iter_mut().zip(bus_right.iter_mut()) {
             let (left, right) = (*l, *r);
             *l = left * gain_left + right * from_right;
@@ -739,8 +766,13 @@ fn visit(
 /// were walked in, as they would one strip at a time, so the output is the
 /// same to the bit with any number of threads.
 ///
-/// Stereo separation, the EQ, polarity and the left-right swap are not
-/// applied.
+/// After its slots a strip runs its bus through its three-band EQ
+/// ([`InsertEq`]), when a band has a gain, and then through FL's gain
+/// matrix: its volume, its pan and its stereo separation
+/// ([`Curves::insert_spread`]), with the gain negative when the insert's
+/// polarity is reversed and the outputs traded when it swaps left and
+/// right. `docs/mixer-insert.md` has where FL does each. FL glides the
+/// matrix to a new setting over a block; here it moves at once.
 pub(crate) struct Mixer {
     strips: Vec<Strip>,
     /// The master's place in `strips`, when sound can reach it and it is
@@ -970,13 +1002,21 @@ impl Mixer {
                     *approximated_slots.entry(what).or_default() += 1;
                 }
             }
+            let (pan_raw, separation_raw) = (strip.pan_raw(), strip.separation_raw());
+            let (pan, cross) = curves.insert_spread(pan_raw, separation_raw);
+            let bands = [0, 1, 2].map(|band| strip.eq_band(band).expect("bands 0 to 2"));
             strips.push(Strip {
                 index,
                 enabled,
                 effects,
                 volume: curves.insert_gain(strip.volume_raw()),
-                pan: curves.insert_pan(strip.pan_raw()),
-                cross: curves.insert_cross(strip.pan_raw()),
+                pan,
+                cross,
+                pan_raw,
+                separation_raw,
+                polarity: strip.polarity_reversed(),
+                swap: strip.swapped(),
+                eq: InsertEq::new(bands, told.sample_rate),
                 sends: Vec::new(),
                 left: vec![0.0; BLOCK],
                 right: vec![0.0; BLOCK],
@@ -1348,12 +1388,29 @@ impl Mixer {
         }
     }
 
-    /// Set the left and right gain of an insert's pan, and what the pan
-    /// feeds across.
-    pub fn set_pan(&mut self, insert: u16, pan: (f32, f32), cross: (f32, f32)) {
+    /// Set an insert's pan, as its 225 record stores it, with the
+    /// separation it has.
+    pub fn set_pan(&mut self, insert: u16, raw: i32, curves: &dyn Curves) {
         if let Some(strip) = self.strip(insert) {
-            strip.pan = pan;
-            strip.cross = cross;
+            strip.pan_raw = raw;
+            (strip.pan, strip.cross) = curves.insert_spread(raw, strip.separation_raw);
+        }
+    }
+
+    /// Set an insert's stereo separation, as its 225 record stores it,
+    /// with the pan it has.
+    pub fn set_separation(&mut self, insert: u16, raw: i32, curves: &dyn Curves) {
+        if let Some(strip) = self.strip(insert) {
+            strip.separation_raw = raw;
+            (strip.pan, strip.cross) = curves.insert_spread(strip.pan_raw, raw);
+        }
+    }
+
+    /// Set a raw value of an insert's EQ, by its control number less
+    /// 0x1FD0: see [`InsertEq::set_control`].
+    pub fn set_eq(&mut self, insert: u16, offset: u16, raw: i32) {
+        if let Some(strip) = self.strip(insert) {
+            strip.eq.set_control(offset, raw);
         }
     }
 
@@ -1632,6 +1689,11 @@ mod tests {
     /// A strip at unity that sends to the strips at `sends`, with a
     /// [`Late`] of `late` frames in its slot 0 when there is one.
     fn strip(index: u16, late: Option<usize>, sends: &[usize]) -> Strip {
+        let flat = |frequency| model::EqBand {
+            gain: 0,
+            frequency,
+            width: 17_500,
+        };
         let hosted = |frames: usize| {
             let late = Late {
                 frames,
@@ -1653,6 +1715,11 @@ mod tests {
             volume: 1.0,
             pan: (1.0, 1.0),
             cross: (0.0, 0.0),
+            pan_raw: 0,
+            separation_raw: 0,
+            polarity: false,
+            swap: false,
+            eq: InsertEq::new([flat(5777), flat(33_145), flat(55_825)], 44_100),
             sends: sends.iter().map(send).collect(),
             left: vec![0.0; BLOCK],
             right: vec![0.0; BLOCK],

@@ -162,6 +162,13 @@ impl Envelope {
         }
     }
 
+    /// Take the attack, decay, sustain and release knobs anew, as
+    /// `FUN_007a2c10` does when a host moves one. The voices that start
+    /// after it hear it. This allocates nothing.
+    pub fn set_knobs(&mut self, knobs: [i32; 4]) {
+        self.knobs = knobs.map(|knob| knob as f32 / 128.0);
+    }
+
     /// A run at the first point.
     pub fn start(&self, rate: f64) -> EnvRun {
         let mut run = EnvRun::idle();
