@@ -54,13 +54,13 @@
 //!   straight line in cents; FL's legato and slide handling is not built.
 //! - The phaser's frequency-shift type (9) and the noise resonance type
 //!   (8) are played as the types before them.
-//! - The host's per-voice volume and pan ramps are a straight ramp a block.
+//! - Slide notes bend nothing (FL slides the host levels of what sounds).
 
 use crate::fl_fx::{
     Delay32, DelayKernel, FlangerSettings, FruityReverb, ReverbSettings, StereoFlanger,
 };
 use crate::three_osc::pan_law;
-use crate::{Effect, Fidelity, Generator, NoteOn, StateError, knob_value, maximus::Maximus};
+use crate::{Effect, Fidelity, Generator, NoteOn, StateError, knob_value, maximus::Maximus, parts};
 use dsp::additive::{ShapeTable, SineBank};
 use std::f64::consts::{LN_2, PI, TAU};
 use std::path::Path;
@@ -850,6 +850,8 @@ struct Derived {
     pluck_rate: f64,
     pluck_start: i64,
     tremolo_rate: f64,
+    /// The most a host gain moves a frame (`TAudioRenderer` +0x34).
+    ramp_cap: f32,
 }
 
 /// A curve of the filter envelope: `FUN_005fd4d0`'s `(t, 1 / |t|,
@@ -968,6 +970,7 @@ impl Derived {
             pluck_rate: 0.0,
             pluck_start: 0,
             tremolo_rate: 0.0,
+            ramp_cap: 0.001,
         }
     }
 }
@@ -1488,6 +1491,7 @@ impl Harmless {
         d.pluck_rate = 0.01f64.ln() * d.tick as f64 / sr;
         d.pluck_start = 1 - round(sr * 0.002 / d.tick as f64) as i64;
         d.tremolo_rate = 2.5 / sr;
+        d.ramp_cap = (0.001 * 44_100.0 / sr) as f32;
 
         self.set_effects();
     }
@@ -2198,6 +2202,14 @@ impl Harmless {
     fn render_voice(&self, voice: &mut Voice, left: &mut [f32], right: &mut [f32]) {
         let d = &*self.d;
         let len = left.len();
+        // The host's gains for the block, from the note's levels as the
+        // block starts (`FUN_00784a10` asks `ComputeLRVol`, host slot 31):
+        // a new voice starts at them, a sounding one ramps to them.
+        let vol = d.main_volume * voice.velocity_gain(self.on(37)) * d.unison_gain;
+        let aim = pan_law(voice.pan + voice.pan_offset, vol);
+        if voice.first {
+            voice.gains = aim;
+        }
         voice.mono[..len].fill(0.0);
         let mut done = 0;
         while done < len {
@@ -2215,23 +2227,28 @@ impl Harmless {
             done += run;
         }
         self.envelope(voice, len);
-        let vol = d.main_volume
-            * voice.velocity_gain(self.on(37))
-            * if d.unison > 1 { d.unison_gain } else { 1.0 };
-        let pan = (voice.pan + voice.pan_offset).clamp(-1.0, 1.0);
-        let aim = pan_law(pan, vol);
-        let step = [
-            (aim[0] - voice.gains[0]) / len as f32,
-            (aim[1] - voice.gains[1]) / len as f32,
-        ];
-        for i in 0..len {
-            voice.gains[0] += step[0];
-            voice.gains[1] += step[1];
-            let s = voice.mono[i] * voice.env_buf[i];
-            left[i] += s * voice.gains[0];
-            right[i] += s * voice.gains[1];
+        for (x, e) in voice.mono[..len].iter_mut().zip(&voice.env_buf[..len]) {
+            *x *= *e;
         }
-        voice.gains = aim;
+        // `FUN_00604960`: each side's gain glides to its aim by no more
+        // than the host's cap a frame, in FL's lanes.
+        let (start_l, step_l) = parts::glide(&mut voice.gains[0], aim[0], d.ramp_cap, len);
+        let (start_r, step_r) = parts::glide(&mut voice.gains[1], aim[1], d.ramp_cap, len);
+        if step_l == 0.0 && step_r == 0.0 {
+            if start_l != 0.0 || start_r != 0.0 {
+                for i in 0..len {
+                    left[i] += voice.mono[i] * start_l;
+                    right[i] += voice.mono[i] * start_r;
+                }
+            }
+        } else {
+            let mut ramp_l = Ramp::new(start_l, step_l, len);
+            let mut ramp_r = Ramp::new(start_r, step_r, len);
+            for i in 0..len {
+                left[i] += voice.mono[i] * ramp_l.next(i);
+                right[i] += voice.mono[i] * ramp_r.next(i);
+            }
+        }
         // A voice past its attack whose envelope is under -80 dB is over
         // (`FUN_00783ac0` from the voice renderer).
         let last = voice.env_buf[len - 1];
@@ -2358,6 +2375,48 @@ impl Harmless {
         }
         if let Some(maximus) = &mut self.compression {
             maximus.process(left, right);
+        }
+    }
+}
+
+/// A gain FL's SSE kernels ramp across a block (`FUN_00611760`,
+/// `FUN_00611550`): the even frames and the odd ones each in a lane of
+/// their own that moves two steps a pair, eight frames to a round, and
+/// the frames past the last round one step at a time from the even lane.
+struct Ramp {
+    even: f32,
+    odd: f32,
+    twice: f32,
+    step: f32,
+    rounds: usize,
+}
+
+impl Ramp {
+    fn new(start: f32, step: f32, len: usize) -> Self {
+        Ramp {
+            even: start + 0.0,
+            odd: start + step,
+            twice: step + step,
+            step,
+            rounds: len / 8 * 8,
+        }
+    }
+
+    /// The gain of `frame`, asked for in order from 0.
+    fn next(&mut self, frame: usize) -> f32 {
+        if frame < self.rounds {
+            if frame & 1 == 0 {
+                self.even
+            } else {
+                let odd = self.odd;
+                self.even += self.twice;
+                self.odd += self.twice;
+                odd
+            }
+        } else {
+            let even = self.even;
+            self.even += self.step;
+            even
         }
     }
 }
@@ -2596,7 +2655,7 @@ impl Generator for Harmless {
         {
             Fidelity::Approximate("Harmless frequency-shift phaser or noise resonance")
         } else {
-            Fidelity::Approximate("Harmless voice levels and pan")
+            Fidelity::Exact
         }
     }
 }
@@ -2654,6 +2713,50 @@ mod tests {
         // The main volume at its default is 3/4.
         let plugin = Harmless::default();
         assert!((plugin.d.main_volume - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_host_gains_ramp_in_lanes() {
+        let gains: Vec<f32> = {
+            let mut ramp = Ramp::new(1.0, 0.1, 11);
+            (0..11).map(|i| ramp.next(i)).collect()
+        };
+        // Eight frames in two lanes, each moving two steps a pair.
+        let (mut even, mut odd) = (1.0f32, 1.0 + 0.1f32);
+        for pair in 0..4 {
+            assert_eq!(gains[2 * pair], even);
+            assert_eq!(gains[2 * pair + 1], odd);
+            even += 0.1 + 0.1;
+            odd += 0.1 + 0.1;
+        }
+        // The rest from the even lane, a step at a time.
+        for gain in &gains[8..] {
+            assert_eq!(*gain, even);
+            even += 0.1;
+        }
+    }
+
+    #[test]
+    fn a_voice_starts_at_its_host_gains_and_then_glides_to_them() {
+        let mut plugin = Harmless::default();
+        plugin.set_sample_rate(44_100.0);
+        let mut n = note(60);
+        n.pan = -0.5;
+        plugin.note_on(n);
+        render(&mut plugin, 256);
+        let vol = plugin.d.main_volume * plugin.d.unison_gain;
+        let voice = plugin.voices.iter().find(|v| v.active).unwrap();
+        assert_eq!(voice.gains, pan_law(-0.5, vol));
+        // The main volume up to full: the gains move no more than
+        // 0.001 * 44100 / rate a frame.
+        plugin.set_param(36, 2000.0);
+        let before = plugin.voices.iter().find(|v| v.active).unwrap().gains;
+        render(&mut plugin, 256);
+        let after = plugin.voices.iter().find(|v| v.active).unwrap().gains;
+        for side in 0..2 {
+            let moved = after[side] - before[side];
+            assert!((moved - 0.001 * 256.0).abs() < 1e-5, "{moved}");
+        }
     }
 
     #[test]

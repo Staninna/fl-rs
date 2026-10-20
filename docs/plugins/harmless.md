@@ -584,6 +584,30 @@ gives a one-pole `0.01^(1/max(t, 1))` (0 for t <= 0) and `FUN_005f5fe0`
 runs `y = x + c (y - x)`; a voice whose envelope ends a block under -80 dB
 (`0x5f0 = 10^(-80/20)`) after its attack is killed (`FUN_00783ac0`).
 
+The voice's gains (`FUN_00784a10`, head and tail). At the start of every
+block, before its first tick, the voice asks the host's `ComputeLRVol`
+(host vtable +0xf8, slot 31: the circular law of
+`docs/plugins/host-voice.md`) for its left and right aims, `voice+0x134`
+and `+0x138`:
+
+```
+vol = 0x2e4 (main volume) * (FinalLevels.Vol + glide +0x54) * voice+0x1c4 (= 0x5cc, the unison gain, 1 for one voice)
+pan = FinalLevels.Pan + glide +0x50 + voice+0x1c0 (the unison pan offset)
+```
+
+A voice's first block (`voice+0x38`) starts its gains (`+0x13c`, `+0x140`)
+at the aims. At the end of the block the bank's output times the envelope
+(`ippsMul_32f_I`) goes through `FUN_00604960(mono, stereo, n, aimL, aimR,
+&gainL, &gainR, host+0x34)`: `FUN_00612db0` per side is FL's capped glide
+(`parts::glide`: a step of `(aim - gain)/n` a frame, at most host+0x34 =
+`0.001 * 44100 / SR`, and a gain the cap leaves under 2^-24, `DAT_007ff4dc`
+from `FUN_00614c80`, goes to 0 instead); both steps 0 multiplies by the
+two gains (`FUN_00611660`, or zeroes when both are 0), else
+`FUN_00611760` ramps them in its SSE lanes: the even and odd frames each
+from their own start (`g`, `g + s`) moving `2s` a pair, eight frames to a
+round, the frames after the last round from the even lane a step at a
+time.
+
 Unison (`FatOrder` n): voice i gets `x = 2i/(n - 1) - 1`, pan `x FatPan/128`,
 pitch `s FatPitch` cents with `s = |x|` signed by `i` odd and by the upper
 half of an odd n, times the type's spread `DAT_007ee5c8` (type 0 `0.877
@@ -667,7 +691,8 @@ phaser (types 0..8), harmonizer, pluck, protection, subs and
 self-oscillation, the partial count and the bank's frequency weights, the
 sine bank and its 10 ms level glide, the LFO shapes, the vibrato and pitch
 LFO, the unison spreads, the attack, decay and release with their
-declick, and the compression through `maximus.rs`.
+declick, the host's volume and pan gains and their capped ramp, and the
+compression through `maximus.rs`.
 
 The chorus, delay and reverb are FL's classes from `fl_fx.rs` behind the
 front end of section 8, told a block of 256 frames (the chunk the plugin
@@ -677,6 +702,10 @@ made when the state has it on.
 
 Approximated: the tremolo's smoothing; mono, legato and portamento (mono
 releases the voices before, portamento glides in a straight line); slide
-notes; phaser type 9 and resonance type 8 (played as plain curves); the
-host's volume and pan ramps; the plugin's sample counter for the phase
-spread; the threaded voice render.
+notes; phaser type 9 and resonance type 8 (played as plain curves).
+
+Left to the host: slide notes, which FL plays by sliding the host levels
+(`FinalLevels`) of the voices that sound and which fl-rs does not send a
+generator; the order voices are summed in (FL's voice list, here the
+slots), and so the last bit of the sum; the threaded render, which sums
+the same voices.
