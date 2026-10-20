@@ -43,19 +43,28 @@
 //! [`Generator::set_resource_dir`] is handed. The chorus, delay and reverb
 //! are FL's own classes from [`crate::fl_fx`], set from Harmless's tables.
 //!
+//! # Notes and their colours
+//!
+//! A note's colour ([`NoteOn::color`]) is its group: legato (`MonoBox`)
+//! hands a sounding note's voices to a new note of its group, and
+//! portamento (`PortaBox`) glides a new note from the last of its group.
+//! A note of the 14th colour turns `MonoBox` round for itself and one of
+//! the 15th `PortaBox`, in the first colour's group when that turns the
+//! box on. A note of the 16th colour is a filter note: it sounds nothing,
+//! and while it is held the cutoff follows its pitch, two octaves over its
+//! frequency, from the middle of the filter's range; where the last one
+//! ends the cutoff stays. A note's pitch follows the host's
+//! ([`Generator::set_note_pitch`]) on its next control tick.
+//!
 //! # What is not FL's
 //!
 //! - The effects are told a host block of 256 frames, which sets when
 //!   they sleep after the last voice. The delay keeps its time down to 20
 //!   BPM and is only made when the state loads with it on.
-//! - Every note is of FL's first colour: the colour groups of legato and
-//!   portamento, the colours that turn them round and the filter notes are
-//!   not built.
 //! - The noise resonance and the per-note LFO value draw from a
 //!   generator of their own: FL's is a Mersenne twister seeded from the
 //!   performance counter (`FUN_0074bcf0`), so no two runs of FL agree
 //!   either.
-//! - Slide notes bend nothing (FL slides the host levels of what sounds).
 
 use crate::autogun_engine::rand_uniform;
 use crate::fl_fx::{
@@ -89,6 +98,30 @@ const VOICES: usize = 96;
 
 /// The most notes legato keeps held under the one that sounds.
 const HELD: usize = 64;
+
+/// The colours a note can have, each a group of its own for legato and
+/// portamento (`FPV_GetColor & 0xf`).
+const GROUPS: usize = 16;
+
+/// The colour that turns `MonoBox` round for its note.
+const MONO_COLOR: u8 = 13;
+/// The colour that turns `PortaBox` round for its note.
+const PORTA_COLOR: u8 = 14;
+/// The colour of a filter note, which sounds nothing and moves the
+/// filter's cutoff to its pitch.
+const FILTER_COLOR: u8 = 15;
+
+/// What Harmless keeps of a group of notes (`0x340 + 0x20 g`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Slot {
+    /// The note whose voices answer for the group (FL's voice at +0), and
+    /// when it started.
+    lead: Option<u32>,
+    lead_age: u64,
+    /// The levels the last note of the group left (+8..+0x1c): `None` is
+    /// FL's 0x7fffffff in its cents.
+    last: Option<[f32; 6]>,
+}
 
 /// A voice whose envelope falls under -80 dB after its attack is over.
 const END_LEVEL: f32 = 1e-4;
@@ -1091,6 +1124,8 @@ struct Voice {
     age: u64,
     /// The note's cents from C5.
     pitch: f32,
+    /// The note's group, a colour (`voice+0x3c`).
+    group: u8,
     velocity: f32,
     vel01: f32,
     pan: f32,
@@ -1168,6 +1203,7 @@ impl Voice {
             id: 0,
             age: 0,
             pitch: 0.0,
+            group: 0,
             velocity: 1.0,
             vel01: 0.78,
             pan: 0.0,
@@ -1235,6 +1271,8 @@ struct Note {
     id: u32,
     /// When it started, for the newest held note.
     age: u64,
+    /// Its group, a colour (`voice+0x3c`).
+    group: u8,
     pitch: f32,
     velocity: f32,
     vel01: f32,
@@ -1261,6 +1299,7 @@ impl Voice {
         Note {
             id: self.id,
             age,
+            group: self.group,
             pitch: self.pitch,
             velocity: self.velocity,
             vel01: self.vel01,
@@ -1274,6 +1313,7 @@ impl Voice {
 
     fn take_note(&mut self, note: &Note) {
         self.id = note.id;
+        self.group = note.group;
         self.pitch = note.pitch;
         self.velocity = note.velocity;
         self.vel01 = note.vel01;
@@ -1384,12 +1424,16 @@ pub struct Harmless {
     /// records of type 2.
     held: [Note; HELD],
     held_len: usize,
-    /// The note whose voices answer for the notes (FL's voice at 0x340)
-    /// and the levels the last one left (0x348..0x35c), which a glide
-    /// starts from: `None` is FL's 0x7fffffff in its cents.
-    lead: Option<u32>,
-    lead_age: u64,
-    last: Option<[f32; 6]>,
+    /// A slot for each colour of note (`0x340 + 0x20 g`): the note whose
+    /// voices answer for the notes of the group, and the levels the last
+    /// one left, which a glide starts from.
+    slots: [Slot; GROUPS],
+    /// The filter notes, notes of the 16th colour: FL's voice records of
+    /// type 1. The newest is the one that moves the filter (0x338), and
+    /// the cutoff it adds in log2 Hz (0x6dc) stays when it ends.
+    filters: [Note; HELD],
+    filters_len: usize,
+    filter_offset: f32,
     /// The tremolo's depth as it glides to the wheel's (0x7a0), and its
     /// gains for the block, left and right side by side (set 0 +0x30).
     trem_depth: f32,
@@ -1423,9 +1467,10 @@ impl Default for Harmless {
             seed: 0x1234_5678,
             held: [Note::default(); HELD],
             held_len: 0,
-            lead: None,
-            lead_age: 0,
-            last: None,
+            slots: [Slot::default(); GROUPS],
+            filters: [Note::default(); HELD],
+            filters_len: 0,
+            filter_offset: 0.0,
             trem_depth: 0.0,
             trem: [0.0; 2 * CHUNK],
             compression: None,
@@ -1810,8 +1855,31 @@ impl Harmless {
         (f64::from(self.seed) * 2.328_306_437_080_797_4e-10) as f32
     }
 
+    /// Forget the last note of every group (`FUN_00788030`).
+    fn forget_last(&mut self) {
+        for slot in &mut self.slots {
+            slot.last = None;
+        }
+    }
+
+    /// Move the filter to the newest filter note's pitch (`Gen_Render`,
+    /// `0x78893f`): two octaves over the note's frequency, from the middle
+    /// of the filter's range (0x6c4), in log2 Hz. With none the cutoff
+    /// stays where the last one left it.
+    fn follow_filter_note(&mut self) {
+        let Some(newest) = self.filters[..self.filters_len].last() else {
+            return;
+        };
+        let d = &*self.d;
+        let middle = (f64::from(d.fmin + d.fmax) * 0.5) as f32;
+        let log2_440 = 440f64.ln() * (1.0 / 2f64.ln());
+        let key = f64::from(newest.pitch * 0.01 + 84.0);
+        self.filter_offset = ((log2_440 + (key - 57.0) * (1.0 / 12.0)) - f64::from(middle)) as f32;
+    }
+
     /// Start the unison copies of a note (`FUN_00782940`).
     fn start(&mut self, note: NoteOn) {
+        let filter_offset = self.filter_offset;
         let d = &*self.d;
         let p = self.state.params;
         let host_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
@@ -1824,9 +1892,10 @@ impl Harmless {
         } else {
             1.0
         };
-        let this = Note {
+        let mut this = Note {
             id: note.voice,
             age: self.next_age,
+            group: note.color & 0xf,
             pitch: host_pitch,
             velocity: note.velocity,
             vel01,
@@ -1836,17 +1905,41 @@ impl Harmless {
             release: note.release,
             porta_scale,
         };
-        // Legato (`MonoBox`; FL's notes of the 14th colour turn it round,
-        // and a note here is of the first): while a note sounds, a new
-        // one takes its voices over and glides them to itself.
-        if self.on(44)
-            && let Some(lead) = self.lead
-            && self.voices.iter().any(|v| v.active && v.id == lead)
-        {
-            self.legato(lead, this);
+        // A note of the 16th colour is a filter note: a record of type 1
+        // that sounds nothing, whose pitch the filter follows.
+        if this.group == FILTER_COLOR {
+            self.next_age += 1;
+            if self.filters_len == HELD {
+                self.filters.copy_within(1.., 0);
+                self.filters_len -= 1;
+            }
+            self.filters[self.filters_len] = this;
+            self.filters_len += 1;
             return;
         }
-        let porta = (self.on(43) || note.porta) && self.last.is_some();
+        // Legato (`MonoBox`, which the 14th colour turns round, and then
+        // in the first colour's group): while a note of the group sounds,
+        // a new one takes its voices over and glides them to itself.
+        let mono = self.on(44) != (this.group == MONO_COLOR);
+        if mono {
+            if !self.on(44) {
+                this.group = 0;
+            }
+            if let Some(lead) = self.slots[usize::from(this.group)].lead
+                && self.voices.iter().any(|v| v.active && v.id == lead)
+            {
+                self.legato(lead, this);
+                return;
+            }
+        }
+        // Portamento (`PortaBox`, which the 15th colour turns round in the
+        // same way), from the last note of the group.
+        let mut porta = self.on(43) != (this.group == PORTA_COLOR);
+        if porta && !self.on(43) {
+            this.group = 0;
+        }
+        let group = usize::from(this.group);
+        porta = (porta || note.porta) && self.slots[group].last.is_some();
         let n = d.unison;
         let global_random = if self.on(87) {
             Some(self.random())
@@ -1914,7 +2007,7 @@ impl Harmless {
             voice.fenv_pos = 0.0;
             voice.fenv_inc = d.fenv_attack * d.tick as f32;
             voice.fenv_decaying = false;
-            voice.cutoff = d.fcut;
+            voice.cutoff = d.fcut + filter_offset;
             voice.res_mt = f32::MAX;
             voice.last_cents = f32::NAN;
             voice.count = 0;
@@ -1947,10 +2040,10 @@ impl Harmless {
             voice.pluck_tick = d.pluck_start.min(-(round(d.attack / d.tick as f64) as i64));
             voice.gains = [0.0; 2];
         }
-        // Portamento (`PortaBox`; the 15th colour turns it round): every
-        // voice of the note glides from the last note's levels.
+        // Portamento: every voice of the note glides from the last note's
+        // levels.
         let to = this.levels(self.on(37));
-        if porta && let Some(from) = self.last {
+        if porta && let Some(from) = self.slots[group].last {
             let porta_ticks = self.d.porta;
             for voice in self.voices.iter_mut() {
                 if voice.active && voice.id == this.id {
@@ -1958,9 +2051,11 @@ impl Harmless {
                 }
             }
         }
-        self.lead = Some(this.id);
-        self.lead_age = this.age;
-        self.last = Some(to);
+        self.slots[group] = Slot {
+            lead: Some(this.id),
+            lead_age: this.age,
+            last: Some(to),
+        };
     }
 
     /// A new note while `lead` sounds, in legato: FL makes a voice record
@@ -1973,14 +2068,14 @@ impl Harmless {
             .iter()
             .find(|v| v.active && v.id == lead && v.lead)
             .or_else(|| self.voices.iter().find(|v| v.active && v.id == lead))
-            .map(|v| v.note(self.lead_age))
+            .map(|v| v.note(self.slots[usize::from(this.group)].lead_age))
         else {
             return;
         };
         self.next_age += 1;
         self.hold(old);
         self.hand_on(&old, this);
-        self.lead_age = this.age;
+        self.slots[usize::from(this.group)].lead_age = this.age;
     }
 
     /// Keep a note among the held ones; when they are full the oldest
@@ -2008,8 +2103,9 @@ impl Harmless {
                 voice.glide(&start, &end, false, false, porta);
             }
         }
-        self.lead = Some(to.id);
-        self.last = Some(end);
+        let slot = &mut self.slots[usize::from(to.group)];
+        slot.lead = Some(to.id);
+        slot.last = Some(end);
     }
 
     /// The voice to use for a new one: a silent one, or the oldest.
@@ -2180,7 +2276,8 @@ impl Harmless {
         let curve = d.fenv_tension[usize::from(voice.fenv_decaying)];
         let fenv = curve.at(voice.fenv_pos.min(1.0));
         // The cutoff glides to the wheel.
-        voice.cutoff = d.fcut + (voice.cutoff - d.fcut) * d.cutoff_glide;
+        let fcut = d.fcut + self.filter_offset;
+        voice.cutoff = fcut + (voice.cutoff - fcut) * d.cutoff_glide;
         // Pitch.
         let mut cents = voice.pitch + d.main_pitch + voice.slide[2];
         if p[41] > 0 {
@@ -2579,7 +2676,7 @@ impl Harmless {
         // (`FUN_00783ac0` from the voice renderer), but for the note that
         // answers for the notes: legato may hand it on yet.
         let last = voice.env_buf[len - 1];
-        let lead = self.lead == Some(voice.id);
+        let lead = self.slots[usize::from(voice.group)].lead == Some(voice.id);
         if voice.state == 10 || (voice.state >= 3 && !lead && last.abs() < END_LEVEL) {
             voice.active = false;
         }
@@ -2894,9 +2991,10 @@ impl Generator for Harmless {
     fn set_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
         self.state = State::parse(bytes)?;
         self.load();
-        // `PortaBox` on forgets the last note (`FUN_00788030`).
+        // `PortaBox` on forgets the last note of every group
+        // (`FUN_00788030`).
         if self.on(43) {
-            self.last = None;
+            self.forget_last();
         }
         Ok(())
     }
@@ -2925,7 +3023,8 @@ impl Generator for Harmless {
 
     fn note_on(&mut self, note: NoteOn) {
         if note.slide {
-            // FL bends what sounds; here the slide note bends nothing.
+            // FL's host bends what sounds, with `set_note_pitch`, and
+            // starts no voice.
             return;
         }
         self.start(note);
@@ -2943,14 +3042,27 @@ impl Generator for Harmless {
             self.held_len -= 1;
             return;
         }
-        if self.lead == Some(voice) {
-            self.lead = None;
-            let newest = (0..self.held_len).max_by_key(|&i| self.held[i].age);
+        // A filter note's record goes; the cutoff it left stays.
+        if let Some(i) = self.filters[..self.filters_len]
+            .iter()
+            .position(|f| f.id == voice)
+        {
+            self.filters.copy_within(i + 1..self.filters_len, i);
+            self.filters_len -= 1;
+            return;
+        }
+        if let Some(group) = self.slots.iter().position(|s| s.lead == Some(voice)) {
+            self.slots[group].lead = None;
+            let of_group = |i: &usize| usize::from(self.held[*i].group) == group;
+            let newest = (0..self.held_len)
+                .filter(of_group)
+                .max_by_key(|&i| self.held[i].age);
+            let lead_age = self.slots[group].lead_age;
             let gone = self
                 .voices
                 .iter()
                 .find(|v| v.active && v.id == voice)
-                .map(|v| v.note(self.lead_age));
+                .map(|v| v.note(lead_age));
             if let (Some(i), Some(mut gone)) = (newest, gone) {
                 let mut next = self.held[i];
                 self.held.copy_within(i + 1..self.held_len, i);
@@ -2963,7 +3075,7 @@ impl Generator for Harmless {
                 }
                 next.porta_scale = gone.porta_scale;
                 self.hand_on(&gone, next);
-                self.lead_age = next.age;
+                self.slots[group].lead_age = next.age;
                 return;
             }
         }
@@ -2973,9 +3085,28 @@ impl Generator for Harmless {
         }
     }
 
+    /// `FUN_00784a10` reads the host's `FinalLevels` into the voice at the
+    /// top of every control tick, so the voices of the note take the pitch
+    /// on their next one. A note held under legato keeps it for when it
+    /// sounds again.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for v in self.voices.iter_mut().filter(|v| v.active && v.id == voice) {
+            v.pitch = pitch;
+        }
+        let records = self.held[..self.held_len].iter_mut();
+        for held in records.chain(&mut self.filters[..self.filters_len]) {
+            if held.id == voice {
+                held.pitch = pitch;
+            }
+        }
+    }
+
     fn all_notes_off(&mut self) {
         self.held_len = 0;
-        self.lead = None;
+        self.filters_len = 0;
+        for slot in &mut self.slots {
+            slot.lead = None;
+        }
         let d = &*self.d;
         for v in self.voices.iter_mut().filter(|v| v.active) {
             Harmless::release(v, d);
@@ -2992,8 +3123,11 @@ impl Generator for Harmless {
             l[..len].fill(0.0);
             r[..len].fill(0.0);
             let mut voices = std::mem::take(&mut self.voices);
-            // FL's voice list: what sounds and the held notes.
-            let sounding = voices.iter().filter(|v| v.active).count() + self.held_len;
+            // FL's voice list: what sounds, the held notes and the filter
+            // notes.
+            let sounding =
+                voices.iter().filter(|v| v.active).count() + self.held_len + self.filters_len;
+            self.follow_filter_note();
             let trem = self.tremolo(len, sounding);
             for voice in voices.iter_mut().filter(|v| v.active) {
                 self.render_voice(voice, &mut l[..len], &mut r[..len], trem);
@@ -3033,7 +3167,7 @@ impl Generator for Harmless {
         self.state.params[index] = value;
         self.derive();
         if index == 43 && value > 0 {
-            self.last = None;
+            self.forget_last();
         }
         if index == 98
             && let Some(maximus) = &mut self.compression
@@ -3047,8 +3181,9 @@ impl Generator for Harmless {
             voice.active = false;
         }
         self.held_len = 0;
-        self.lead = None;
-        self.last = None;
+        self.slots = [Slot::default(); GROUPS];
+        self.filters_len = 0;
+        self.filter_offset = 0.0;
         self.load();
     }
 
@@ -3133,6 +3268,10 @@ mod tests {
         bytes
     }
 
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        crate::testing::follows_note_pitch(|| Box::new(Harmless::default()), 44_100.0);
+    }
     #[test]
     fn the_level_curves_meet_at_their_ends() {
         assert_eq!(level(0.0), 0.0);
@@ -3555,6 +3694,124 @@ mod tests {
         // A note after the release starts its own voices.
         plugin.note_on(keyed(3, 64));
         assert_eq!(sounding(&plugin).iter().filter(|v| v.id == 3).count(), 3);
+    }
+
+    fn coloured(id: u32, key: i16, color: u8) -> NoteOn {
+        NoteOn {
+            color,
+            ..keyed(id, key)
+        }
+    }
+
+    #[test]
+    fn legato_hands_voices_on_within_a_colour_only() {
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 64, 3));
+        // Each colour has its own group: neither took the other over.
+        let ids: Vec<u32> = sounding(&plugin).iter().map(|v| v.id).collect();
+        assert_eq!(ids, [1, 2]);
+        plugin.note_on(coloured(3, 67, 3));
+        let ids: Vec<u32> = sounding(&plugin).iter().map(|v| v.id).collect();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(plugin.held[..plugin.held_len][0].id, 2);
+        // Letting go of the first colour's note leaves the other group be.
+        plugin.note_off(1);
+        plugin.note_off(3);
+        let voices = sounding(&plugin);
+        assert!(
+            voices
+                .iter()
+                .any(|v| v.id == 2 && v.state < 6 && v.group == 3)
+        );
+        assert!(voices.iter().any(|v| v.id == 1 && v.state == 6));
+    }
+
+    #[test]
+    fn the_14th_and_15th_colours_turn_legato_and_portamento_round() {
+        // MonoBox off: a note of the 14th colour plays legato over the
+        // first colour's note.
+        let mut plugin = with_state(&[]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 64, MONO_COLOR));
+        let ids: Vec<u32> = sounding(&plugin).iter().map(|v| v.id).collect();
+        assert_eq!(ids, [2]);
+        // MonoBox on: it does not, and starts its own voices.
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 64, MONO_COLOR));
+        assert_eq!(sounding(&plugin).len(), 2);
+        // PortaBox off: a note of the 15th colour glides from the first
+        // colour's last note.
+        let mut plugin = with_state(&[(45, 400)]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 67, PORTA_COLOR));
+        let glide = sounding(&plugin).iter().find(|v| v.id == 2).unwrap().slide[2];
+        assert_eq!(glide, -700.0);
+        plugin.note_on(coloured(3, 64, 0));
+        let glide = sounding(&plugin).iter().find(|v| v.id == 3).unwrap().slide[2];
+        assert_eq!(glide, 0.0);
+    }
+
+    #[test]
+    fn a_filter_note_moves_the_cutoff_to_its_pitch_and_leaves_it_there() {
+        let mut plugin = with_state(&[]);
+        plugin.note_on(keyed(1, 60));
+        render(&mut plugin, 1024);
+        let open = sounding(&plugin)[0].cutoff;
+        assert_eq!(open, plugin.d.fcut);
+        // Key 60 two octaves up is C7, 2093 Hz, from the middle of the
+        // range.
+        plugin.note_on(coloured(2, 60, FILTER_COLOR));
+        assert_eq!(sounding(&plugin).len(), 1);
+        render(&mut plugin, 44_100);
+        let d = &*plugin.d;
+        let middle = (d.fmin + d.fmax) * 0.5;
+        let offset = f64::from(2_093.004_5_f32.log2() - middle);
+        assert!((f64::from(plugin.filter_offset) - offset).abs() < 1e-4);
+        let cutoff = sounding(&plugin)[0].cutoff;
+        assert!(
+            (cutoff - (d.fcut + plugin.filter_offset)).abs() < 1e-3,
+            "{cutoff}"
+        );
+        // The host moves the filter note an octave up, and so the cutoff.
+        let before = plugin.filter_offset;
+        plugin.set_note_pitch(2, 1200.0);
+        render(&mut plugin, 256);
+        assert!((plugin.filter_offset - before - 1.0).abs() < 1e-5);
+        // Its end leaves the cutoff where it is.
+        plugin.note_off(2);
+        render(&mut plugin, 256);
+        assert!((plugin.filter_offset - before - 1.0).abs() < 1e-5);
+        assert_eq!(plugin.filters_len, 0);
+    }
+
+    #[test]
+    fn a_note_takes_the_pitch_the_host_moves_it_to_on_its_next_tick() {
+        let mut plugin = with_state(&[]);
+        plugin.note_on(keyed(1, 60));
+        render(&mut plugin, 256);
+        let before = sounding(&plugin)[0].f0_hz;
+        plugin.set_note_pitch(1, 1200.0);
+        plugin.set_note_pitch(7, 0.0);
+        render(&mut plugin, 256);
+        let after = sounding(&plugin)[0].f0_hz;
+        assert!((after / before - 2.0).abs() < 1e-5, "{before} {after}");
+
+        // A note held under another by legato keeps the pitch for when it
+        // sounds again.
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(keyed(1, 60));
+        plugin.note_on(keyed(2, 64));
+        plugin.set_note_pitch(1, -500.0);
+        plugin.set_note_pitch(2, 1200.0);
+        assert!(sounding(&plugin).iter().all(|v| v.pitch == 1200.0));
+        plugin.note_off(2);
+        assert!(
+            sounding(&plugin)
+                .iter()
+                .all(|v| v.id == 1 && v.pitch == -500.0)
+        );
     }
 
     #[test]
