@@ -11,21 +11,24 @@
 //! [`boobass::BooBass`], [`fruit_kick::FruitKick`], [`sytrus::Sytrus`] and
 //! [`three_osc::ThreeOsc`].
 //!
-//! So far: [`balance::Balance`], [`blood_overdrive::BloodOverdrive`],
+//! So far: [`balance::Balance`], [`bass_boost::BassBoost`],
+//! [`blood_overdrive::BloodOverdrive`],
 //! [`chorus::Chorus`], [`compressor::Compressor`],
 //! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
 //! [`delay_bank::DelayBank`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
-//! [`flangus::Flangus`],
+//! [`flanger::Flanger`], [`flangus::Flangus`], [`free_filter::FreeFilter`],
 //! [`limiter::Limiter`], [`love_philter::LovePhilter`],
 //! [`maximus::Maximus`],
 //! [`multiband_compressor::MultibandCompressor`], [`panomatic::PanOMatic`],
 //! [`parametric_eq_2::ParametricEq2`],
-//! [`peak_controller::PeakController`], [`pitcher::Pitcher`],
+//! [`peak_controller::PeakController`], [`phaser::Phaser`],
+//! [`pitcher::Pitcher`],
 //! [`reeverb_2::Reeverb2`],
 //! [`soft_clipper::SoftClipper`], [`soundgoodizer::Soundgoodizer`],
 //! [`spreader::Spreader`],
 //! [`stereo_enhancer::StereoEnhancer`], [`stereo_shaper::StereoShaper`],
-//! [`transient_processor::TransientProcessor`] and
+//! [`transient_processor::TransientProcessor`],
+//! [`vintage_chorus::VintageChorus`] and
 //! [`waveshaper::WaveShaper`].
 //!
 //! Fruity Peak Controller is an internal controller: beside its sound it
@@ -35,6 +38,7 @@
 pub mod autogun;
 mod autogun_engine;
 pub mod balance;
+pub mod bass_boost;
 pub mod bassdrum;
 pub mod blood_overdrive;
 pub mod boobass;
@@ -59,8 +63,10 @@ pub mod fast_lp;
 pub mod filter;
 pub mod fl_fx;
 pub mod fl_keys;
+pub mod flanger;
 pub mod flangus;
 pub mod fpc;
+pub mod free_filter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
 mod generator;
@@ -88,6 +94,7 @@ mod parts;
 pub mod pass_through;
 pub mod peak_controller;
 pub mod phase_inverter;
+pub mod phaser;
 pub mod pitch_shifter;
 pub mod pitcher;
 pub mod port;
@@ -110,6 +117,7 @@ pub mod test_sine;
 mod testing;
 pub mod three_osc;
 pub mod transient_processor;
+pub mod vintage_chorus;
 pub mod vocodex;
 pub mod wave_candy;
 pub mod waveshaper;
@@ -378,6 +386,16 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(fast_lp::FastLp::default()))
     } else if is(filter::NAME) {
         Some(Box::new(filter::Filter::default()))
+    } else if is(vintage_chorus::NAME) {
+        Some(Box::new(vintage_chorus::VintageChorus::default()))
+    } else if is(phaser::NAME) {
+        Some(Box::new(phaser::Phaser::default()))
+    } else if is(free_filter::NAME) {
+        Some(Box::new(free_filter::FreeFilter::default()))
+    } else if is(bass_boost::NAME) {
+        Some(Box::new(bass_boost::BassBoost::default()))
+    } else if is(flanger::NAME) {
+        Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
         Some(Box::new(flangus::Flangus::default()))
     } else if is(frequency_splitter::NAME) {
@@ -701,6 +719,7 @@ mod tests {
         for (plugin, len, uses) in [
             ("effector", 316, 27),
             ("equo", 4143, 10),
+            ("fruity bass boost", 12, 2),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
             ("fruity compressor", 36, 35),
@@ -713,6 +732,8 @@ mod tests {
             ("fruity filter", 29, 12),
             ("fruity blood overdrive", 36, 26),
             ("fruity chorus", 52, 20),
+            ("fruity flanger", 52, 5),
+            ("fruity free filter", 21, 4),
             ("fruity flangus", 32, 56),
             ("fruity limiter", 168, 156),
             ("fruity limiter", 169, 190),
@@ -724,6 +745,7 @@ mod tests {
             ("fruity parametric eq 2", 354, 590),
             ("fruity peak controller", 42, 36),
             ("fruity reeverb", 44, 7),
+            ("fruity phaser", 40, 3),
             ("fruity reeverb 2", 58, 62),
             ("fruity reeverb 2", 66, 271),
             ("fruity send", 16, 2),
@@ -740,6 +762,7 @@ mod tests {
             ("pitch shifter", 75, 15),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
+            ("vintage chorus", 72, 12),
         ] {
             let found = loaded.get(&(plugin.to_owned(), len)).copied();
             assert_eq!(found, Some(uses), "{plugin} at {len} bytes");
@@ -783,7 +806,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 41);
+        assert_eq!(lengths.count(), 46);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

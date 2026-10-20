@@ -58,18 +58,18 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Fruity DX10 | 4230 | yes | 6 | implemented in crates/plugins (mda DX10 with a second modulator, all 74 shipped states exact; the instrument tab and the mod X/Y filter not built), docs/plugins/fruity-dx10.md |
 | Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), docs/plugins/ogun.md |
 | Effect | Emphasis | 4045 | yes | 5 | |
-| Effect | Vintage Chorus | 3849 | yes | 5 | |
+| Effect | Vintage Chorus | 3849 | yes | 5 | implemented in crates/plugins (the engine_x64.dll chorus exact; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-chorus.md |
 | Generator | Fruity Slicer | 4483 | yes | 5 | |
 | Generator | GMS | 1516 | yes | 5 | |
 | Effect | Edison | 6077 |  | 4 | |
 | Effect | Frequency Shifter | 3786 | yes | 4 | |
 | Effect | Fruity Filter | 3692 | yes | 4 | implemented in crates/plugins, docs/plugins/fruity-filter.md |
-| Effect | Fruity Flanger | 3629 | yes | 4 | |
+| Effect | Fruity Flanger | 3629 | yes | 4 | implemented in crates/plugins (exact; a new sample rate empties the lines where FL keeps them), docs/plugins/fruity-flanger.md |
 | Generator | Morphine | 1704 |  | 4 | |
 | Effect | Distructor | 3571 |  | 3 | |
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
-| Effect | Fruity Phaser | 3622 | yes | 3 | |
+| Effect | Fruity Phaser | 3622 | yes | 3 | implemented in crates/plugins (exact), docs/plugins/fruity-phaser.md |
 | Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its two controller outputs are not driven, so the 60 corpus links from it in 3 projects play nothing, and it says so as approximated), docs/plugins/fruity-x-y-controller.md |
 | Effect | Low Lifter | 3704 | yes | 3 | |
 | Generator | BassDrum | 3973 | yes | 3 | implemented in crates/plugins (oscillator table and noise sample read from FL's data at runtime), docs/plugins/bassdrum.md |
@@ -80,7 +80,7 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Generator | MIDI Out | 3953 |  | 3 | |
 | Generator | Sakura | 4194 | yes | 3 | |
 | Effect | Fruity Fast LP | 3664 | yes | 2 | implemented in crates/plugins, docs/plugins/fruity-fast-lp.md |
-| Effect | Fruity Free Filter | 3689 | yes | 2 | |
+| Effect | Fruity Free Filter | 3689 | yes | 2 | implemented in crates/plugins (exact; the corner is worked out at 44.1 kHz at every rate, as in FL), docs/plugins/fruity-free-filter.md |
 | Effect | Fruity NoteBook | 3526 |  | 2 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
 | Effect | Fruity Wrapper | 5856 |  | 2 | implemented in crates/plugins (only what FL's project loader does with it: every corpus wrapper holds the FL 11 to 13 VST build of one of FL's own effects, which `FLEngine_x64.dll` swaps for the effect itself at its defaults and moves to the VST chunk's parameters; that swap is exact, and hosts the wrapped Balance, Chorus, Compressor, Fast LP and Filter, 23 of the 36 corpus states; the wrapped Bass Boost, Center, Flanger, Free Filter, Mute 2, Phase Inverter, Phaser and Reeverb are not built and passed through, and a third-party VST, none in the corpus, is never hosted), docs/plugins/fruity-wrapper.md |
 | Effect | Hardcore | 626 | yes | 2 | |
@@ -92,7 +92,7 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Toxic Biohazard | 737 |  | 2 | |
 | Generator | Wave Traveller | 4369 | yes | 2 | |
 | Effect | Emphasizer | 3688 |  | 1 | |
-| Effect | Fruity Bass Boost | 3664 | yes | 1 | |
+| Effect | Fruity Bass Boost | 3664 | yes | 1 | implemented in crates/plugins (exact; a new sample rate works the corner out again where FL keeps it), docs/plugins/fruity-bass-boost.md |
 | Effect | Fruity Delay | 3685 |  | 1 | implemented in crates/plugins (exact: tempo-synced ring, the three modes, the feedback low pass in f64 as FL's SSE loops keep it, both ramps with the renderer's cap; the input-add routine is taken to be Balance's; no render test, unit tests only), docs/plugins/fruity-delay.md |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
 | Effect | Fruity HTML NoteBook | 3835 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
