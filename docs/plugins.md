@@ -62,7 +62,7 @@ Corpus render at `383e2db`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Fruity Slicer | 4483 | yes | 5 | |
 | Generator | GMS | 1516 | yes | 5 | |
 | Effect | Edison | 6077 |  | 4 | |
-| Effect | Frequency Shifter | 3786 | yes | 4 | |
+| Effect | Frequency Shifter | 3786 | yes | 4 | implemented in crates/plugins (the Engine_x64.dll shifters, HQ crossovers, Hilbert pair, ring modulator and tempo sync read in full and summed in its order; the CRT's sinf, sin, tanhf, powf and pow are Rust's; glides from the engine's defaults land when a state loads; tempo sync counts four steps a beat and the song's frames from the host's ticks), docs/plugins/frequency-shifter.md |
 | Effect | Fruity Filter | 3692 | yes | 4 | implemented in crates/plugins, docs/plugins/fruity-filter.md |
 | Effect | Fruity Flanger | 3629 | yes | 4 | implemented in crates/plugins (exact; a new sample rate empties the lines where FL keeps them), docs/plugins/fruity-flanger.md |
 | Generator | Morphine | 1704 |  | 4 | |
