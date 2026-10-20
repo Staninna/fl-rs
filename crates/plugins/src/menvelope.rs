@@ -374,6 +374,13 @@ impl Track {
         }
     }
 
+    /// Take the attack, decay, sustain and release knobs anew, as
+    /// `TMEnvelope`'s `0x789de0` (Sytrus) does when a host moves one. This
+    /// allocates nothing.
+    pub(crate) fn set_knobs(&mut self, knobs: [i32; 4]) {
+        self.scales = knobs.map(|knob| knob as f32 / 128.0);
+    }
+
     /// Whether the envelope is switched on.
     pub(crate) fn active(&self) -> bool {
         self.active
