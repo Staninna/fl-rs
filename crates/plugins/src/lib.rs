@@ -90,6 +90,7 @@ pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
 pub mod spreader;
+pub mod squeeze;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod sytrus;
@@ -386,6 +387,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(soundgoodizer::Soundgoodizer::default()))
     } else if is(spreader::NAME) {
         Some(Box::new(spreader::Spreader::default()))
+    } else if is(squeeze::NAME) {
+        Some(Box::new(squeeze::Squeeze::default()))
     } else if is(stereo_enhancer::NAME) {
         Some(Box::new(stereo_enhancer::StereoEnhancer::default()))
     } else if is(stereo_shaper::NAME) {
@@ -678,6 +681,7 @@ mod tests {
             ("fruity reeverb 2", 66, 271),
             ("fruity send", 16, 2),
             ("fruity soft clipper", 8, 28),
+            ("fruity squeeze", 52, 2),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
             ("frequency splitter", 113, 17),
@@ -724,7 +728,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 40);
+        assert_eq!(lengths.count(), 41);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

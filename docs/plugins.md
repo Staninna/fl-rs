@@ -99,7 +99,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Reeverb | 3627 | yes | 1 | implemented in crates/plugins (exact: the plate's twelve lines, taps, cuts, colour shelf and damping as the render reads them, in f32 with FL's 1e-30 fill), docs/plugins/fruity-reeverb.md |
 | Effect | Fruity Scratcher | 4172 | yes | 1 | |
 | Effect | Fruity Send | 3621 | yes | 1 | implemented in crates/plugins (pan matrix, knob curves and the send to the chosen insert through the host's output buffer, as Stereo Shaper's difference goes; the send's mixing routine is not read and is taken to be Balance's), docs/plugins/fruity-send.md |
-| Effect | Fruity Squeeze | 3736 | yes | 1 | |
+| Effect | Fruity Squeeze | 3736 | yes | 1 | implemented in crates/plugins (exact: crusher, gate with its crossfaded edges, the twice-run state-variable filter before or after, mix and gain), docs/plugins/fruity-squeeze.md |
 | Effect | Fruity Vocoder | 3725 | yes | 1 | |
 | Effect | Fruity dB Meter | 3576 |  | 1 | |
 | Effect | Razer Chroma | 3952 |  | 1 | |
