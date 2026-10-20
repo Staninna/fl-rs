@@ -7,9 +7,12 @@
 //! The state is read as FL writes it, to the last byte, for every version
 //! from 8 to 25. The sound is an approximation: the operators, the matrix,
 //! the filters, the envelopes and the output levels follow what the voice
-//! kernel does, with no band limiting of the wavetables, no unison
-//! sub-voices, no plucked (Karplus-Strong) operators, no waveshaper on the
-//! filters and no delay, chorus, reverb or EQ after the voices. A state
+//! kernel does, with no band limiting of the wavetables, no plucked
+//! (Karplus-Strong) operators, no waveshaper on the filters and no delay,
+//! chorus, reverb or EQ after the voices. The unison is FL's: up to nine
+//! voices a note and nine more an octave down, detuned, panned, phased and
+//! stretched by `TriggerVoice`'s tables, alone or sharing one set of
+//! filters (section 7 of the doc). A state
 //! that asks for one of those says so in [`Generator::fidelity`], and
 //! every state says the operators are approximate.
 //!
@@ -17,8 +20,8 @@
 //! `ProcessParam` has them (section 6 of the doc): the main volume, LFO
 //! level and pitch, the quick ADSR, Mod X and Mod Y, which the voices
 //! glide to, the operators' and filters' wheels and every articulator's
-//! knobs are heard; the unison, chorus, delay, EQ and portamento ones are
-//! kept and read back.
+//! knobs are heard, and the unison's; the chorus, delay, EQ and portamento
+//! ones are kept and read back.
 
 // The kernels index their rows and operators on purpose: the workspace
 // tests build unoptimised, and an index loop is what FL's kernel does.
@@ -35,6 +38,9 @@ pub const NAME: &str = "Sytrus";
 
 /// How many notes sound at once.
 pub const VOICES: usize = 32;
+/// How many voices sound at once, unison voices counted: the oldest notes
+/// make room for a new one past this.
+const ROOM: usize = 256;
 
 const OPERATORS: usize = 6;
 const FILTERS: usize = 3;
@@ -339,10 +345,15 @@ struct Articulator {
     lfo_amount: f32,
     envelope: Track,
     lfo: Lfo,
-    /// The key, velocity and random maps, which are read once a note.
+    /// The key, velocity, random and unison maps, which are read once a
+    /// note.
     key: Option<Curve>,
     velocity: Option<Curve>,
     random: Option<Curve>,
+    unison: Option<Curve>,
+    /// The envelope runs once for every voice (its flag 2), so a unison
+    /// voice does not stretch it.
+    global: bool,
     /// The Mod X and Mod Y maps, baked into tables.
     mod_x: Option<Vec<f32>>,
     mod_y: Option<Vec<f32>>,
@@ -375,6 +386,8 @@ impl Articulator {
             key: None,
             velocity: None,
             random: None,
+            unison: None,
+            global: false,
             mod_x: None,
             mod_y: None,
             knobs: KNOBS,
@@ -398,6 +411,7 @@ impl Articulator {
         articulator.lfo_amount = reader.f32()?;
         let mut envelope = MEnvelope::read(reader, Class::Envelope)?;
         articulator.knobs[..4].copy_from_slice(&envelope.knobs);
+        articulator.global = envelope.flags & 2 != 0;
         envelope.knobs = scaled(envelope.knobs, adsr);
         articulator.envelope = Track::new(&envelope, centre);
         let lfo = MEnvelope::read(reader, Class::Lfo)?;
@@ -418,6 +432,7 @@ impl Articulator {
         articulator.mod_x = table(&maps[2]);
         articulator.mod_y = table(&maps[3]);
         articulator.random = drawn(&maps[4]);
+        articulator.unison = drawn(&maps[5]);
         Ok(articulator)
     }
 
@@ -450,15 +465,19 @@ impl Articulator {
         self.envelope.active() || self.lfo.active()
     }
 
-    /// A run at the start of a note. `key`, `velocity` and `random` are
-    /// where the note is in those maps, from 0 to 1.
-    fn start(&self, key: f64, velocity: f64, random: f64, rates: [f64; 2]) -> ArtRun {
+    /// A run at the start of a note. `at` is where the note is in the
+    /// key, velocity, random and unison maps, each from 0 to 1: the unison
+    /// map is read at the voice's place in the unison, a half for a voice
+    /// alone (`0x86af20`).
+    fn start(&self, at: [f64; 4], rates: [f64; 2]) -> ArtRun {
         let centre = self.centre();
         let mut fixed = if self.additive { 0.0 } else { 1.0 };
+        let [key, velocity, random, unison] = at;
         for (map, at) in [
             (&self.key, key),
             (&self.velocity, velocity),
             (&self.random, random),
+            (&self.unison, unison),
         ] {
             if let Some(curve) = map {
                 fixed = self.combine(fixed, (curve.value_at(at) - centre) as f32);
@@ -918,6 +937,10 @@ struct State {
     main_pitch: f32,
     /// The unison order: 1 is one voice.
     unison: i32,
+    /// The unison's type (u8 0x4ff), which picks its detune table, and
+    /// whether its voices share one set of filters (u8 0x4f4).
+    unison_kind: u8,
+    unison_shared: bool,
     /// The FX send level, as a gain.
     fx_send: f32,
     mod_x: i32,
@@ -1011,6 +1034,8 @@ impl State {
             main_volume: 1.0,
             main_pitch: 0.0,
             unison: 1,
+            unison_kind: 0,
+            unison_shared: false,
             fx_send: 1.0,
             mod_x: 256,
             mod_y: 256,
@@ -1143,7 +1168,7 @@ impl State {
             reader.i32()?;
         }
         if version > 5 {
-            reader.u8()?;
+            state.unison_shared = reader.u8()? != 0;
         }
         if version > 6 {
             reader.u8()?;
@@ -1162,6 +1187,9 @@ impl State {
             // 0x4f8, the portamento switch, is REC 596.
             if let Some(porta) = flags.get(1) {
                 state.params[PARAMS - 1] = i32::from(*porta);
+            }
+            if let Some(kind) = flags.get(8) {
+                state.unison_kind = *kind;
             }
         }
         let mut effects = false;
@@ -1305,12 +1333,7 @@ impl State {
     /// of `part`: group 0 (REC 3 to 6) over every volume articulator,
     /// group 1 (7 to 10) over the cutoff and resonance of filters 1 and 2.
     fn adsr(&self, part: usize, index: usize) -> [i32; 4] {
-        let filter = (OPERATORS..OPERATORS + 2).contains(&part);
-        let group = if filter && matches!(index, 2 | 3) {
-            1
-        } else if index == 1 {
-            0
-        } else {
+        let Some(group) = self.adsr_group(part, index) else {
             return ADSR;
         };
         let at = 3 + 4 * group;
@@ -1320,6 +1343,20 @@ impl State {
             self.params[at + 2],
             self.params[at + 3],
         ]
+    }
+
+    /// Which quick ADSR group, if any, is over the envelope of articulator
+    /// `index` of `part` (`0x86af20`: `0x86c7a0 = 0x0c`, `0x86c7a1 =
+    /// 0xc0`).
+    fn adsr_group(&self, part: usize, index: usize) -> Option<usize> {
+        let filter = (OPERATORS..OPERATORS + 2).contains(&part);
+        if filter && matches!(index, 2 | 3) {
+            Some(1)
+        } else if index == 1 {
+            Some(0)
+        } else {
+            None
+        }
     }
 
     /// Work out which rows sound and who feeds whom.
@@ -1487,8 +1524,9 @@ impl State {
                 }
             }
             Param::Wheel { k: 8, .. } => self.fx_send = level(value, 128.0),
-            // The unison, the chorus, the delays, the EQ and portamento
-            // are kept but not built.
+            // The unison's wheels are taken by the voices (`Sytrus`), and
+            // the chorus, the delays, the EQ and portamento are kept but
+            // not built.
             _ => {}
         }
     }
@@ -1600,6 +1638,10 @@ fn flushed(state: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq)]
 struct Voice {
     id: u32,
+    /// The note this voice is one of, counted from 1, and what it is in
+    /// the note's unison.
+    group: u32,
+    unison: Unison,
     /// The note's pitch in cents from C5, without and with the main pitch.
     key_pitch: f32,
     pitch: f32,
@@ -1648,19 +1690,241 @@ fn place(wheel: f32, offset: f32) -> usize {
     (f64::from(wheel + offset * 256.0).round_ties_even()).clamp(0.0, MAP as f64) as usize
 }
 
+/// How far each unison voice is detuned, by the unison type (u8 0x4ff):
+/// `0x8fcad8 + 0x24 type`, voice `(e + round) mod 9`.
+const UNISON_DETUNE: [[f32; 9]; 4] = [
+    [
+        0.877, 1.069, 0.929, 1.181, 1.031, 1.129, 0.887, 1.117, 0.977,
+    ],
+    [
+        0.877, 1.069, 0.929, 1.181, 1.031, 1.129, 0.887, 1.117, 0.977,
+    ],
+    [1.0; 9],
+    [
+        0.890_471_9,
+        1.076_426_3,
+        0.911_577_05,
+        1.102_535_8,
+        1.034_126_2,
+        1.166_861_2,
+        0.853_971,
+        1.206_272_6,
+        1.0,
+    ],
+];
+/// How far each unison voice's envelopes are stretched (`0x8fcb68`).
+const UNISON_ENVELOPE: [f32; 9] = [
+    0.9877, 1.0069, 0.9929, 1.0181, 1.0031, 1.0129, 0.9887, 1.0117, 0.9977,
+];
+/// The most voices one note makes: nine, and nine more an octave down.
+const UNISON: usize = 18;
+
+/// What a voice is to the others of its note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// It plays on its own, filters and all (voice+0x2c = 0).
+    Alone,
+    /// It renders its operators and the slaves' into one sum and filters
+    /// that (-1).
+    Master,
+    /// It renders its operators into the master's sum (1).
+    Slave,
+}
+
+/// One voice of a note's unison, as `TriggerVoice` (`0x86c7d0`) sets it
+/// up and `0x871fd0` sets it again when a unison wheel moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Unison {
+    role: Role,
+    /// Its share of the pan wheel (+0x50, -0.5..0.5 / 128), its level
+    /// (+0x54), its level with the centre voices louder (+0x58) and its
+    /// share of the detune (+0x4c).
+    pan_share: f32,
+    level: f32,
+    centred: f32,
+    detune: f32,
+    /// It is the octave below (+0x5c).
+    sub: bool,
+    /// Where it is panned, 0 to 1 (+0x3c), its gain (+0x40), its gain
+    /// into the master's sum (+0x34) and what its pitch is multiplied by
+    /// (+0x44).
+    pan: f32,
+    gain: f32,
+    sum: f32,
+    pitch: f32,
+    /// What its operators start at past their phase wheels, in cycles
+    /// (+0x38); where it is in the unison map; what its attack and decay
+    /// are stretched by; the semitones its key maps read lower.
+    phase: f32,
+    place: f32,
+    stretch: [f32; 2],
+    drop: f32,
+}
+
+impl Unison {
+    /// A note's one voice when there is no unison.
+    const ALONE: Unison = Unison {
+        role: Role::Alone,
+        pan_share: 0.0,
+        level: 1.0,
+        centred: 1.0,
+        detune: 0.0,
+        sub: false,
+        pan: 0.5,
+        gain: 1.0,
+        sum: 1.0,
+        pitch: 1.0,
+        phase: 0.0,
+        place: 0.5,
+        stretch: [1.0; 2],
+        drop: 0.0,
+    };
+
+    /// The voices a note starts with this state's unison, in the order
+    /// FL makes them: the voices of the note, then those of the octave
+    /// below. Returns how many.
+    fn voices(state: &State, out: &mut [Unison; UNISON]) -> usize {
+        let p = &state.params;
+        let order = p[11].clamp(1, 9) as usize;
+        let [pan, sub, phase, envelope] = [p[12], p[15], p[16], p[17]];
+        let kind = usize::from(state.unison_kind.min(3));
+        let range = unison_range(p[14], kind);
+        let phase = phase as f32 * (1.0 / 128.0);
+        let volume = p[13] as f32 * (1.0 / 128.0);
+        let n = order as f32;
+        let mut level = (1.0 / f64::from(order as u32)) as f32;
+        if order > 1 {
+            let grow = (f64::from(1.0 - level) * 3f64.ln()).exp();
+            level = 1.0 - (grow - 1.0) as f32 * 0.5;
+        }
+        let mut levels = [level, 0.0];
+        if sub != 0 {
+            let share = sub as f32 * (1.0 / 128.0);
+            levels = [level * (1.0 - share), level * share];
+        }
+        let shared = state.unison_shared && (order > 1 || sub > 0);
+        let rounds = 1 + usize::from(sub != 0);
+        let mut count = 0;
+        for round in 0..rounds {
+            for e in 0..order {
+                let mut u = Unison::ALONE;
+                u.role = match (shared, count) {
+                    (false, _) => Role::Alone,
+                    (true, 0) => Role::Master,
+                    _ => Role::Slave,
+                };
+                u.level = levels[round];
+                u.centred = u.level;
+                u.sub = round > 0;
+                if order > 1 {
+                    u.phase = e as f32 / n * phase;
+                    let t = e as f32 / (order - 1) as f32;
+                    u.place = t;
+                    let spread = t * 2.0 - 1.0;
+                    if u.role == Role::Alone {
+                        u.pan_share = spread * (1.0 / 256.0);
+                    }
+                    let mut size = spread.abs();
+                    if kind == 0 || order != 2 {
+                        u.centred = u.level * 2.0 * (1.0 - size);
+                    }
+                    if e & 1 == 1 {
+                        size = -size;
+                    }
+                    if kind != 0 && order & 1 == 1 && order < 2 * e {
+                        size = -size;
+                    }
+                    let slot = (e + round) % 9;
+                    u.detune = size * UNISON_DETUNE[kind][slot];
+                    if kind == 3 {
+                        let pitch = (f64::from(u.detune * range)).exp() as f32;
+                        let ph = f64::from(phase * phase) * f64::from(phase * phase);
+                        let mut turns = ph * f64::from(pitch * 100_000.0) * ph;
+                        if u.sub {
+                            turns *= 0.5;
+                        }
+                        u.phase = frac(turns) as f32;
+                    }
+                    let stretch = ((f64::from(spread.abs()) - 0.5)
+                        * f64::from(envelope)
+                        * f64::from(UNISON_ENVELOPE[slot])
+                        * (1.0 / 128.0)
+                        + 1.0) as f32
+                        * (1.0 / 128.0);
+                    u.stretch = [
+                        stretch * 128.0,
+                        ((0.015_625 - f64::from(stretch)) * 128.0) as f32,
+                    ];
+                }
+                if u.sub {
+                    u.drop = 12.0;
+                }
+                u.retune(pan, volume, range);
+                out[count] = u;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Work out the pan, the gains and the pitch from the wheels, as
+    /// `0x871fd0` does for every voice when one of them moves: the pan
+    /// wheel (0..128), the volume wheel over 128 and the detune range.
+    fn retune(&mut self, pan: i32, volume: f32, range: f32) {
+        if self.role == Role::Alone {
+            self.pan = (f64::from(self.pan_share * pan as f32) + 0.5) as f32;
+        }
+        self.gain = self.level * volume + self.centred * (1.0 - volume);
+        self.sum = self.gain;
+        if self.role == Role::Master {
+            self.gain = 1.0;
+        }
+        self.pitch = (f64::from(self.detune * range)).exp() as f32;
+        if self.sub {
+            self.pitch *= 0.5;
+        }
+    }
+}
+
+/// The unison's detune range in natural log units from its pitch wheel
+/// (0..256): `(11^(w/256) - 1) * 5` cents for type 0 and `(41^(w/256) -
+/// 1) * 1.875` for the others (`0x86c7d0`).
+fn unison_range(wheel: i32, kind: usize) -> f32 {
+    let (base, scale) = if kind == 0 {
+        (11f64, 5.0)
+    } else {
+        (41f64, 1.875)
+    };
+    let x = f64::from(wheel as f32 * (1.0 / 256.0));
+    let grown = ((x * base.ln()).exp() - 1.0) as f32;
+    (f64::from(grown) * scale * (LN_2 / 1200.0)) as f32
+}
+
+/// What is left of `x` past its whole number, as `0x40acf0` takes it.
+fn frac(x: f64) -> f64 {
+    x - x.trunc()
+}
+
 /// What an operator's phase moves by a sample at `pitch` cents from C5,
 /// before its pitch articulator (`0x872210`).
-fn op_pitch(operator: &Operator, pitch: f32, rate: f32) -> f64 {
-    let base = C5 * (f64::from(pitch) / 1200.0).exp2() / f64::from(rate);
+fn op_pitch(operator: &Operator, pitch: f32, factor: f32, rate: f32) -> f64 {
+    let base = C5 * (f64::from(pitch) / 1200.0).exp2() * f64::from(factor) / f64::from(rate);
     base * f64::from(operator.ratio) / RATIO_UNIT
         + f64::from(operator.offset) / (100.0 * f64::from(rate))
 }
 
 impl Voice {
-    fn new(note: &NoteOn, state: &State, timing: Timing, seed: &mut u32) -> Self {
+    fn new(
+        note: &NoteOn,
+        state: &State,
+        timing: Timing,
+        seed: &mut u32,
+        (group, unison): (u32, Unison),
+    ) -> Self {
         let key_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         let pitch = key_pitch + state.main_pitch;
-        let key = f64::from((pitch / 100.0 + 60.0) / 120.0).clamp(0.0, 1.0);
+        let key = f64::from(((pitch / 100.0 + 60.0).max(0.0) - unison.drop).max(0.0) / 120.0)
+            .clamp(0.0, 1.0);
         // FL's velocity of a note is the host's gain turned back into 0..1
         // of 128.
         let velocity = ((f64::from(note.velocity) * 10.0 + 1.0).ln() / 11f64.ln() * 100.0 / 128.0)
@@ -1673,10 +1937,16 @@ impl Voice {
             fixed: 0.0,
             value: 0.0,
         }; PARTS * ARTICULATORS];
+        let at = [key, velocity, random, f64::from(unison.place)];
         for part in 0..PARTS {
             for (index, articulator) in state.articulators(part).iter().enumerate() {
-                articulators[part * ARTICULATORS + index] =
-                    articulator.start(key, velocity, random, timing.rates);
+                let run = &mut articulators[part * ARTICULATORS + index];
+                *run = articulator.start(at, timing.rates);
+                // A unison voice stretches the attack and the decay of the
+                // envelopes under the quick ADSR (`0x86af20`).
+                if state.adsr_group(part, index).is_some() && !articulator.global {
+                    run.run.stretch(unison.stretch[0], unison.stretch[1]);
+                }
             }
         }
         let mut operators = [OpRun {
@@ -1693,8 +1963,8 @@ impl Voice {
         }; OPERATORS];
         for (op, run) in operators.iter_mut().enumerate() {
             let operator = &state.operators[op];
-            run.pitch = op_pitch(operator, pitch, timing.rate);
-            run.phase = f64::from(operator.phase);
+            run.pitch = op_pitch(operator, pitch, unison.pitch, timing.rate);
+            run.phase = f64::from(operator.phase) + f64::from(unison.phase);
             if operator.free_run {
                 *seed = seed.wrapping_mul(0x0808_8405).wrapping_add(1);
                 run.phase += f64::from(*seed) / f64::from(u32::MAX);
@@ -1705,6 +1975,8 @@ impl Voice {
         let offsets = [note.mod_x, note.mod_y];
         Voice {
             id: note.voice,
+            group,
+            unison,
             key_pitch,
             pitch,
             velocity: note.velocity,
@@ -1751,7 +2023,7 @@ impl Voice {
         if pitch != self.pitch {
             self.pitch = pitch;
             for (run, operator) in self.operators.iter_mut().zip(&state.operators) {
-                run.pitch = op_pitch(operator, pitch, timing.rate);
+                run.pitch = op_pitch(operator, pitch, self.unison.pitch, timing.rate);
             }
         }
         // Mod X and Mod Y glide to the wheels a tick at a time, or jump
@@ -1830,12 +2102,13 @@ impl Voice {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
             }
-            let pan = self.pan * 0.5 + 0.5 + state.pan[row] + value(row, 0);
+            let pan = self.pan * 0.5 + self.unison.pan + state.pan[row] + value(row, 0);
             let pan = (pan * 2.0 - 1.0).clamp(-1.0, 1.0);
             // What goes to the effects comes back dry here, at half, for
             // the effects' own returns.
             let gain = self.velocity
                 * state.main_volume
+                * self.unison.gain
                 * (state.out[row] + state.send[row] * state.fx_send * 0.5);
             let aim = pan_law(pan, gain);
             for side in 0..2 {
@@ -1928,6 +2201,38 @@ impl Voice {
                 run.modulation += run.modulation_step;
             }
         }
+        // A unison that shares its filters sums the voices' operators,
+        // each at its gain, and filters the sum once (`0x870820`: a voice
+        // with +0x30 = 6 renders into the rows past the filters and adds
+        // them in). The slaves come before their master.
+        let (rows, sum) = scratch.split_at_mut(ROWS * CHUNK);
+        match self.unison.role {
+            Role::Alone => {}
+            Role::Slave => {
+                let gain = self.unison.sum;
+                for op in 0..OPERATORS {
+                    if state.active[op] {
+                        let into = &mut sum[op * CHUNK..op * CHUNK + len];
+                        for (into, out) in into.iter_mut().zip(&rows[op * CHUNK..]) {
+                            *into += out * gain;
+                        }
+                    }
+                }
+                return;
+            }
+            Role::Master => {
+                let gain = self.unison.sum;
+                for op in 0..OPERATORS {
+                    if state.active[op] {
+                        let from = &mut sum[op * CHUNK..op * CHUNK + len];
+                        for (out, from) in rows[op * CHUNK..].iter_mut().zip(from.iter_mut()) {
+                            *out = *out * gain + *from;
+                            *from = 0.0;
+                        }
+                    }
+                }
+            }
+        }
         for f in 0..FILTERS {
             let part = OPERATORS + f;
             if !state.active[part] {
@@ -1980,6 +2285,8 @@ pub struct Sytrus {
     tempo: f64,
     ppq: f64,
     voices: Vec<Voice>,
+    /// The notes started, which names each note's voices.
+    notes: u32,
     to_tick: usize,
     tick_part: f64,
     scratch: Vec<f32>,
@@ -1993,16 +2300,37 @@ impl Default for Sytrus {
             rate: 44_100.0,
             tempo: 120.0,
             ppq: PPQ,
-            voices: Vec::with_capacity(VOICES),
+            voices: Vec::with_capacity(ROOM),
+            notes: 0,
             to_tick: 0,
             tick_part: 0.0,
-            scratch: vec![0.0; ROWS * CHUNK],
+            scratch: vec![0.0; (ROWS + OPERATORS) * CHUNK],
             seed: 0x1234_5678,
         }
     }
 }
 
 impl Sytrus {
+    /// Let the slaves of a master that has ended go. This allocates
+    /// nothing.
+    fn drop_orphans(&mut self) {
+        let mut k = 0;
+        while k < self.voices.len() {
+            let voice = &self.voices[k];
+            let group = voice.group;
+            let orphan = voice.unison.role == Role::Slave
+                && !self
+                    .voices
+                    .iter()
+                    .any(|v| v.group == group && v.unison.role == Role::Master);
+            if orphan {
+                self.voices.retain(|v| v.group != group);
+            } else {
+                k += 1;
+            }
+        }
+    }
+
     fn tick_len(&self) -> f64 {
         (f64::from(self.rate) * 60.0 / (self.tempo * self.ppq)).max(1.0)
     }
@@ -2048,16 +2376,41 @@ impl Generator for Sytrus {
         }
     }
 
+    /// A note starts a voice for every voice of its unison. A unison that
+    /// shares its filters puts its slaves before its master, so that they
+    /// render first.
     fn note_on(&mut self, note: NoteOn) {
         if note.slide {
             return;
         }
-        if self.voices.len() == VOICES {
-            self.voices.remove(0);
+        let mut unison = [Unison::ALONE; UNISON];
+        let count = Unison::voices(&self.state, &mut unison);
+        // The oldest notes make room: FL keeps no more than its polyphony.
+        loop {
+            // A note's voices sit together, so a note is where the group
+            // changes.
+            let (notes, _) = self.voices.iter().fold((0, None), |(n, last), v| {
+                (n + usize::from(last != Some(v.group)), Some(v.group))
+            });
+            if self.voices.is_empty() || (notes < VOICES && self.voices.len() + count <= ROOM) {
+                break;
+            }
+            let oldest = self.voices[0].group;
+            self.voices.retain(|v| v.group != oldest);
         }
+        self.notes = self.notes.wrapping_add(1);
         let timing = self.timing();
-        let voice = Voice::new(&note, &self.state, timing, &mut self.seed);
-        self.voices.push(voice);
+        let shared = unison[0].role == Role::Master;
+        for k in 0..count {
+            // Slaves first, in FL's order, and the master last.
+            let u = if shared {
+                unison[(k + 1) % count]
+            } else {
+                unison[k]
+            };
+            let voice = Voice::new(&note, &self.state, timing, &mut self.seed, (self.notes, u));
+            self.voices.push(voice);
+        }
     }
 
     fn note_off(&mut self, voice: u32) {
@@ -2090,18 +2443,24 @@ impl Generator for Sytrus {
             let run = (len - at).min(self.to_tick).min(CHUNK);
             let (state, scratch, to_tick) = (&self.state, &mut self.scratch[..], self.to_tick);
             let block = at..at + run;
+            let mut ended = false;
             self.voices.retain_mut(|voice| {
                 if voice.ticked {
                     voice.tick(state, timing, to_tick);
                     voice.ticked = false;
                 }
-                if voice.over {
+                // A slave lasts as long as its master.
+                if voice.over && voice.unison.role != Role::Slave {
+                    ended |= voice.unison.role == Role::Master;
                     return false;
                 }
                 let (l, r) = (&mut left[block.clone()], &mut right[block.clone()]);
                 voice.render(state, timing, scratch, l, r);
                 true
             });
+            if ended {
+                self.drop_orphans();
+            }
             at += run;
             self.to_tick -= run;
         }
@@ -2119,6 +2478,19 @@ impl Generator for Sytrus {
     /// The notes that sound hear it from their next tick.
     fn set_param(&mut self, index: usize, value: f32) {
         self.state.set_param(index, value);
+        // The unison's pan, volume and pitch wheels move the voices that
+        // sound (`0x871fd0`); the order, sub, phase and envelope wheels
+        // wait for the next note.
+        if (12..=14).contains(&index) {
+            let p = &self.state.params;
+            let range = unison_range(p[14], usize::from(self.state.unison_kind.min(3)));
+            let volume = p[13] as f32 * (1.0 / 128.0);
+            for voice in &mut self.voices {
+                voice.unison.retune(p[12], volume, range);
+                // Work the operators' pitch out again at the next tick.
+                voice.pitch = f32::NAN;
+            }
+        }
     }
 
     fn reset(&mut self) {
@@ -2148,9 +2520,7 @@ impl Generator for Sytrus {
         let state = &self.state;
         let active_ops = (0..OPERATORS).filter(|op| state.active[*op]);
         let active_filters = (0..FILTERS).filter(|f| state.active[OPERATORS + f]);
-        if state.unison > 1 {
-            Fidelity::Approximate("Sytrus unison")
-        } else if active_ops.clone().any(|op| state.operators[op].plucked) {
+        if active_ops.clone().any(|op| state.operators[op].plucked) {
             Fidelity::Approximate("Sytrus plucked operator")
         } else if active_filters.clone().any(|f| state.filters[f].shaper) {
             Fidelity::Approximate("Sytrus waveshaper")
@@ -2657,8 +3027,10 @@ mod tests {
             sytrus.all_notes_off();
             sytrus.process(&mut left, &mut right);
             let sound = left.iter().chain(&right);
+            // Three notes of FM Stemmer's nine-voice unison start nearly
+            // in phase and reach 37.
             assert!(
-                sound.clone().all(|v| v.is_finite() && v.abs() < 32.0),
+                sound.clone().all(|v| v.is_finite() && v.abs() < 64.0),
                 "{}",
                 saved.file
             );
@@ -2679,5 +3051,141 @@ mod tests {
         assert_eq!(loaded, presets.len() + 268 - old);
         assert!(old >= 229, "{old}");
         assert_eq!(fidelity.get("exact"), None);
+    }
+
+    #[test]
+    fn the_unison_spreads_its_voices_as_trigger_voice_does() {
+        let mut state = State::blank();
+        let mut out = [Unison::ALONE; UNISON];
+        // One voice is the note alone, a half in the unison map.
+        assert_eq!(Unison::voices(&state, &mut out), 1);
+        assert_eq!(out[0], Unison::ALONE);
+
+        // Three voices of type 0 with the default wheels: pan 128, volume
+        // 100, pitch 128, phase 16.
+        state.params[11] = 3;
+        assert_eq!(Unison::voices(&state, &mut out), 3);
+        // A level of 1 - (3^(1 - 1/3) - 1) / 2 a voice.
+        let level = 1.0 - (3f64.powf(2.0 / 3.0) - 1.0) / 2.0;
+        let range = (11f64.sqrt() - 1.0) * 5.0;
+        let volume = 100.0 / 128.0;
+        let [low, mid, high] = [out[0], out[1], out[2]];
+        assert!((f64::from(low.level) - level).abs() < 1e-6);
+        // The outer voices are panned hard and the centre one counts twice
+        // as much where the volume wheel is down.
+        assert_eq!((low.pan, mid.pan, high.pan), (0.0, 0.5, 1.0));
+        assert!((f64::from(low.gain) - level * volume).abs() < 1e-6);
+        assert!((f64::from(mid.gain) - level * (volume + 2.0 * (1.0 - volume))).abs() < 1e-6);
+        // Detuned by the table's 0.877 and 0.929 of the range, in cents,
+        // and the centre not at all; both up for type 0.
+        let cents = |u: Unison| f64::from(u.pitch).ln() / LN_2 * 1200.0;
+        assert!((cents(low) - 0.877 * range).abs() < 1e-3, "{}", cents(low));
+        assert!(
+            (cents(high) - 0.929 * range).abs() < 1e-3,
+            "{}",
+            cents(high)
+        );
+        assert_eq!(mid.pitch, 1.0);
+        // The phases step by a third of the phase wheel.
+        assert_eq!(low.phase, 0.0);
+        assert!((high.phase - 2.0 / 3.0 * 16.0 / 128.0).abs() < 1e-7);
+        assert_eq!((low.place, mid.place, high.place), (0.0, 0.5, 1.0));
+
+        // Other types turn the upper half of an odd unison down.
+        state.unison_kind = 1;
+        Unison::voices(&state, &mut out);
+        assert!(cents(out[2]) < 0.0 && cents(out[0]) > 0.0);
+
+        // A sub wheel at 64 adds the voices an octave down at half the
+        // level, and takes as much from the others.
+        state.params[11] = 1;
+        state.params[15] = 64;
+        assert_eq!(Unison::voices(&state, &mut out), 2);
+        assert_eq!((out[0].gain, out[1].gain), (0.5, 0.5));
+        assert_eq!((out[0].pitch, out[1].pitch), (1.0, 0.5));
+        assert_eq!(out[1].drop, 12.0);
+
+        // The envelope wheel stretches an outer voice's attack and shrinks
+        // its decay by as much.
+        state.params[11] = 2;
+        state.params[15] = 0;
+        state.params[17] = 128;
+        Unison::voices(&state, &mut out);
+        let [attack, decay] = out[0].stretch;
+        assert!((attack - (1.0 + 0.5 * 0.9877)).abs() < 1e-6, "{attack}");
+        assert!((attack + decay - 2.0).abs() < 1e-6);
+
+        // Shared filters: the first voice is the master, at full gain into
+        // the output and its own level into the sum, every voice centred.
+        state.unison_shared = true;
+        Unison::voices(&state, &mut out);
+        assert_eq!((out[0].role, out[1].role), (Role::Master, Role::Slave));
+        assert_eq!((out[0].gain, out[0].pan, out[1].pan), (1.0, 0.5, 0.5));
+        assert!(out[0].sum < 1.0);
+    }
+
+    #[test]
+    fn a_unison_of_two_plays_two_detuned_voices_panned_apart() {
+        let mut sytrus = blank();
+        // Two voices, the pitch wheel full: 50 cents of range.
+        sytrus.state.params[11] = 2;
+        sytrus.state.params[14] = 256;
+        let turns = f64::from(C5 as f32) / f64::from(RATE);
+        sytrus.note_on(note(1, 60));
+        assert_eq!(sytrus.voices.len(), 2);
+        let len = 48_000;
+        let (mut left, mut right) = (vec![0.0; len], vec![0.0; len]);
+        for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+            sytrus.process(l, r);
+        }
+        // Voice 0 is panned left and 0.877 x 50 cents up, voice 1 right
+        // and 1.069 x 50 cents down.
+        let up = turns * (0.877 * 50.0 / 1200.0f64).exp2();
+        let down = turns * (-1.069 * 50.0 / 1200.0f64).exp2();
+        let (l, r) = (&left[8192..], &right[8192..]);
+        assert!(partial(l, up) > 0.3, "{}", partial(l, up));
+        assert!(partial(l, down) < 0.01, "{}", partial(l, down));
+        assert!(partial(r, down) > 0.3, "{}", partial(r, down));
+        assert!(partial(r, up) < 0.01);
+        assert!(partial(l, turns) < 0.05);
+
+        // Moving the pan wheel to 0 brings both to the centre.
+        sytrus.set_param(12, 0.0);
+        assert!(sytrus.voices.iter().all(|v| v.unison.pan == 0.5));
+    }
+
+    #[test]
+    fn a_unison_with_shared_filters_sums_its_voices_before_them() {
+        let mut sytrus = blank();
+        sytrus.state.params[11] = 2;
+        sytrus.state.params[14] = 256;
+        sytrus.state.unison_shared = true;
+        sytrus.note_on(note(1, 60));
+        // The slave comes first and the master renders the sum.
+        let roles: Vec<_> = sytrus.voices.iter().map(|v| v.unison.role).collect();
+        assert_eq!(roles, [Role::Slave, Role::Master]);
+        let len = 48_000;
+        let (mut left, mut right) = (vec![0.0; len], vec![0.0; len]);
+        for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+            sytrus.process(l, r);
+        }
+        let turns = f64::from(C5 as f32) / f64::from(RATE);
+        let up = turns * (0.877 * 50.0 / 1200.0f64).exp2();
+        let down = turns * (-1.069 * 50.0 / 1200.0f64).exp2();
+        // Both are in the centre, each at its level.
+        let level = f64::from(sytrus.voices[1].unison.sum) * std::f64::consts::FRAC_1_SQRT_2;
+        for side in [&left[8192..], &right[8192..]] {
+            for at in [up, down] {
+                assert!(
+                    (partial(side, at) - level).abs() < 0.02,
+                    "{}",
+                    partial(side, at)
+                );
+            }
+        }
+        // When the master ends, its slave goes with it.
+        sytrus.all_notes_off();
+        sytrus.process(&mut left[..4096], &mut right[..4096]);
+        assert!(sytrus.voices.is_empty());
     }
 }

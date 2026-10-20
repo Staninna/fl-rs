@@ -465,7 +465,7 @@ the kernel above over a 2048-sample table without band limiting, the FM
 and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
 law and the output levels, and the send path folded into the output at
-half, dry. Left out, each named in `fidelity`: unison sub-voices, plucked
+half, dry. Left out, each named in `fidelity`: plucked
 operators, the waveshaper, the comb and the phaser, the delays, chorus,
 reverb and EQ, the shape morph articulator, the harmonics filter wheel,
 the arpeggiator and portamento. Every state reports `Approximate`. The 597
@@ -535,12 +535,91 @@ covers, for the voices that start after it), Mod X and Mod Y with their
 glide, the operators' phase, volume and pitch range, every filter wheel
 but the waveshaper's pre-amp, the "to next" wheel with the routing, the FX
 send level and every articulator knob. Kept but not heard, as the parts
-they move are not built: the unison, the chorus, the delays, the EQ,
+they move are not built: the chorus, the delays, the EQ,
 portamento and the waveshaper's pre-amp. FL's saved LFO amounts differ
 from `level` by up to a bit of the f32 in some states (0.5633213 against
 0.56332123 for 101), and an f32 port of `0x86a1d0` misses others, so the
 LFO level is worked out with `level` and the state's own amounts stand
 until the host moves it.
+
+## 7. Unison (`TriggerVoice` `0x86c7d0`, `0x871fd0`, `0x86af20`, `0x872290`, `0x870820`)
+
+Read in run 6 (`/root/ghidra/sytrus/out/b1`, the project re-imported on the
+cloud machine with the same addresses). The wheels are REC 11..17 at
+`0x3e0`: order N (1..9), pan, volume, pitch, sub, phase, envelope. Two
+saved bytes go with them: u8 `0x4ff`, the unison type (the last of the
+`0x4f7` flags; 1 in most corpus states, 0 in the rest), and u8 `0x4f4`
+(saved from version 6), which makes the voices share one set of filters.
+
+`TriggerVoice` makes `N` voices for a note, and `N` more an octave down
+when the sub wheel is not 0 (round `d` = 0, 1; voice `e` = 0..N-1), each a
+full voice record (`GetMem(0x6728)`). With `c = 1/128` (`0x8ff8c0`):
+
+```
+range   = type 0: (float)(exp(ln 11 (p / 256)) - 1) * 5 * ln2/1200      // 0x86d4d0, 0x86d4e0; 0x90e508 = ln2/1200 (0x62e5f0)
+          else:   (float)(exp(ln 41 (p / 256)) - 1) * 1.875 * ln2/1200  // 0x86d4e8, 0x86d4f0
+g       = N > 1 ? 1 - (3^(1 - 1/N) - 1) / 2 : 1                         // 0x86d4f8 = 3
+lev[0]  = g; with a sub wheel s: lev[1] = g s c, lev[0] = g (1 - s c)
+shared  = 0x4f4 and (N >= 2 or s >= 1)
+per voice (d, e):
+  +0x54  = lev[d]
+  N == 1: pan +0x3c = 0.5, +0x40 = +0x54, detune +0x4c = 0, pitch +0x44 = 1, phase +0x38 = 0, place 0.5, scale k = c
+  else:   +0x38 = (e / N) phase c;  t = e / (N - 1);  x = 2t - 1
+          +0x50 = shared ? 0 : x / 256;  +0x3c = +0x50 pan + 0.5
+          a = |x|;  +0x58 = (type == 0 or N != 2) ? 2 +0x54 (1 - a) : +0x54
+          +0x40 = +0x54 vol c + +0x58 (1 - vol c)
+          a = -a for odd e; again for type != 0, odd N and N < 2e
+          +0x4c = a T[type][(e + d) mod 9];  +0x44 = exp(+0x4c range)    // T at 0x8fcad8 + 0x24 type
+          type 3: +0x38 = frac((phase c)^8 +0x44 100000 (d > 0 ? 0.5 : 1))   // 0x40acf0, 0x86d530
+          k = ((|x| - 0.5) env E[(e + d) mod 9] c + 1) c                       // E at 0x8fcb68
+          place = t
+  d > 0:  +0x44 *= 0.5; the key the maps read drops 12 semitones (not under 0)
+  +0x34 = +0x40; the first voice of a shared unison then +0x40 = 1
+  role +0x2c: 0 alone, or shared: -1 the first voice (master), 1 the rest (slaves)
+```
+
+`T` = 0.877 1.069 0.929 1.181 1.031 1.129 0.887 1.117 0.977 for types 0
+and 1, all 1 for type 2, 0.89047 1.07643 0.91158 1.10254 1.03413 1.16686
+0.85397 1.20627 1 for type 3. `E` = 0.9877 1.0069 0.9929 1.0181 1.0031
+1.0129 0.9887 1.0117 0.9977. Type 0 detunes every even voice up and every
+odd one down; the other types also turn the upper half of an odd unison
+down.
+
+Where each value goes:
+
+- `+0x44` multiplies the operators' frequency (`0x872210`: `exp(pitch
+  ln2/1200) x part+0x8d8 x +0x44 + part+0x8d0`).
+- `+0x38` adds to every operator's start phase, with the phase wheel and
+  the phase articulator (`0x86af20`).
+- `place` is where the articulators' unison maps (sub-object 6) are read,
+  combined in the articulator's mode after the key, velocity and random
+  maps (`0x86af20` calls `0x7897d0(art+0x58, place)`); `0x78bbc0` reads the
+  key map at the dropped key / 120.
+- `k` scales the voice's copy of the attack and decay knobs of the
+  envelopes under the quick ADSR, unless the envelope is global (flag 2):
+  attack `x ADSR.att x k`, decay `x ADSR.dec x (1/64 - k)` (`0x86c748`), so
+  `k = 1/128` leaves them.
+- `+0x3c` replaces the 0.5 in the output pan, `(FinalPan / 2 + +0x3c +
+  part+0x28 + pan art) x 2 - 1`, and `+0x40` multiplies the output gain
+  (`0x872290`).
+
+Alone (`0x2c = 0`) every voice runs on its own: articulators, operators,
+filters, output. Shared, the master's render (`0x872290`) ticks each
+slave's articulators and calls `0x870820` for every slave in its `+0x60`
+chain before its own: the second voice (`+0x30 = 0`) writes its operators'
+outputs times `+0x34` into the operator buffers, the others and the master
+(`+0x30 = 6`) render into the buffers past them and add those times
+`+0x34`, and only the master runs the filters and the output on the sum. A
+slave goes when its master does.
+
+When a pan, volume or pitch wheel moves, `0x871fd0` works out `+0x3c` (for
+a voice alone), `+0x40`, `+0x34` and `+0x44` again for every voice and
+forces the pitch to be taken again (`+0x18 = 2^31`). Order, sub, phase and
+envelope wait for the next note.
+
+Implemented as read (`Unison` in `sytrus.rs`). Not built: the velocity
+flags `0x4fd` (attack by velocity, `0x86af20`; 0 in every corpus state),
+global envelopes shared between voices (flag 2), portamento.
 
 ## Corrections
 
