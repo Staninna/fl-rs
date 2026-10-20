@@ -466,7 +466,7 @@ and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
 law and the output levels, and the send path folded into the output at
 half, dry. Left out, each named in `fidelity`: plucked
-operators, the waveshaper, the comb and the phaser, the delays, chorus,
+operators, the comb and the phaser, the delays, chorus,
 reverb and EQ, the shape morph articulator, the harmonics filter wheel,
 the arpeggiator and portamento. Every state reports `Approximate`. The 597
 REC parameters are the host's (section 6).
@@ -532,11 +532,11 @@ The voice side (`0x872290`, read for this):
 Implemented: every index reads back and stores inside its range; the main
 volume, the LFO level, the main pitch, the quick ADSR (on the envelopes it
 covers, for the voices that start after it), Mod X and Mod Y with their
-glide, the operators' phase, volume and pitch range, every filter wheel
-but the waveshaper's pre-amp, the "to next" wheel with the routing, the FX
-send level and every articulator knob. Kept but not heard, as the parts
-they move are not built: the chorus, the delays, the EQ,
-portamento and the waveshaper's pre-amp. FL's saved LFO amounts differ
+glide, the operators' phase, volume and pitch range, every filter wheel,
+the "to next" wheel with the routing, the FX send level, every
+articulator knob and the unison's pan, volume and pitch (sections 7 and
+8). Kept but not heard, as the parts they move are not built: the
+chorus, the delays, the EQ and portamento. FL's saved LFO amounts differ
 from `level` by up to a bit of the f32 in some states (0.5633213 against
 0.56332123 for 101), and an f32 port of `0x86a1d0` misses others, so the
 LFO level is worked out with `level` and the state's own amounts stand
@@ -620,6 +620,48 @@ envelope wait for the next note.
 Implemented as read (`Unison` in `sytrus.rs`). Not built: the velocity
 flags `0x4fd` (attack by velocity, `0x86af20`; 0 in every corpus state),
 global envelopes shared between voices (flag 2), portamento.
+
+## 8. The filters' waveshaper (`0x874040`, `0x870820`)
+
+The switch is the byte at filter block +0x28 (`part+0x8a8`); the curve is
+the kind-3 `TCustomMEnvelope` at `part+0x8b0`, read after the block, and the
+u8 after it (version 12 on) makes it bipolar: `0x781b90` stores `u8 x 0.5`
+at curve+0x18 and `0x781b70` asks whether that is 0.5. The pre-amp and mix
+wheels are header[7] / 128 (`part+0x8c8`) and header[8] / 128
+(`part+0x8c4`).
+
+`0x874040` bakes the curve when the switch is on: `N = (bipolar + 1) x
+0x4000` i16 steps at `part+0x8b8`, `last = N - 1` at `part+0x8c0`, walked
+from 0 to 1 in steps of `1 / last` (`0x874218`), each `round(level x
+((bipolar + 1) x 0x8000 - 1))` kept to i16, with the first and the last
+once more at either end. It is Love Philter's table (`FUN_0085c340` there).
+
+`0x870820` runs it after the filter (and its x2 downsampling), on the
+voice's buffer, into the scratch buffer `0x6250`, then mixes:
+
+```
+kernel (x, pre = part+0x8c8, dry weight 0 = 0x871f90, wet weight 1 = 0x871fb8, x 1/32768 = 0x8d568c)
+  unipolar  0x62d980: i = trunc(|x| (pre last)), at most last;      y = sign(x) t[i]
+  bipolar   0x62e090: i = round(x pre last / 2 + last / 2), 0..last; y = t[i]
+  HQ uni    0x62d800: f = x pre last, i = trunc(f), r = f - i;  i >= 0: y = t[min(i, last)] + (t[.+1] - t[.]) r
+                                                             i < 0:  y = -(t[j] - (t[j+1] - t[j]) r), j = min(-i, last)
+  HQ bi     0x62daa0: f = x pre last / 2 + last / 2, i = trunc(f), k = clamp(i, 0, last), r = f - i; y = t[k] (1 - r) + t[k+1] r
+mix     = clamp(art[7] x part+0x8c4, 0, 1); the voice's first tick takes it as it is
+glide   = 0x62bb20 (parts::glide) from the mix before to it over the call, by no more than TAudioRenderer+0x38 a sample
+out     = mix 1 and no glide: the shaped buffer; else x (1 - m) + y m, m stepping
+HQ      = u8 0x5f18 (saved from version 25) or FL rendering to a file (0x6336)
+```
+
+These are the SSE kernels; `0x62e5f0` puts them in the table at
+`0x90e640..0x90e698` when the CPU byte +0x16 is set and the x87 ones
+(`0x62af60`, `0x62b130`, `0x62afe0`, `0x62b1b0`, which round where the SSE
+unipolar ones truncate) otherwise. `TAudioRenderer` (`0x62bcd0`) keeps
+`+0x34 = 0.001 x 44100 / SR` and `+0x38` ten times it, `+0x3c` 32768 times
+it.
+
+Implemented as read (`Shaper` in `sytrus.rs`). The HQ kernels run when the
+state's byte asks; FL's switch to them while it renders to a file is not
+followed, as for Love Philter.
 
 ## Corrections
 
