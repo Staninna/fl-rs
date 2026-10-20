@@ -40,6 +40,17 @@ pub mod control {
     pub const CHANNEL_VOLUME: u16 = 0;
     /// Channel pan, 0..=12800 with 6400 in the centre.
     pub const CHANNEL_PAN: u16 = 1;
+    /// Channel mod X, 219 @12, 0..=256. The sampler's filter cutoff.
+    pub const CHANNEL_MOD_X: u16 = 2;
+    /// Channel mod Y, 219 @16, 0..=256. The sampler's filter resonance.
+    pub const CHANNEL_MOD_Y: u16 = 3;
+    /// Channel pitch knob, 219 @8, in cents. An automation value covers
+    /// -4800..=4800.
+    pub const CHANNEL_PITCH: u16 = 4;
+    /// Channel pan offset, 229 @0, -6400..=6400. It adds to the pan.
+    pub const CHANNEL_PAN_OFFSET: u16 = 0x10;
+    /// Channel volume multiplier, 229 @4, 0..=25600 with 12800 at unity.
+    pub const CHANNEL_VOLUME_MULTIPLIER: u16 = 0x11;
 }
 
 /// The highest insert index. FL keeps the "current" track there.
@@ -150,13 +161,18 @@ impl RecTarget {
 
     /// The lowest and the highest raw value of the control, for the
     /// controls the engine plays: insert volume, pan and send level,
-    /// channel volume and pan, and the tempo. `None` for any other.
+    /// channel volume, pan, pitch, pan offset and volume multiplier, and
+    /// the tempo. `None` for any other.
     ///
     /// The mixer and channel ranges are the dispatcher's clamps in
     /// `docs/rec-225.md`. The tempo's is FL's 10 to 522 BPM. No clamp was
     /// read for it: with that range the 219 of all seven corpus clips that
     /// drive the tempo says 60 to 180 BPM, which is what FL's "create
     /// automation clip" writes for a tempo (`docs/automation-234.md`).
+    ///
+    /// A channel's pitch is the dispatcher's fixed -4800..=4800 cents, and
+    /// its pan offset and volume multiplier the range of their knobs in
+    /// FL's channel settings form (`docs/rec-channel.md`).
     pub fn raw_range(&self) -> Option<(i32, i32)> {
         let sends = control::SEND..=control::SEND + LAST_INSERT;
         match *self {
@@ -173,10 +189,13 @@ impl RecTarget {
             RecTarget::Global {
                 control: control::TEMPO,
             } => Some((10_000, 522_000)),
-            RecTarget::Channel {
-                control: control::CHANNEL_VOLUME | control::CHANNEL_PAN,
-                ..
-            } => Some((0, 12_800)),
+            RecTarget::Channel { control, .. } => match control {
+                control::CHANNEL_VOLUME | control::CHANNEL_PAN => Some((0, 12_800)),
+                control::CHANNEL_PITCH => Some((-4800, 4800)),
+                control::CHANNEL_PAN_OFFSET => Some((-6400, 6400)),
+                control::CHANNEL_VOLUME_MULTIPLIER => Some((0, 25_600)),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -375,14 +394,18 @@ mod tests {
         assert_eq!(range(0x4000_0005), Some((10_000, 522_000)));
         assert_eq!(range(0x0002_0000), Some((0, 12_800)));
         assert_eq!(range(0x0002_0001), Some((0, 12_800)));
-        // Separation, a slot's mix, a plugin parameter, the main volume
-        // and a channel's pitch.
+        assert_eq!(range(0x0002_0004), Some((-4800, 4800)));
+        assert_eq!(range(0x0002_0010), Some((-6400, 6400)));
+        assert_eq!(range(0x0002_0011), Some((0, 25_600)));
+        // Separation, a slot's mix, a plugin parameter, the main volume,
+        // a channel's mod X and a channel's arpeggio time.
         for other in [
             id(1, 0, control::SEPARATION),
             id(1, 3, control::SLOT_MIX),
             id(1, 3, 0x8000),
             0x4000_0000,
-            0x0002_0004,
+            0x0002_0002,
+            0x0002_0303,
         ] {
             assert_eq!(range(other), None, "{other:#x}");
         }
