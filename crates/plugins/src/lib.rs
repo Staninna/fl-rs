@@ -82,6 +82,7 @@ pub mod peak_controller;
 pub mod pitch_shifter;
 pub mod pitcher;
 pub mod port;
+pub mod reeverb;
 pub mod reeverb_2;
 mod sampler;
 pub mod send;
@@ -373,6 +374,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(pitch_shifter::PitchShifter::default()))
     } else if is(pitcher::NAME) {
         Some(Box::new(pitcher::Pitcher::default()))
+    } else if is(reeverb::NAME) {
+        Some(Box::new(reeverb::Reeverb::default()))
     } else if is(reeverb_2::NAME) {
         Some(Box::new(reeverb_2::Reeverb2::default()))
     } else if is(send::NAME) {
@@ -499,7 +502,8 @@ mod tests {
         assert!(by_name("Fruity fast dist").is_some());
         assert!(by_name("FRUITY BALANCE").is_some());
         assert!(by_name("fruity reeverb 2").is_some());
-        assert!(by_name("Fruity Reeverb").is_none());
+        assert!(by_name("Fruity Reeverb").is_some());
+        assert!(by_name("Fruity Reeverb 3").is_none());
         assert!(by_name("Fruity Balance ").is_none());
         assert!(by_name("").is_none());
     }
@@ -669,6 +673,7 @@ mod tests {
             ("fruity parametric eq 2", 350, 199),
             ("fruity parametric eq 2", 354, 590),
             ("fruity peak controller", 42, 36),
+            ("fruity reeverb", 44, 7),
             ("fruity reeverb 2", 58, 62),
             ("fruity reeverb 2", 66, 271),
             ("fruity send", 16, 2),
@@ -719,7 +724,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 39);
+        assert_eq!(lengths.count(), 40);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
