@@ -77,6 +77,7 @@ pub mod frequency_shifter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
 pub mod fruity_slicer;
+pub mod fruity_slicer_2;
 mod generator;
 pub mod gms;
 mod gms_fx;
