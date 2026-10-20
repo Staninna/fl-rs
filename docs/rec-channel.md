@@ -129,10 +129,9 @@ Left out, and why:
 - Arpeggiator (0x303, 0x304), time stretch and formant (14, 15), the
   instrument envelopes (0x1000..), tracking, delay, TS404: the engine plays
   none of these parts of a channel.
-- An automation clip's LFO (0x600, 0x604). The engine plays a clip's
-  envelope alone. Every corpus clip bound to these holds the LFO level at
-  its middle, which is 0, so the clips they drive are what the engine
-  plays anyway.
+- An automation clip's LFO (0x600, 0x604) when that clip's LFO is on. The
+  engine plays a clip's envelope alone. A clip whose LFO is off, which
+  every clip these drive in the corpus is, is played: see below.
 - Sytrus parameters: the engine's Sytrus has no parameter table, so the
   Overcome links still have nothing to drive.
 
@@ -159,3 +158,25 @@ and 4800..8000 an octave either way. Every volume multiplier clip has
 | `FUN_012cb6c0` | runs an ID rewrite over the links and the other ID lists |
 | `FUN_00f45960`, `FUN_00f45980`, `FUN_00f459e0`, `FUN_00f45a40` | link and ID rewrites for writers below 10.1.0, 11.5.6, 12.9.0 and 12.9.1 |
 | `TPLUGINFORM` (RCDATA) | knob tags, ranges and defaults |
+
+## An automation clip's LFO controls (0x600..0x604)
+
+The dispatcher's branch for 0x600..0x6FF (`FUN_01046a70`, decompile lines
+1876 to 1943) runs only for a channel with an articulator (`chan+0x360`,
+an automation clip). It writes 0x600..0x603 to the clip's `TMLFO` at
+`+0xd0 + 4 n` (speed, tension, skew, pulse width) and calls its VMT
+`+0x40` (`FUN_00ba0250`, which rebuilds the oscillator through
+`FUN_00677660`), and 0x604 to the articulator's `+0x30` and calls
+`FUN_00fe9b90`, which makes the LFO's amount `+0x28` of it:
+
+    art+0x20 = 219@0 / 12800;  art+0x24 = 219@4 / 12800 - art+0x20
+    art+0x28 = art+0x30 * (1/128) * art+0x24          (*0x15e3890 = 1/128)
+
+Nothing in the branch touches the LFO's switch, the i32 at `+0x48` (offset
+4 of the LFO block's tail). The articulator (`FUN_00ba1700`) adds the LFO
+only when that is not 0, so on a clip whose LFO is off these controls
+change nothing FL plays. The engine plays a binding or a controller link
+to one of them by setting nothing when the clip's LFO is off, and counts
+it unsupported when it is on. Corpus: `SFX transitions.flp` drives 0x600
+and 0x604 of six clips, all with the LFO off, which are 12 bindings that
+now play.

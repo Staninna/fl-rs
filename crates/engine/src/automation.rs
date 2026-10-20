@@ -30,8 +30,13 @@
 //! leaves out, mod X and Y, the arpeggiator, the time stretch, the
 //! envelopes and a clip's own LFO, have no part in it to drive.
 //!
-//! An ID of an insert's own control that names a slot as well drives the
-//! insert's control, as FL's dispatcher reads it ([`dispatched`]).
+//! A few controls FL keeps without anything it plays reading them, and a
+//! clip or a link on one is played by setting nothing ([`unheard`]): the
+//! level, speed and shape of the LFO of a clip whose LFO is off, and the
+//! parameters of a plugin whose sound none of them moves, as ZGameEditor
+//! Visualizer's. An ID of an insert's own control that names a slot as
+//! well drives the insert's control, as FL's dispatcher reads it
+//! ([`dispatched`]).
 //!
 //! A plugin's parameter `n` is control `0x8000 + n` of its slot, or of its
 //! channel for a generator. The clip's
@@ -703,6 +708,9 @@ pub(crate) struct Automation {
     /// does not play or to the tempo, and the ones with a formula it does
     /// not read.
     pub unsupported_controller_targets: usize,
+    /// The links from a controller plugin to a control that [`unheard`]
+    /// says nothing hears. They are played by setting nothing.
+    unheard_links: usize,
     /// A link has an output that has not been carried to its control.
     moved: bool,
     /// The output sample the controls were last read at.
@@ -722,6 +730,7 @@ impl Automation {
             links: Vec::new(),
             controller_links: 0,
             unsupported_controller_targets: 0,
+            unheard_links: 0,
             moved: false,
             read_at: None,
         };
@@ -762,6 +771,13 @@ impl Automation {
                 } = target
                     && empty_slot(project, index, slot)
                 {
+                    continue;
+                }
+                // Nor does one that FL keeps and nothing it plays reads.
+                if unheard(project, target) {
+                    placed.plays = true;
+                    let slot = matches!(target, RecTarget::Insert { slot: Some(_), .. });
+                    placed.slots += usize::from(slot);
                     continue;
                 }
                 let lane = automation.lane(project, binding, target, tempo);
@@ -818,7 +834,11 @@ impl Automation {
                 (control != Control::Tempo).then_some((control, range, formula.clone()))
             });
             let Some((control, (low, high), formula)) = driven else {
-                self.unsupported_controller_targets += 1;
+                if formula.is_some() && unheard(project, target) {
+                    self.unheard_links += 1;
+                } else {
+                    self.unsupported_controller_targets += 1;
+                }
                 continue;
             };
             self.links.push(Link {
@@ -832,9 +852,10 @@ impl Automation {
         }
     }
 
-    /// The links from a controller plugin that the engine plays.
+    /// The links from a controller plugin that the engine plays, those to
+    /// a control nothing hears among them.
     pub fn controller_targets(&self) -> usize {
-        self.links.len()
+        self.links.len() + self.unheard_links
     }
 
     /// The inserts with a controller plugin that drives one of those
@@ -1249,6 +1270,55 @@ fn dispatched(target: RecTarget) -> RecTarget {
             }
         }
         other => other,
+    }
+}
+
+/// The plugins whose sound no parameter moves, when the engine hosts them:
+/// ZGameEditor Visualizer, whose parameters drive its pictures and whose
+/// hosted states run layers that make no sound
+/// (`docs/plugins/zgameeditor-visualizer.md`), and Fruity NoteBook 2, which
+/// FL never asks for sound (`docs/plugins/fruity-notebook.md`).
+const PICTURES: [&str; 2] = [plugins::zgameeditor::NAME, plugins::notebook_2::NAME];
+
+/// The controls of an automation clip's own LFO: 0x600 speed, 0x601
+/// tension, 0x602 skew, 0x603 pulse width and 0x604 level.
+const CLIP_LFO: std::ops::RangeInclusive<u16> = 0x600..=0x604;
+
+/// Whether a target is a control FL keeps and nothing it plays reads, so
+/// that a clip or a controller on it is played by setting nothing:
+///
+/// - a parameter of a plugin in [`PICTURES`] that the engine hosts, and
+/// - a control of the LFO of an automation clip whose LFO is off. The REC
+///   dispatcher's branch for 0x600 to 0x604 (`FUN_01046a70`, the channel
+///   branch) writes the speed, tension, skew and width to the LFO
+///   (`TMLFO`, its `+0xd0` to `+0xdc`) and the level to the articulator's
+///   `+0x30`, which `FUN_00fe9b90` turns into the LFO's amount, and
+///   switches nothing on. The articulator adds the LFO only when the i32
+///   at offset 4 of its block's tail (`+0x48`) is not 0 (`FUN_00ba1700`),
+///   so a clip whose LFO is off plays its envelope alone, whatever these
+///   controls are set to. Corpus: the 12 links of `SFX transitions.flp`
+///   go to clips whose LFO is off. A clip whose LFO is on, which the
+///   engine does not play, keeps such a link unsupported.
+fn unheard(project: &Project, target: RecTarget) -> bool {
+    match target {
+        RecTarget::Insert {
+            index,
+            slot: Some(slot),
+            control,
+        } if control >= PARAM => {
+            let slots = project.insert_mix(index).insert().map(|i| &i.slots);
+            let found = slots.and_then(|s| s.iter().find(|s| s.index == i32::from(slot)));
+            let name = found.and_then(|slot| slot.plugin_name.as_deref());
+            name.is_some_and(|name| PICTURES.iter().any(|p| p.eq_ignore_ascii_case(name)))
+                && mix::hosted(project, index, slot).is_some()
+        }
+        RecTarget::Channel { index, control } if CLIP_LFO.contains(&control) => {
+            let channel = project.channel(index);
+            let clip = channel.filter(|c| c.kind == Some(ChannelKind::Automation));
+            let data = clip.and_then(|c| c.automation.as_ref());
+            data.is_some_and(|data| data.lfo_tail[4..8] == [0; 4])
+        }
+        _ => false,
     }
 }
 
