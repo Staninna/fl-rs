@@ -53,6 +53,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::free_filter::NAME, Port::Exact),
     (crate::frequency_splitter::NAME, Port::Gaps),
     (crate::fruit_kick::NAME, Port::Gaps),
+    (crate::fruity_slicer::NAME, Port::Gaps),
     (crate::gross_beat::NAME, Port::Gaps),
     (crate::harmless::NAME, Port::Approximate),
     (crate::harmor::NAME, Port::Approximate),

@@ -178,6 +178,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
     }),
+    (crate::fruity_slicer::NAME, || {
+        Box::new(crate::fruity_slicer::FruitySlicer::default())
+    }),
     (crate::harmless::NAME, || {
         Box::new(crate::harmless::Harmless::default())
     }),
