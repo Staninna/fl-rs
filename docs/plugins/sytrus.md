@@ -72,7 +72,7 @@ Plugin object:
 | 0x5f00 / 0x5f04 / 0x5f08 | i32 | main part REC base (547) / direct count 0x18 / kind 2 |
 | 0x5f0c + 0x38 e | delay | three delay units: +0x24 i32[5] params, +0x38 u8[3] flags, +0x18 delay object |
 | 0x5f18 | u8 | (v25+) saved |
-| 0x5f20 / 0x5f28 | ptr, u8 | reverb object / reverb also on the dry path |
+| 0x5f20 / 0x5f28 | ptr, u8 | chorus object (`TStereoFlanger`) / the chorus also feeds the send bus (section 9) |
 | 0x5fec | i32[9] + u8 + u8 | reverb params and enable (saved as 38 bytes) |
 | 0x6018 + 0x90 b | eq band | three EQ bands: +0 level, +4 freq, +8 width, +0xc type (0, 1, 2), +0x18 ... |
 | 0x61cc | i32 | EQ mode (0 off; 1; 2 / 3 select the buffer in Gen_Render) |
@@ -117,7 +117,7 @@ main      0x3c2 bytes at 0x12c (v < 1: 9 fewer; v < 2: 0xa2 fewer)        // REC
 v > 3:    i32 0x4f0
 v > 5:    u8 0x4f4;  v > 6: u8 0x4f5;  v > 12: u8 0x4f6
 v > 13:   u8[k] at 0x4f7, k = 1 (v14), 5 (v15..17), 8 (v18), 9 (v19+)
-3 x       23 bytes at 0x5f30 + 0x38 e: i32 feedback 64, i32 time 144, i32 time offset 0, i32 volume 64, i32 mode 0, u8 enable 1, u8 serial 0, u8 tempo 0
+3 x       23 bytes at 0x5f30 + 0x38 e: i32 feedback 64, i32 time 144, i32 time offset 0, i32 volume 64, i32 mode 0, u8 tempo 1, u8 serial 0, u8 on 0 (section 9)
 v >= 10:  reverb 37 (v10) / 38 bytes at 0x5fec: i32 lowcut 75, highcut 40, predelay 0, room 40, diffusion 100, decay 15, high damp 40, color 2, volume 25, u8 enable 0, u8 tempo-based (v11+)
           (v < 10: FUN_00865a90 writes those defaults)
 v > 2:    i32 EQ mode 0x61cc; 3 x (12 bytes (v < 14) or 16: level 0, freq, width 17500, type b)      // code defaults freq 5777 / 33145 / 55825, DFM says 8950 / 33145 / 49305
@@ -200,7 +200,7 @@ so k = 0 is the untagged wheel of each panel):
 | filter | 0 | `FTypeSelect` (Tag -1 in the DFM; corpus 1, 2, 3) | 0..12 | 1 | header[0] |
 | filter | 1..9 | `FEnvWheel` 0..256 (128), `FCutWheel` 0..256 (128), `FResWheel` 0..256 (128), `FGainWheel` / `FLowSlider` 0..128 (128 / 0), `FBandSlider` 0..128 (0), `FHighSlider` 0..128 (0), `WSPreAmpWheel` 64..192 (128), `WSMixWheel` 0..128 (0), `ToNextFWheel` -256..256 (0) | | | header[k]; `FUN_00869e80`; k = 9 also `FUN_00865120` (routing) |
 | filter | (not REC) | `FFlatBtn`, `FQualityBtn`, `WSEnableBtn`, `WSBipolarBtn`, mode / order selectors | | | the 0x30 block at part+0x880 |
-| main | 0 | Tag-0 wheel | | 0 | 0x3fc |
+| main | 0 | Tag-0 wheel: the send's pan, 0x61e4 = v / 256 (`0x86a130`) | | 0 | 0x3fc |
 | main | 1..8 | `ChOrderSelect` 0..9 (4), `ChDepthWheel` 0..1024 (512), `ChSpeedWheel` 0..1024 (768), `ChDelayWheel` 0..128 (8), `ChSpreadWheel` 0..128 (128), `ChCrossWheel` -128..128 (-32), `ChVolWheel` -128..128 (128), `FXSendVolWheel` 0..128 (128) | | | 0x3fc + 4 k; bit mask `DAT_008681bc` picks `FUN_0086a130` (chorus) or `FUN_00869a80` |
 | main | 9 + 5 e + j | delay unit e (0..2), j: `DelFBWheel` 0..127 (64), `DelTimeWheel` 0..384 (144), `DelTimeOfsWheel` -512..512 (0), `DelVolWheel` -128..128 (64), `DelModeSelect` (0) | | | 0x5f30 + 0x38 e + 4 j; `FUN_00869540` |
 | main | (not REC) | `DelEnableBtn`, `DelSerialBtn`, `DelTempoBtn` per unit; reverb `RevEnableBtn`, `RevLCWheel` 19..3000 (75), `RevHCWheel` 5..221 (40), `RevDelWheel` 0..384 (0), `RevRoomWheel` 1..100 (40), `RevDiffWheel` 0..100 (100), `RevDecWheel` 1..200 (15), `RevHDWheel` 5..221 (40), `RevColWheel` 0..4 (2), `RevVolWheel` -128..128 (25), `RevTempoBtn`; `EQModeSelect`, `MixEQType1..3Select`; `DQOverSelect` 0..6 (0), `RQOverSelect` 0..6 (3), `DQEnvBtn`, `RQEnvBtn`, `GlobalCenterBtn`, `ModSmoothBtn`, `MonoKeyBtn`, `RandBtn`, `SoftenWheel` 0..128, `FXSendSelect` -125..125 | | | the three u8 after each delay's ints; the 38-byte reverb block; 0x61cc and the EQ types; the 0x4f0 / 0x4f4.. flags |
@@ -464,10 +464,9 @@ format). Of the 1012 states that load, 1000 are heard within the first
 the kernel above over a 2048-sample table without band limiting, the FM
 and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
-law and the output levels, and the send path folded into the output at
-half, dry. Left out, each named in `fidelity`: plucked
-operators, the comb and the phaser, the delays, chorus,
-reverb and EQ, the shape morph articulator, the harmonics filter wheel,
+law and the output levels; the send path goes through the effects
+(section 9). Left out, each named in `fidelity`: plucked
+operators, the comb and the phaser, the shape morph articulator, the harmonics filter wheel,
 the arpeggiator and portamento. Every state reports `Approximate`. The 597
 REC parameters are the host's (section 6).
 
@@ -535,8 +534,8 @@ covers, for the voices that start after it), Mod X and Mod Y with their
 glide, the operators' phase, volume and pitch range, every filter wheel,
 the "to next" wheel with the routing, the FX send level, every
 articulator knob and the unison's pan, volume and pitch (sections 7 and
-8). Kept but not heard, as the parts they move are not built: the
-chorus, the delays, the EQ and portamento. FL's saved LFO amounts differ
+8), and the chorus, delay and EQ wheels (section 9). Kept but not
+heard: portamento. FL's saved LFO amounts differ
 from `level` by up to a bit of the f32 in some states (0.5633213 against
 0.56332123 for 101), and an f32 port of `0x86a1d0` misses others, so the
 LFO level is worked out with `level` and the state's own amounts stand
@@ -663,6 +662,102 @@ Implemented as read (`Shaper` in `sytrus.rs`). The HQ kernels run when the
 state's byte asks; FL's switch to them while it renders to a file is not
 followed, as for Love Philter.
 
+## 9. The effects (`Gen_Render` `0x8737a0`)
+
+Read in run 6 with the setters: `0x869540` (delays), `0x869480` (serial
+routing), `0x869840` (reverb), `0x869a80` (chorus), `0x86a130` (send pan
+and FX send level), `0x86a440` / `0x86a5b0` / `0x625990` / `0x6253c0`
+(EQ), `0x862b80` (oversampling), the kernels `0x625db0` (EQ),
+`0x62a490` (L + R), `0x62e190` (high pass), and the classes of
+`docs/plugins/fl-fx.md`: the chorus `TStereoFlanger` (constructor
+`0x840700`, set up `0x840920`, write `0x841060`, renderer at +0x60, sleep
+`0x841020`), the delay `TDelay_32FS` (`0x83d140`, size `0x83cfe0`, input
+`0x83d480`), the reverb `TFruityReverb` (`0x8402d0`, process
+`0x8404b0`). After a load `0x862c50` runs every setter.
+
+The voices render into two stereo buses: dry (`0x6298`) and send
+(`0x62a0`). For each row in the output list the gains are
+`FinalVol x main volume x +0x40 x part+0x30` at the pan `(FinalPan / 2 +
++0x3c + part+0x28 + pan art) x 2 - 1`; for each row in the send list
+`FinalVol x main volume x +0x40 x part+0x2c x main art 1` at the pan with
+`0x61e4` (main wheel 0 / 256) and main art 0 added (`0x872290`). The send
+bus is heard only through the effects; the FX send wheel (`0x61e0 =
+level(main wheel 8 / 128)`) scales only the copy to a mixer track.
+
+```
+countdown 0x6308: 0 when the voice has no send rows (0x632c); while voices sound = 0x630c; after, -= n
+          0x630c = SR x 100 / 44100 (int), plus the chorus ring (block + longest + 8) when the chorus is on
+voices -> dry, send                                      (the list from its end)
+EQ mode 2 / 3: the bands on dry / send                   (0x8736f0)
+chorus (0x5f20, order >= 1): countdown < 1: sleep n (LFOs on);
+          else ring += send, render -> tmp, dry += tmp, and send += tmp when 0x5f28
+          0x5f28 = a delay on, or the reverb on, or an FX send target           (0x869480)
+FX send (0x420 != -1, countdown > 0): mixer track 0x420 + 1 += send x 0x61e0
+delays e = 0..2 (object when on): gate = countdown
+          gate > 0: ring[write + off L] += send L, ring[write + off R] += send R
+          kernel by mode (0 +0x40 straight, 1 +0x50 swapped, 2 +0x60 ping-pong) -> tmp
+          serial (+0x30): send += tmp x vol, gate = 0x630c;  else dry += tmp x vol
+reverb (0x5fe0, on): mono = send L + R; process -> send (stereo); dry += send x 0x5fe8
+EQ mode 1: the bands on dry
+0x4f5: dry through the high pass
+dry -> out
+```
+
+Delay unit `e` (`0x5f30 + 0x38 e`): wheels feedback, time, offset,
+volume, mode (REC 556 + 5 e + j); bytes +0x14 tempo, +0x15 serial, +0x16
+on (`0x869540` makes the object when +0x16 is set and frees it when not):
+
+```
+offset  = (float)((float)(exp((|o| / 512) ln 1001) - 1) x 50)        // +0x2c, in 10 us (0x8697f0, 0x8697f8, 0x869808)
+frames  = round(offset x SR / 100000)                                  // 0x869810
+time    = tempo ? round(t x SR x 0.3125 / tempo) : round(t x SR / 384)  // 0x869818, 0x869820; tempo is 0x627c
+ring    = block + frames + time;  the offset on the right side when o > 0, else on the left
+feedback = fb / 128 (+0x30, ramped by TAudioRenderer+0x34);  volume = level(|v| / 128) with v's sign (+0x28)
+serial  = +0x15 and e < (reverb on ? 3 : the last unit on)            // 0x869480
+```
+
+Reverb (`0x5fec`: low cut, high cut, predelay, room, diffusion, decay,
+high damping, colour, volume; u8 0x6010 on, u8 0x6011 tempo), into the
+`TFruityReverb` wrapper at the effects rate: low cut 0 (off) at 19, else
+Hz; high cut 0 (off) at 221, else in 100 Hz; damping likewise at 221;
+predelay `round(p x SR / 384)` or `round(p x SR x 0.3125 / tempo)`;
+room, diffusion and colour as they are; decay `(float)(d x SR / 10)`
+samples; wet `0x5fe8 = volume / 256` (`0x869840`).
+
+Chorus: on with order (main wheel 1) >= 1; the flanger's six wheels are
+main wheels 1..6 (order, depth / 1024, speed / 1024, delay / 128, spread
+/ 128, cross / 128, `0x869c30 = 1/1024`) and its gain +0x50 = main wheel
+7 / 128 (`0x869a80`), set up for the block and the rate.
+
+EQ band `b` (`0x6018 + 0x90 b`, saved: level, frequency, width, type):
+design type `+0x18 = type + 6` (`0x86a5b0`; the constructor's table
+`0x8fc9b8` is 6, 7, 8), `Hz = (float)((101^(f / 65536) - 1) x 159.9 + 10)`
+clamped to `0.4999 SR`, `dB = level x 0.01`, `w = width / 65536`;
+`A = 10^(dB / 40)`; type 7 a peak with `alpha = sin / ((q x 0.0999 + 0.1)
+x 2)`, `q = 1001^w - 1` (`0x62b260`); types 6 and 8 the low and high
+shelves with `beta sin`, `beta = sqrt((A^2 + 1) / (w x 1.9 + 0.1) - (A -
+1)^2)`; the RBJ coefficients of `0x6253c0` (`Coefficients64` has the same
+code), run in f64 direct form I per side (`0x625db0`). A band at level 0
+runs 0.2 s more (`0x62dc = SR / 5`) and stops; at level 0 it passes its
+input as it is.
+
+High pass (u8 0x4f5, saved from version 7): per side `speed += (x - low)
+g; low += speed; speed *= k; y = x - low` in f64 with `g = (float)(1.0070235
+/ SR)` and `k = 0.96f` (`0x8629d0`, `0x62e190`), states under 2^-24 made
+0: a two-pole high pass near 33 Hz.
+
+Oversampling: `0x862b80` sets `L = 0x438` (DQOverSelect while playing,
+`0x43c` RQOverSelect while rendering), the voices run at `2^L` times the
+rate (`0x62f4`) and the effects at `min(2^L, 4)` times (`0x62f8`), the
+decimators at `0x61e8..0x61f8` (`0x842100`) bringing the buses down
+between. In the corpus `0x438` is 0 in 218 states and 1..3 in 50.
+
+Implemented as read (`sytrus/fx.rs`), with the voices and the effects at
+the host's rate whatever the oversampling, the FX send to a mixer track
+left out (its target is -1 in every corpus state; `fidelity` names it),
+and the classes as `fl_fx.rs` has them (the chorus there is the x87
+renderer).
+
 ## Corrections
 
 - Operator `header[0]` is the phase wheel, not an output level: the voice
@@ -683,3 +778,10 @@ followed, as for Love Philter.
   under the base.
 - The saved main block's last 162 bytes (0x44c..0x4ee) are the matrix mute
   flags, which section 1 did not name.
+- `0x5f20` is the chorus (`TStereoFlanger`) and `0x5fe0` the reverb;
+  section 3 had them the other way round. `0x5f28` is "the chorus also
+  feeds the send bus". The three bytes after each delay unit's ints are
+  tempo (+0x14, 1 by default), serial (+0x15) and on (+0x16), not on,
+  serial, tempo. `FUN_00842100` is the decimator of the oversampling,
+  not the EQ, whose kernel is `0x625db0`.
+- Main wheel 0 (REC 547) is the send's pan, `0x61e4 = v / 256`.
