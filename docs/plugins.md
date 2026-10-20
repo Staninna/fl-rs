@@ -93,13 +93,13 @@ Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Wave Traveller | 4369 | yes | 2 | |
 | Effect | Emphasizer | 3688 |  | 1 | |
 | Effect | Fruity Bass Boost | 3664 | yes | 1 | |
-| Effect | Fruity Delay | 3685 |  | 1 | |
+| Effect | Fruity Delay | 3685 |  | 1 | implemented in crates/plugins (exact: tempo-synced ring, the three modes, the feedback low pass in f64 as FL's SSE loops keep it, both ramps with the renderer's cap; the input-add routine is taken to be Balance's; no render test, unit tests only), docs/plugins/fruity-delay.md |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
 | Effect | Fruity HTML NoteBook | 3835 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
-| Effect | Fruity Reeverb | 3627 | yes | 1 | |
+| Effect | Fruity Reeverb | 3627 | yes | 1 | implemented in crates/plugins (exact: the plate's twelve lines, taps, cuts, colour shelf and damping as the render reads them, in f32 with FL's 1e-30 fill), docs/plugins/fruity-reeverb.md |
 | Effect | Fruity Scratcher | 4172 | yes | 1 | |
-| Effect | Fruity Send | 3621 | yes | 1 | |
-| Effect | Fruity Squeeze | 3736 | yes | 1 | |
+| Effect | Fruity Send | 3621 | yes | 1 | implemented in crates/plugins (pan matrix, knob curves and the send to the chosen insert through the host's output buffer, as Stereo Shaper's difference goes; the send's mixing routine is not read and is taken to be Balance's), docs/plugins/fruity-send.md |
+| Effect | Fruity Squeeze | 3736 | yes | 1 | implemented in crates/plugins (exact: crusher, gate with its crossfaded edges, the twice-run state-variable filter before or after, mix and gain), docs/plugins/fruity-squeeze.md |
 | Effect | Fruity Vocoder | 3725 | yes | 1 | |
 | Effect | Fruity dB Meter | 3576 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` keeps the peaks and copies the block with `ippsCopy_64s`; the meter is left out), docs/plugins/fruity-db-meter.md |
 | Effect | Razer Chroma | 3952 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` reads the block for the keyboard lights and copies it with `ippsCopy_64s`; the lights are left out), docs/plugins/razer-chroma.md |
