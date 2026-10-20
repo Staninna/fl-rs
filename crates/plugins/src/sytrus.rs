@@ -7,8 +7,9 @@
 //! The state is read as FL writes it, to the last byte, for every version
 //! from 8 to 25. The sound is an approximation: the operators, the matrix,
 //! the filters, the envelopes and the output levels follow what the voice
-//! kernel does, with no band limiting of the wavetables and no plucked
-//! (Karplus-Strong) operators. The filters' waveshapers are FL's kernels
+//! kernel does: the band-limited and filtered wavetables and the plucked
+//! (Karplus-Strong) operators are FL's (sections 11 and 12 of the doc).
+//! The filters' waveshapers are FL's kernels
 //! over the baked curve (section 8 of the doc), and the chorus, the three
 //! delays, the reverb and the EQ after the voices are FL's chain on its
 //! send bus (`sytrus/fx.rs`, section 9). The unison is FL's: up to nine
@@ -34,6 +35,24 @@ use crate::parts::glide;
 
 mod band;
 mod fx;
+mod pluck;
+
+/// The operators' band-limited copies and strings, made with the state so
+/// a note takes them without allocating.
+#[derive(Debug, Clone, PartialEq)]
+struct Pools {
+    copies: Vec<band::Copies>,
+    strings: Vec<pluck::Strings>,
+}
+
+impl Default for Pools {
+    fn default() -> Self {
+        Pools {
+            copies: vec![band::Copies::default(); OPERATORS],
+            strings: vec![pluck::Strings::default(); OPERATORS],
+        }
+    }
+}
 use crate::three_osc::pan_law;
 use crate::{Fidelity, Generator, NoteOn, StateError, knob_gain};
 use dsp::biquad::{Biquad64, Coefficients64};
@@ -1812,6 +1831,8 @@ struct Voice {
     first: bool,
     /// Which band-limited copy each operator reads, or [`band::WHOLE`].
     band: [u8; OPERATORS],
+    /// Each plucked operator's string.
+    plucks: [pluck::Pluck; OPERATORS],
     /// The frames left of the voice's control tick: every voice counts
     /// its own from its start (`voice+0x14`).
     to_tick: usize,
@@ -2152,15 +2173,21 @@ impl Voice {
             first: true,
             to_tick: 0,
             band: [band::WHOLE; OPERATORS],
+            plucks: [pluck::Pluck::IDLE; OPERATORS],
             seed: *seed,
         }
     }
 
-    /// Give the band-limited copies the voice reads back.
-    fn give_back(&self, copies: &mut [band::Copies]) {
-        for (index, copies) in self.band.iter().zip(copies) {
+    /// Give the band-limited copies and the strings the voice reads back.
+    fn give_back(&self, pools: &mut Pools) {
+        for (index, copies) in self.band.iter().zip(&mut pools.copies) {
             if *index != band::WHOLE {
                 copies.give_back(*index);
+            }
+        }
+        for (pluck, strings) in self.plucks.iter().zip(&mut pools.strings) {
+            if pluck.slot != pluck::NONE {
+                strings.give_back(pluck.slot);
             }
         }
     }
@@ -2180,7 +2207,7 @@ impl Voice {
 
     /// Start a control tick of `len` frames: move every articulator on and
     /// aim the levels at what they come to.
-    fn tick(&mut self, state: &State, timing: Timing, len: usize, copies: &mut [band::Copies]) {
+    fn tick(&mut self, state: &State, timing: Timing, len: usize, pools: &mut Pools) {
         let len = len.max(1) as f32;
         let snap = self.first;
         self.first = false;
@@ -2234,12 +2261,40 @@ impl Voice {
             };
             run.phase_art = phase_art;
             run.increment = (run.pitch * factor + delta).clamp(-0.5, 0.5);
+            let pitch = (run.pitch * factor) as f32;
+            if snap {
+                // The note starts at the phase articulator's value too
+                // (`0x86af20`).
+                run.phase += f64::from(phase_art);
+                run.phase -= run.phase.floor();
+            }
             // A band-limited operator picks its copy by its pitch as the
             // note starts (`0x86ace0`).
             if snap && operator.band_limit {
-                let hz = (run.pitch * factor) as f32 * timing.rate;
+                let hz = pitch * timing.rate;
                 if let Some(limits) = band::limits(hz, timing.rate, state.smooth) {
-                    self.band[op] = copies[op].take(limits, &operator.spectrum, state.smooth);
+                    let copies = &mut pools.copies[op];
+                    self.band[op] = copies.take(limits, &operator.spectrum, state.smooth);
+                }
+            }
+            // A plucked operator draws its string as the note starts
+            // (`0x86a810`) and follows the damping articulator and the
+            // pitch (`0x86aba0`).
+            if operator.plucked {
+                let damping = value(op, 5).clamp(0.0, 1.0);
+                let pluck = &mut self.plucks[op];
+                if snap {
+                    let strings = &mut pools.strings[op];
+                    pluck.slot = strings.take();
+                    let base = run.pitch as f32;
+                    if let Some(buffer) = strings.buffer(pluck.slot) {
+                        let rates = (base, pitch, timing.rate);
+                        let (phase, noise) = (run.phase, operator.noise);
+                        let table = &operator.table;
+                        pluck.start(buffer, table, rates, phase, noise, damping, &mut self.seed);
+                    }
+                } else if pluck.slot != pluck::NONE {
+                    pluck.damp(damping, pitch);
                 }
             }
             if snap {
@@ -2332,21 +2387,21 @@ impl Voice {
         timing: Timing,
         scratch: &mut [f32],
         buses: &mut [&mut [f32]; 4],
-        copies: &mut [band::Copies],
+        pools: &mut Pools,
     ) -> bool {
         let len = buses[0].len();
         let mut at = 0;
         while at < len {
             if self.to_tick == 0 {
                 self.to_tick = timing.tick as usize;
-                self.tick(state, timing, self.to_tick, copies);
+                self.tick(state, timing, self.to_tick, pools);
                 // A slave lasts as long as its master.
                 if self.over && self.unison.role != Role::Slave {
                     return true;
                 }
             }
             let run = (len - at).min(self.to_tick);
-            self.render(state, timing, scratch, (buses, at, run), copies);
+            self.render(state, timing, scratch, (buses, at, run), pools);
             self.to_tick -= run;
             at += run;
         }
@@ -2362,7 +2417,7 @@ impl Voice {
         timing: Timing,
         scratch: &mut [f32],
         (buses, at, len): (&mut [&mut [f32]; 4], usize, usize),
-        copies: &[band::Copies],
+        pools: &mut Pools,
     ) {
         let len = len.min(CHUNK);
         let fading = self.released && !state.any_envelope();
@@ -2375,15 +2430,22 @@ impl Voice {
                 let run = self.operators[op];
                 let x = run.phase + f64::from(run.fm * run.modulation);
                 let mut y = 0.0;
-                if !operator.table.is_empty() {
-                    let table = copies[op].table(self.band[op]).unwrap_or(&operator.table);
+                if operator.plucked {
+                    let pluck = &mut self.plucks[op];
+                    if let Some(buffer) = pools.strings[op].buffer(pluck.slot) {
+                        y = pluck.next(buffer);
+                    }
+                } else if !operator.table.is_empty() {
+                    let table = pools.copies[op]
+                        .table(self.band[op])
+                        .unwrap_or(&operator.table);
                     let size = table.len() - 1;
                     let pos = (x - x.floor()) * size as f64;
                     let index = (pos as usize).min(size - 1);
                     let frac = (pos - index as f64) as f32;
                     y = table[index] + (table[index + 1] - table[index]) * frac;
                 }
-                if operator.noise > 0.0 {
+                if operator.noise > 0.0 && !operator.plucked {
                     self.seed = self.seed.wrapping_mul(0x0808_8405).wrapping_add(1);
                     let white = (self.seed >> 8) as f32 * (1.0 / 8_388_608.0) - 1.0;
                     y = operator.noise * white + y * (1.0 - operator.noise);
@@ -2535,8 +2597,8 @@ pub struct Sytrus {
     notes: u32,
     /// The chorus, delays, reverb and EQ after the voices.
     fx: fx::Effects,
-    /// Each operator's band-limited copies.
-    copies: Vec<band::Copies>,
+    /// Each operator's band-limited copies and strings.
+    pools: Pools,
     scratch: Vec<f32>,
     seed: u32,
 }
@@ -2551,7 +2613,7 @@ impl Default for Sytrus {
             voices: Vec::with_capacity(ROOM),
             notes: 0,
             fx: fx::Effects::default(),
-            copies: vec![band::Copies::default(); OPERATORS],
+            pools: Pools::default(),
             scratch: vec![0.0; (ROWS + OPERATORS) * CHUNK],
             seed: 0x1234_5678,
         }
@@ -2568,11 +2630,11 @@ impl Sytrus {
 
     /// Let every voice of a note go, and their band-limited copies.
     fn drop_group(&mut self, group: u32) {
-        let copies = &mut self.copies;
+        let pools = &mut self.pools;
         self.voices.retain(|v| {
             let keep = v.group != group;
             if !keep {
-                v.give_back(copies);
+                v.give_back(pools);
             }
             keep
         });
@@ -2630,17 +2692,31 @@ impl Generator for Sytrus {
         self.state = State::read(bytes)?;
         self.voices.clear();
         self.build_effects();
-        // Room for the band-limited copies of the operators that make
-        // them.
-        self.copies = (0..OPERATORS)
-            .map(|op| {
-                if self.state.operators[op].band_limit {
-                    band::Copies::new()
-                } else {
-                    band::Copies::default()
-                }
-            })
-            .collect();
+        // Room for the band-limited copies and the strings of the
+        // operators that make them.
+        let operators = &self.state.operators;
+        self.pools = Pools {
+            copies: operators
+                .iter()
+                .map(|o| {
+                    if o.band_limit {
+                        band::Copies::new()
+                    } else {
+                        band::Copies::default()
+                    }
+                })
+                .collect(),
+            strings: operators
+                .iter()
+                .map(|o| {
+                    if o.plucked {
+                        pluck::Strings::new()
+                    } else {
+                        pluck::Strings::default()
+                    }
+                })
+                .collect(),
+        };
         Ok(())
     }
 
@@ -2728,12 +2804,12 @@ impl Generator for Sytrus {
             let mut ended = false;
             let sounding = self.voices.len();
             let mut buses = self.fx.buses(run);
-            let copies = &mut self.copies;
+            let pools = &mut self.pools;
             self.voices.retain_mut(|voice| {
-                let over = voice.play(state, timing, scratch, &mut buses, copies);
+                let over = voice.play(state, timing, scratch, &mut buses, pools);
                 ended |= over && voice.unison.role == Role::Master;
                 if over {
-                    voice.give_back(copies);
+                    voice.give_back(pools);
                 }
                 !over
             });
@@ -2783,8 +2859,11 @@ impl Generator for Sytrus {
 
     fn reset(&mut self) {
         self.voices.clear();
-        for copies in &mut self.copies {
+        for copies in &mut self.pools.copies {
             copies.release_all();
+        }
+        for strings in &mut self.pools.strings {
+            strings.release_all();
         }
         self.fx.reset(&self.state.fx, &self.state.wheels());
     }
@@ -2809,11 +2888,8 @@ impl Generator for Sytrus {
 
     fn fidelity(&self) -> Fidelity {
         let state = &self.state;
-        let active_ops = (0..OPERATORS).filter(|op| state.active[*op]);
         let active_filters = (0..FILTERS).filter(|f| state.active[OPERATORS + f]);
-        if active_ops.clone().any(|op| state.operators[op].plucked) {
-            Fidelity::Approximate("Sytrus plucked operator")
-        } else if active_filters
+        if active_filters
             .clone()
             .any(|f| matches!(state.filters[f].kind, COMB | PHASER))
         {
@@ -3558,7 +3634,7 @@ mod tests {
             );
             operator.spectrum = band::filter(&mut operator.table, 128, false);
             operator.band_limit = limit;
-            sytrus.copies[0] = band::Copies::new();
+            sytrus.pools.copies[0] = band::Copies::new();
             let sound = play(&mut sytrus, 108, 16_384);
             let hz = C5 * 16.0;
             let at = |f: f64| partial(&sound[8192..], f / f64::from(RATE));
