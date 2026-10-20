@@ -83,7 +83,8 @@ impl Decimator {
 fn dot(samples: &[f32], taps: &[f32], out: &mut f32) {
     let whole = samples.len() / 4 * 4;
     let mut lanes = [0.0f32; 4];
-    for (s, t) in samples[..whole].chunks_exact(4).zip(taps.chunks_exact(4)) {
+    let (samples_4, taps_4) = (samples[..whole].as_chunks::<4>().0, taps.as_chunks::<4>().0);
+    for (s, t) in samples_4.iter().zip(taps_4) {
         for lane in 0..4 {
             lanes[lane] += s[lane] * t[lane];
         }
