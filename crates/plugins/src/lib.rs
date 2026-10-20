@@ -15,7 +15,7 @@
 //! [`blood_overdrive::BloodOverdrive`],
 //! [`chorus::Chorus`], [`compressor::Compressor`],
 //! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
-//! [`delay_bank::DelayBank`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
+//! [`delay_bank::DelayBank`], [`emphasis::Emphasis`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
 //! [`flanger::Flanger`], [`flangus::Flangus`], [`free_filter::FreeFilter`],
 //! [`limiter::Limiter`], [`love_philter::LovePhilter`],
 //! [`maximus::Maximus`],
@@ -58,6 +58,8 @@ mod drumpad_voice;
 pub mod dx10;
 pub mod edison;
 pub mod effector;
+pub mod emphasis;
+mod emphasis_dsp;
 pub mod equo;
 pub mod fast_dist;
 pub mod fast_lp;
@@ -71,6 +73,7 @@ pub mod free_filter;
 pub mod frequency_shifter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
+pub mod fruity_slicer;
 mod generator;
 pub mod gross_beat;
 pub mod harmless;
@@ -385,6 +388,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(edison::Edison))
     } else if is(effector::NAME) {
         Some(Box::new(effector::Effector::default()))
+    } else if is(emphasis::NAME) {
+        Some(Box::new(emphasis::Emphasis::default()))
     } else if is(equo::NAME) {
         Some(Box::new(equo::Equo::default()))
     } else if is(fast_dist::NAME) {
@@ -464,11 +469,9 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
     } else if PASS_THROUGH.iter().any(|known| is(known)) {
         Some(Box::new(pass_through::PassThrough::new()))
     } else if is(control_surface::NAME) {
-        let left_out = control_surface::LEFT_OUT;
-        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+        Some(Box::new(control_surface::ControlSurface::default()))
     } else if is(xy_controller::NAME) {
-        let left_out = xy_controller::LEFT_OUT;
-        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+        Some(Box::new(xy_controller::XyController::default()))
     } else if is(zgameeditor::NAME) {
         Some(Box::new(zgameeditor::ZGameEditor))
     } else if is(wrapper::NAME) {
@@ -739,6 +742,8 @@ mod tests {
             ("edison", 667, 2),
             ("edison", 695, 2),
             ("effector", 316, 27),
+            ("emphasis", 64, 4),
+            ("emphasis", 67, 1),
             ("equo", 4143, 10),
             ("frequency shifter", 52, 5),
             ("fruity bass boost", 12, 2),
@@ -819,19 +824,18 @@ mod tests {
             "vocodex",
             // Counted in `wrapper::tests`.
             "fruity wrapper",
+            // Counted in their own tests.
+            "control surface",
+            "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
             "zgameeditor visualizer",
         ];
         // Any state does for an effect that leaves the sound alone.
-        let controllers = [control_surface::NAME, xy_controller::NAME];
-        let passes = |plugin: &str| {
-            let mut passing = PASS_THROUGH.iter().chain(&controllers);
-            passing.any(|n| n.eq_ignore_ascii_case(plugin))
-        };
+        let passes = |plugin: &str| PASS_THROUGH.iter().any(|n| n.eq_ignore_ascii_case(plugin));
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 51);
+        assert_eq!(lengths.count(), 53);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

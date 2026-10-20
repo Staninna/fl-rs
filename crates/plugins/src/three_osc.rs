@@ -25,6 +25,11 @@
 //! | 5, 12, 19 Stereo detune, cents | -50 to 50 | 0 |
 //! | 6, 13 Mix level of oscillator 2 and 3 | 0 to 128 | 64, 32 |
 //! | 20 Stereo phase randomness | 0 to 64 | 0 |
+//! | 23 to 107 The instrument tab's five blocks, 17 words each | by word | |
+//! | 110, 111 The tab's cutoff and resonance | 0 to 256 | 256, 0 |
+//! | 113 The tab's filter type | 0 to 7 | 0 |
+//!
+//! 21, 22, 108, 109 and 112 are nobody's.
 //!
 //! FL does not hold a state to the ranges, and its own presets go past
 //! them. Only a shape or a filter type that is none is turned down.
@@ -169,6 +174,55 @@ const VOLUME: usize = 1;
 const MOD_X: usize = 2;
 const MOD_Y: usize = 3;
 const PITCH: usize = 4;
+
+/// The parameter the instrument tab's start at. FL's tab handler
+/// (`0x7378a0`) takes 23 to 113: `0x73ad35` hands 23 to `0x72c440`, which
+/// lays the five blocks out 17 words apiece from there and puts the
+/// cutoff, the resonance and the filter type 2, 3 and 5 past them. 21,
+/// 22, 108, 109 and 112 are nobody's: FL keeps nothing for them.
+const TAB_PARAM: usize = 23;
+const TAB_BLOCKS_END: usize = TAB_PARAM + 5 * 17;
+const TAB_CUTOFF: usize = TAB_BLOCKS_END + 2;
+const TAB_RESONANCE: usize = TAB_BLOCKS_END + 3;
+const TAB_FILTER: usize = TAB_BLOCKS_END + 5;
+/// FL's NumParams.
+const PARAMS: usize = TAB_BLOCKS_END + 6;
+
+/// How far each block's envelope and LFO amounts go either way: FL
+/// rescales words 8 and 11 by the table at `0x790a60` (`0x737820`) and not
+/// by their wheels' -128 to 128.
+const TAB_AMOUNTS: [i32; 5] = [64, 128, 128, 128, 2400];
+
+/// The range of word `word` of block `block` of the instrument tab, from
+/// the wheels of the tab's form (Tags 0x1000 + word) that `0x7364a0` lists.
+/// Word 0, the flags, has no control, so FL stores what it is given.
+/// Word 1 is the "use envelope" box.
+fn tab_range(block: usize, word: usize) -> (i32, i32) {
+    match word {
+        FLAGS => (0, 1 << 30),
+        ENABLED => (0, 1),
+        SUSTAIN => (0, 128),
+        AMOUNT | LFO_AMOUNT => (-TAB_AMOUNTS[block], TAB_AMOUNTS[block]),
+        LFO_SPEED => (200, 65_536),
+        LFO_SHAPE => (0, 2),
+        TENSIONS.. => (-128, 128),
+        _ => (100, 65_536),
+    }
+}
+
+/// The range of a parameter, and `None` for one FL keeps nothing for.
+fn param_range(index: usize) -> Option<(i32, i32)> {
+    match index {
+        0..21 => Some(RANGES[index]),
+        TAB_PARAM..TAB_BLOCKS_END => {
+            let at = index - TAB_PARAM;
+            Some(tab_range(at / 17, at % 17))
+        }
+        TAB_CUTOFF | TAB_RESONANCE => Some((0, 256)),
+        TAB_FILTER => Some((0, 7)),
+        _ => None,
+    }
+}
 
 /// A block's flags: its times are ticks whatever the tempo is, the same
 /// for its LFO, a block that is off holds 1 and not 0, and the LFO's phase
@@ -1518,21 +1572,45 @@ impl Generator for ThreeOsc {
         }
     }
 
-    /// The 21 of the plugin's own. FL numbers the 93 of the instrument
-    /// tab after them.
+    /// The 21 of the plugin's own, then the instrument tab's from 23 on:
+    /// five blocks of 17 words, then the cutoff at 110, the resonance at
+    /// 111 and the filter type at 113.
     fn param_count(&self) -> usize {
-        RANGES.len()
+        PARAMS
     }
 
     fn param(&self, index: usize) -> f32 {
-        self.params.get(index).map_or(0.0, |value| *value as f32)
+        let tab = &self.tab;
+        let value = match index {
+            0..21 => self.params[index],
+            TAB_CUTOFF => tab.cutoff,
+            TAB_RESONANCE => tab.resonance,
+            TAB_FILTER => tab.filter,
+            TAB_PARAM..TAB_BLOCKS_END => {
+                let at = index - TAB_PARAM;
+                tab.blocks[at / 17][at % 17]
+            }
+            _ => 0,
+        };
+        value as f32
     }
 
     fn set_param(&mut self, index: usize, value: f32) {
-        if let Some(range) = RANGES.get(index) {
-            self.params[index] = knob_value(value, *range);
-            self.derive();
+        let Some(range) = param_range(index) else {
+            return;
+        };
+        let value = knob_value(value, range);
+        match index {
+            0..21 => self.params[index] = value,
+            TAB_CUTOFF => self.tab.cutoff = value,
+            TAB_RESONANCE => self.tab.resonance = value,
+            TAB_FILTER => self.tab.filter = value,
+            _ => {
+                let at = index - TAB_PARAM;
+                self.tab.blocks[at / 17][at % 17] = value;
+            }
         }
+        self.derive();
     }
 
     /// The ticks start over with the notes cut.
@@ -2537,7 +2615,7 @@ mod tests {
     #[test]
     fn the_parameters_are_the_21_wheels_inside_their_ranges() {
         let mut osc = crate::generator_by_name("3x osc").unwrap();
-        assert_eq!(osc.param_count(), 21);
+        assert_eq!(osc.param_count(), 114);
         let params: Vec<f32> = (0..22).map(|index| osc.param(index)).collect();
         let defaults: Vec<f32> = DEFAULTS.iter().map(|value| *value as f32).collect();
         assert_eq!(params[..21], defaults[..]);
@@ -2558,6 +2636,61 @@ mod tests {
         play(&mut osc, 400);
         let hz = pitch(&play(&mut osc, 8000).0) * RATE;
         assert!((hz / 1046.502 - 1.0).abs() < 1e-3, "{hz} Hz");
+    }
+
+    #[test]
+    fn the_instrument_tab_s_parameters_follow_from_23() {
+        let mut osc = ThreeOsc::default();
+        let tab = new_tab();
+        // The blocks, 17 words apiece, then the filter.
+        let word = |block: usize, word: usize| TAB_PARAM + 17 * block + word;
+        assert_eq!(
+            osc.param(word(VOLUME, ATTACK)),
+            tab.blocks[VOLUME][ATTACK] as f32
+        );
+        assert_eq!(osc.param(word(PITCH, TENSIONS + 2)), 0.0);
+        assert_eq!(osc.param(word(VOLUME, TENSIONS + 2)), -101.0);
+        assert_eq!(
+            (osc.param(110), osc.param(111), osc.param(113)),
+            (256.0, 0.0, 0.0)
+        );
+        // Each to its wheel's range, and the amounts to their block's.
+        for (index, value, kept) in [
+            (word(0, PREDELAY), 0.0, 100.0),
+            (word(0, LFO_SPEED), 0.0, 200.0),
+            (word(MOD_X, SUSTAIN), 999.0, 128.0),
+            (word(0, AMOUNT), -999.0, -64.0),
+            (word(PITCH, AMOUNT), 9999.0, 2400.0),
+            (word(PITCH, LFO_AMOUNT), -9999.0, -2400.0),
+            (word(MOD_Y, LFO_SHAPE), 5.0, 2.0),
+            (word(0, ENABLED), 3.0, 1.0),
+            (110, 300.0, 256.0),
+            (111, -1.0, 0.0),
+            (113, 9.0, 7.0),
+        ] {
+            osc.set_param(index, value);
+            assert_eq!(osc.param(index), kept, "{index}");
+        }
+        assert_eq!(osc.tab.blocks[PITCH][AMOUNT], 2400);
+        assert_eq!(
+            (osc.tab.cutoff, osc.tab.resonance, osc.tab.filter),
+            (256, 0, 7)
+        );
+        // FL keeps nothing for these.
+        for index in [21, 22, 108, 109, 112, 114] {
+            osc.set_param(index, 50.0);
+            assert_eq!(osc.param(index), 0.0, "{index}");
+        }
+
+        // The cutoff is heard by a note that sounds.
+        let mut osc = with(alone(3));
+        osc.note_on(note(1, 72));
+        play(&mut osc, 4000);
+        let open = rms(&play(&mut osc, 4000).0);
+        osc.set_param(TAB_CUTOFF, 20.0);
+        play(&mut osc, 2000);
+        let shut = rms(&play(&mut osc, 4000).0);
+        assert!(shut < open * 0.3, "{shut} {open}");
     }
 
     #[test]
