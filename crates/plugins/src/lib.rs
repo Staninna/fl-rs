@@ -25,7 +25,8 @@
 //! [`soft_clipper::SoftClipper`], [`soundgoodizer::Soundgoodizer`],
 //! [`spreader::Spreader`],
 //! [`stereo_enhancer::StereoEnhancer`], [`stereo_shaper::StereoShaper`],
-//! [`transient_processor::TransientProcessor`] and
+//! [`transient_processor::TransientProcessor`],
+//! [`vintage_chorus::VintageChorus`] and
 //! [`waveshaper::WaveShaper`].
 //!
 //! Fruity Peak Controller is an internal controller: beside its sound it
@@ -97,6 +98,7 @@ pub mod test_sine;
 mod testing;
 pub mod three_osc;
 pub mod transient_processor;
+pub mod vintage_chorus;
 pub mod vocodex;
 pub mod waveshaper;
 
@@ -340,6 +342,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(fast_lp::FastLp::default()))
     } else if is(filter::NAME) {
         Some(Box::new(filter::Filter::default()))
+    } else if is(vintage_chorus::NAME) {
+        Some(Box::new(vintage_chorus::VintageChorus::default()))
     } else if is(flanger::NAME) {
         Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
@@ -680,6 +684,7 @@ mod tests {
             ("pitch shifter", 75, 15),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
+            ("vintage chorus", 72, 12),
         ] {
             let found = loaded.get(&(plugin.to_owned(), len)).copied();
             assert_eq!(found, Some(uses), "{plugin} at {len} bytes");
@@ -715,7 +720,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 38);
+        assert_eq!(lengths.count(), 39);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

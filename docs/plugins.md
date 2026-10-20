@@ -58,7 +58,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Fruity DX10 | 4230 | yes | 6 | implemented in crates/plugins (mda DX10 with a second modulator, all 74 shipped states exact; the instrument tab and the mod X/Y filter not built), docs/plugins/fruity-dx10.md |
 | Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), docs/plugins/ogun.md |
 | Effect | Emphasis | 4045 | yes | 5 | |
-| Effect | Vintage Chorus | 3849 | yes | 5 | |
+| Effect | Vintage Chorus | 3849 | yes | 5 | implemented in crates/plugins (the engine_x64.dll chorus exact; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-chorus.md |
 | Generator | Fruity Slicer | 4483 | yes | 5 | |
 | Generator | GMS | 1516 | yes | 5 | |
 | Effect | Edison | 6077 |  | 4 | |

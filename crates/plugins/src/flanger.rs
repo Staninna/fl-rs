@@ -146,7 +146,11 @@ struct Settings {
 
 impl Settings {
     fn new(params: &[i32; 12], hz: u32) -> Self {
-        let v = |index: usize| (f64::from(params[index]) / f64::from(RANGES[index].1)) as f32;
+        // The wheel's place times its f64 scale, `1 / (max - min)`.
+        let v = |index: usize| {
+            let scale = 1.0 / f64::from(RANGES[index].1);
+            (f64::from(params[index]) * scale) as f32
+        };
         let rate = f64::from(hz);
         let delay = curve(v(0), -0.8) * 20.0;
         let depth = curve(v(1), -0.8) * 20.0;
