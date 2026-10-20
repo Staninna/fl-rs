@@ -11,7 +11,8 @@
 //! [`boobass::BooBass`], [`fruit_kick::FruitKick`], [`sytrus::Sytrus`] and
 //! [`three_osc::ThreeOsc`].
 //!
-//! So far: [`balance::Balance`], [`blood_overdrive::BloodOverdrive`],
+//! So far: [`balance::Balance`], [`bass_boost::BassBoost`],
+//! [`blood_overdrive::BloodOverdrive`],
 //! [`chorus::Chorus`], [`compressor::Compressor`],
 //! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
 //! [`delay_bank::DelayBank`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
@@ -37,6 +38,7 @@
 pub mod autogun;
 mod autogun_engine;
 pub mod balance;
+pub mod bass_boost;
 pub mod bassdrum;
 pub mod blood_overdrive;
 pub mod boobass;
@@ -351,6 +353,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(phaser::Phaser::default()))
     } else if is(free_filter::NAME) {
         Some(Box::new(free_filter::FreeFilter::default()))
+    } else if is(bass_boost::NAME) {
+        Some(Box::new(bass_boost::BassBoost::default()))
     } else if is(flanger::NAME) {
         Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
@@ -655,6 +659,7 @@ mod tests {
         for (plugin, len, uses) in [
             ("effector", 316, 27),
             ("equo", 4143, 10),
+            ("fruity bass boost", 12, 2),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
             ("fruity compressor", 36, 35),
@@ -729,7 +734,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 41);
+        assert_eq!(lengths.count(), 42);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

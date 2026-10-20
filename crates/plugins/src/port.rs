@@ -21,6 +21,7 @@ pub enum Port {
 pub const PORTS: &[(&str, Port)] = &[
     (crate::autogun::NAME, Port::Approximate),
     (crate::balance::NAME, Port::Exact),
+    (crate::bass_boost::NAME, Port::Exact),
     (crate::bassdrum::NAME, Port::Exact),
     (crate::blood_overdrive::NAME, Port::Exact),
     (crate::boobass::NAME, Port::Exact),

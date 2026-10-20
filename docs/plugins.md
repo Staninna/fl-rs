@@ -92,7 +92,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Toxic Biohazard | 737 |  | 2 | |
 | Generator | Wave Traveller | 4369 | yes | 2 | |
 | Effect | Emphasizer | 3688 |  | 1 | |
-| Effect | Fruity Bass Boost | 3664 | yes | 1 | |
+| Effect | Fruity Bass Boost | 3664 | yes | 1 | implemented in crates/plugins (exact; a new sample rate works the corner out again where FL keeps it), docs/plugins/fruity-bass-boost.md |
 | Effect | Fruity Delay | 3685 |  | 1 | |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
 | Effect | Fruity HTML NoteBook | 3835 |  | 1 | |
