@@ -56,6 +56,7 @@ pub mod directwave;
 pub mod drumpad;
 mod drumpad_voice;
 pub mod dx10;
+pub mod edison;
 pub mod effector;
 pub mod equo;
 pub mod fast_dist;
@@ -379,6 +380,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_3::Delay3::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
+    } else if is(edison::NAME) {
+        Some(Box::new(edison::Edison))
     } else if is(effector::NAME) {
         Some(Box::new(effector::Effector::default()))
     } else if is(equo::NAME) {
@@ -714,7 +717,12 @@ mod tests {
             match effect.set_state(&saved.state) {
                 // A wrapper of an effect not built yet, which
                 // `wrapper::tests` counts.
-                Err(StateError::Unhosted) if saved.plugin == wrapper::NAME => continue,
+                // Counted in `edison::tests`.
+                Err(StateError::Unhosted)
+                    if saved.plugin == wrapper::NAME || saved.plugin == edison::NAME =>
+                {
+                    continue;
+                }
                 Err(error) => panic!("{} in {}: {error}", saved.plugin, saved.file),
                 Ok(()) => {}
             }
@@ -724,6 +732,9 @@ mod tests {
         // What the docs count in the 165 projects, but for Soft Clipper,
         // where the doc has 27.
         for (plugin, len, uses) in [
+            ("edison", 625, 1),
+            ("edison", 667, 2),
+            ("edison", 695, 2),
             ("effector", 316, 27),
             ("equo", 4143, 10),
             ("frequency shifter", 52, 5),
@@ -815,7 +826,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 48);
+        assert_eq!(lengths.count(), 51);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
