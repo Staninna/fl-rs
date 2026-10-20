@@ -62,6 +62,7 @@ pub mod dx10;
 pub mod edison;
 pub mod effector;
 pub mod emphasis;
+pub mod emphasizer;
 mod emphasis_dsp;
 pub mod equo;
 pub mod fast_dist;
@@ -402,6 +403,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(effector::Effector::default()))
     } else if is(emphasis::NAME) {
         Some(Box::new(emphasis::Emphasis::default()))
+    } else if is(emphasizer::NAME) {
+        Some(Box::new(emphasizer::Emphasizer::default()))
     } else if is(equo::NAME) {
         Some(Box::new(equo::Equo::default()))
     } else if is(fast_dist::NAME) {
@@ -762,6 +765,7 @@ mod tests {
             ("effector", 316, 27),
             ("emphasis", 64, 4),
             ("emphasis", 67, 1),
+            ("emphasizer", 29, 1),
             ("equo", 4143, 10),
             ("frequency shifter", 52, 5),
             ("fruity bass boost", 12, 2),
@@ -855,7 +859,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 55);
+        assert_eq!(lengths.count(), 56);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
