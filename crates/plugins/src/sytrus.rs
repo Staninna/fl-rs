@@ -32,6 +32,7 @@
 use crate::menvelope::{Class, Lfo, LfoRun, MEnvelope, Reader, Run, Track};
 use crate::parts::glide;
 
+mod band;
 mod fx;
 use crate::three_osc::pan_law;
 use crate::{Fidelity, Generator, NoteOn, StateError, knob_gain};
@@ -560,6 +561,10 @@ struct Operator {
     /// The block's eight switches: half, half silent, abs, free run,
     /// declick, centre, plucked, band limit.
     flags: [u8; 8],
+    /// A note reads a band-limited copy of the table (`BandLimitBtn`, not
+    /// with plucked), and the harmonics the copies are made from.
+    band_limit: bool,
+    spectrum: Vec<[f32; 2]>,
     /// The harmonics filter wheel, where 128 leaves every harmonic.
     filter: i32,
     articulators: Vec<Articulator>,
@@ -1042,6 +1047,8 @@ struct State {
     mod_smooth: bool,
     /// The control tick is 8 samples and not 96 (`DQEnvBtn`, i32 0x430).
     envelope_hq: bool,
+    /// u8 0x4f6 (section 11 of the doc).
+    smooth: bool,
     /// The waveshapers read between their steps (u8 0x5f18; FL also does
     /// while it renders to a file).
     hq_shaper: bool,
@@ -1091,6 +1098,8 @@ impl State {
             free_run: false,
             plucked: false,
             flags: [0; 8],
+            band_limit: false,
+            spectrum: Vec::new(),
             filter: 128,
             articulators,
         };
@@ -1141,6 +1150,7 @@ impl State {
             mod_y: 256,
             mod_smooth: true,
             envelope_hq: false,
+            smooth: false,
             hq_shaper: false,
             fm: [[0.0; OPERATORS]; OPERATORS],
             rm: [[0.0; OPERATORS]; OPERATORS],
@@ -1280,7 +1290,9 @@ impl State {
             state.fx.high_pass = reader.u8()? != 0;
         }
         if version > 12 {
-            reader.u8()?;
+            // u8 0x4f6, copied into every operator (+0x868): a sigma on the
+            // harmonics' cuts and a fixed Nyquist for the band limit.
+            state.smooth = reader.u8()? != 0;
         }
         if version > 13 {
             let count = match version {
@@ -1394,6 +1406,10 @@ impl State {
                 operator.flags.copy_from_slice(flags);
                 operator.filter = wheels[4];
                 operator.table = build_table(&levels, &phases, wheels, half, flags[2] != 0);
+                operator.band_limit = flags[7] != 0 && !operator.plucked;
+                if !operator.table.is_empty() {
+                    operator.spectrum = band::filter(&mut operator.table, wheels[4], state.smooth);
+                }
             } else if kind == 1 {
                 let index = part - OPERATORS;
                 let filter = &mut state.filters[index];
@@ -1794,6 +1810,8 @@ struct Voice {
     over: bool,
     /// The next tick is the first.
     first: bool,
+    /// Which band-limited copy each operator reads, or [`band::WHOLE`].
+    band: [u8; OPERATORS],
     /// The frames left of the voice's control tick: every voice counts
     /// its own from its start (`voice+0x14`).
     to_tick: usize,
@@ -2133,7 +2151,17 @@ impl Voice {
             over: false,
             first: true,
             to_tick: 0,
+            band: [band::WHOLE; OPERATORS],
             seed: *seed,
+        }
+    }
+
+    /// Give the band-limited copies the voice reads back.
+    fn give_back(&self, copies: &mut [band::Copies]) {
+        for (index, copies) in self.band.iter().zip(copies) {
+            if *index != band::WHOLE {
+                copies.give_back(*index);
+            }
         }
     }
 
@@ -2152,7 +2180,7 @@ impl Voice {
 
     /// Start a control tick of `len` frames: move every articulator on and
     /// aim the levels at what they come to.
-    fn tick(&mut self, state: &State, timing: Timing, len: usize) {
+    fn tick(&mut self, state: &State, timing: Timing, len: usize, copies: &mut [band::Copies]) {
         let len = len.max(1) as f32;
         let snap = self.first;
         self.first = false;
@@ -2206,6 +2234,14 @@ impl Voice {
             };
             run.phase_art = phase_art;
             run.increment = (run.pitch * factor + delta).clamp(-0.5, 0.5);
+            // A band-limited operator picks its copy by its pitch as the
+            // note starts (`0x86ace0`).
+            if snap && operator.band_limit {
+                let hz = (run.pitch * factor) as f32 * timing.rate;
+                if let Some(limits) = band::limits(hz, timing.rate, state.smooth) {
+                    self.band[op] = copies[op].take(limits, &operator.spectrum, state.smooth);
+                }
+            }
             if snap {
                 run.volume = volume;
                 run.modulation = modulation;
@@ -2287,8 +2323,6 @@ impl Voice {
         }
     }
 
-    /// Render `len` frames into `scratch`, a block of [`CHUNK`] a row, and
-    /// add them to the output.
     /// Play the frames the buses hold: a control tick wherever the voice's
     /// own count runs out, the frames between rendered. Returns whether
     /// the voice is over.
@@ -2298,20 +2332,21 @@ impl Voice {
         timing: Timing,
         scratch: &mut [f32],
         buses: &mut [&mut [f32]; 4],
+        copies: &mut [band::Copies],
     ) -> bool {
         let len = buses[0].len();
         let mut at = 0;
         while at < len {
             if self.to_tick == 0 {
                 self.to_tick = timing.tick as usize;
-                self.tick(state, timing, self.to_tick);
+                self.tick(state, timing, self.to_tick, copies);
                 // A slave lasts as long as its master.
                 if self.over && self.unison.role != Role::Slave {
                     return true;
                 }
             }
             let run = (len - at).min(self.to_tick);
-            self.render(state, timing, scratch, (buses, at, run));
+            self.render(state, timing, scratch, (buses, at, run), copies);
             self.to_tick -= run;
             at += run;
         }
@@ -2327,6 +2362,7 @@ impl Voice {
         timing: Timing,
         scratch: &mut [f32],
         (buses, at, len): (&mut [&mut [f32]; 4], usize, usize),
+        copies: &[band::Copies],
     ) {
         let len = len.min(CHUNK);
         let fading = self.released && !state.any_envelope();
@@ -2340,10 +2376,11 @@ impl Voice {
                 let x = run.phase + f64::from(run.fm * run.modulation);
                 let mut y = 0.0;
                 if !operator.table.is_empty() {
-                    let pos = (x - x.floor()) * TABLE as f64;
-                    let index = (pos as usize).min(TABLE - 1);
+                    let table = copies[op].table(self.band[op]).unwrap_or(&operator.table);
+                    let size = table.len() - 1;
+                    let pos = (x - x.floor()) * size as f64;
+                    let index = (pos as usize).min(size - 1);
                     let frac = (pos - index as f64) as f32;
-                    let table = &operator.table;
                     y = table[index] + (table[index + 1] - table[index]) * frac;
                 }
                 if operator.noise > 0.0 {
@@ -2498,6 +2535,8 @@ pub struct Sytrus {
     notes: u32,
     /// The chorus, delays, reverb and EQ after the voices.
     fx: fx::Effects,
+    /// Each operator's band-limited copies.
+    copies: Vec<band::Copies>,
     scratch: Vec<f32>,
     seed: u32,
 }
@@ -2512,6 +2551,7 @@ impl Default for Sytrus {
             voices: Vec::with_capacity(ROOM),
             notes: 0,
             fx: fx::Effects::default(),
+            copies: vec![band::Copies::default(); OPERATORS],
             scratch: vec![0.0; (ROWS + OPERATORS) * CHUNK],
             seed: 0x1234_5678,
         }
@@ -2524,6 +2564,18 @@ impl Sytrus {
         let state = &self.state;
         self.fx
             .build(&state.fx, &state.wheels(), self.rate, self.tempo);
+    }
+
+    /// Let every voice of a note go, and their band-limited copies.
+    fn drop_group(&mut self, group: u32) {
+        let copies = &mut self.copies;
+        self.voices.retain(|v| {
+            let keep = v.group != group;
+            if !keep {
+                v.give_back(copies);
+            }
+            keep
+        });
     }
 
     /// Let the slaves of a master that has ended go. This allocates
@@ -2539,7 +2591,7 @@ impl Sytrus {
                     .iter()
                     .any(|v| v.group == group && v.unison.role == Role::Master);
             if orphan {
-                self.voices.retain(|v| v.group != group);
+                self.drop_group(group);
             } else {
                 k += 1;
             }
@@ -2578,6 +2630,17 @@ impl Generator for Sytrus {
         self.state = State::read(bytes)?;
         self.voices.clear();
         self.build_effects();
+        // Room for the band-limited copies of the operators that make
+        // them.
+        self.copies = (0..OPERATORS)
+            .map(|op| {
+                if self.state.operators[op].band_limit {
+                    band::Copies::new()
+                } else {
+                    band::Copies::default()
+                }
+            })
+            .collect();
         Ok(())
     }
 
@@ -2623,7 +2686,7 @@ impl Generator for Sytrus {
                 break;
             }
             let oldest = self.voices[0].group;
-            self.voices.retain(|v| v.group != oldest);
+            self.drop_group(oldest);
         }
         self.notes = self.notes.wrapping_add(1);
         let timing = self.timing();
@@ -2665,9 +2728,13 @@ impl Generator for Sytrus {
             let mut ended = false;
             let sounding = self.voices.len();
             let mut buses = self.fx.buses(run);
+            let copies = &mut self.copies;
             self.voices.retain_mut(|voice| {
-                let over = voice.play(state, timing, scratch, &mut buses);
+                let over = voice.play(state, timing, scratch, &mut buses, copies);
                 ended |= over && voice.unison.role == Role::Master;
+                if over {
+                    voice.give_back(copies);
+                }
                 !over
             });
             if ended {
@@ -2716,6 +2783,9 @@ impl Generator for Sytrus {
 
     fn reset(&mut self) {
         self.voices.clear();
+        for copies in &mut self.copies {
+            copies.release_all();
+        }
         self.fx.reset(&self.state.fx, &self.state.wheels());
     }
 
@@ -3468,6 +3538,39 @@ mod tests {
         let half = play_with(64);
         let mid = partial(&half[8192..], turns * 3.0);
         assert!((mid / third - 0.5).abs() < 0.05, "{mid} {third}");
+    }
+
+    #[test]
+    fn a_band_limited_operator_leaves_out_what_would_fold_over() {
+        // A square at C9, 8372 Hz: its third harmonic, 25.1 kHz, folds to
+        // 22.9 kHz at 48 kHz unless the band limit takes it out.
+        let play_square = |limit: bool| {
+            let mut sytrus = blank();
+            let mut levels = [0f32; HARMONICS];
+            levels[0] = 1.0;
+            let operator = &mut sytrus.state.operators[0];
+            operator.table = build_table(
+                &levels,
+                &[0.0; HARMONICS],
+                [256, 0, 0, 0, 128],
+                [false; 2],
+                false,
+            );
+            operator.spectrum = band::filter(&mut operator.table, 128, false);
+            operator.band_limit = limit;
+            sytrus.copies[0] = band::Copies::new();
+            let sound = play(&mut sytrus, 108, 16_384);
+            let hz = C5 * 16.0;
+            let at = |f: f64| partial(&sound[8192..], f / f64::from(RATE));
+            let picked = sytrus.voices[0].band[0];
+            (at(hz), at(f64::from(RATE) - 3.0 * hz), picked)
+        };
+        let (first, folded, picked) = play_square(false);
+        assert_eq!(picked, band::WHOLE);
+        assert!(first > 0.5 && folded > 0.05, "{first} {folded}");
+        let (first, folded, picked) = play_square(true);
+        assert_ne!(picked, band::WHOLE);
+        assert!(first > 0.5 && folded < 1e-3, "{first} {folded}");
     }
 
     #[test]

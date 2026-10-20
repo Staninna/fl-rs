@@ -461,12 +461,12 @@ presets of versions 5..7, 229 in that directory and 252 across `Data`, are
 refused with a `Version` error, their articulator stream is another
 format). Of the 1012 states that load, 1000 are heard within the first
 2048 frames of three notes; the rest start with a silent attack. Renders operators with
-the kernel above over a 16384-sample table (section 10) without band limiting, the FM
+the kernel above over a 16384-sample table (section 10), band limited and filtered as section 11 has it, the FM
 and RM matrix, the three filters for types 0..10, every articulator's
 envelope, LFO and six maps (the unison map is read but not used), the pan
 law and the output levels; the send path goes through the effects
 (section 9). Left out, each named in `fidelity`: plucked
-operators, the comb and the phaser, the shape morph articulator, the harmonics filter wheel,
+operators, the comb and the phaser,
 the arpeggiator and portamento. Every state reports `Approximate`. The 597
 REC parameters are the host's (section 6).
 
@@ -789,6 +789,51 @@ with `0x62bb20` (`parts::glide`) over the call, by no more than
 `TAudioRenderer+0x34 x voice+0x40` (`0.001 x 44100 / SR` times the unison
 gain) a frame; the voice's first tick takes them as they are.
 
+## 11. The harmonics filter and the band limit (`0x847900`, `0x86ace0`, `0x8471d0`)
+
+`TSytrusShape` keeps two IPP real FFTs, orders 14 and 12 (`0x848980`;
+`0x617960` asks `ippsFFTGetSize_R_32f(order, flag 1, hint 2)`, so the
+forward transform is divided by N and the inverse is not), and works in
+IPP's Pack format (DC, then re/im pairs, then N/2). `0x8477f0` copies
+the operator's block into the shape object (object offset = part offset
+- 0x18) and takes four switches: half (`part+0x860`), half silent
+(`+0x861`), abs (`+0x862`) and the sigma switch at shape `+0x84b`, which
+is `part+0x868`, the copy of the global u8 0x4f6.
+
+Filter (`0x847900`, the last step of the table build `0x847df0`, with
+the filter wheel `part+0x85c` / 128):
+
+```
+X       = FFT(table, 16384) / 16384
+c       = round((float)(1e10^(w 0.35 + 0.65) - 1) x 1.6384e-6)        // 0x869c90: 0x869cf8, 0x869cfc, 0x869d00, 0x869d10; w = 1 gives 16384
+c <= 8192: X[k] = 0 for k >= c
+spectrum at shape+0x858 = X[0..2048] (the imaginary part of 2048 dropped)
+c <= 8192: 0x4f6: X[k] *= (c-1)/pi x sin(k pi / (c-1)) / k for k = 1..c-1  // Lanczos sigma
+           table = IFFT(X); every |v| < 2^-24 is 0 (0x628bc0); table[16384] = table[0]
+```
+
+Band limit (`BandLimitBtn`, the operator's switch 7 at `part+0x867`, not
+for a plucked operator): when the voice first renders the operator
+(`0x870820` calls `0x86ace0` while its table is null), with `hz =
+voice+0x368 x SR` (the frequency with the pitch articulator), `nyq =
+0x4f6 ? 22050 : SR / 2` (`0x86af00`), `d = (nyq - 18000) / 4`
+(`0x86af08`, `0x8fec10`):
+
+```
+low  = trunc((d + 18000) / hz) + 1;  high = trunc((3 d + 18000) / hz) + 1    // 0x86af10 = 3
+low > 2048: the whole table
+else: the copy for (low, high) from the operator's list (made once, shared, counted):
+      w[k] = 1 for k < low; 1 - (k - low + 1) / (high' - low + 1) for low <= k <= high' = min(high, 2048); 0 above
+      0x4f6: w[k] = (w[k] x high'/pi) sin(k pi / high') / k for k = 1..high'
+      copy = IFFT(spectrum x w, 4096), flushed, copy[4096] = copy[0]   (ippsSet, ippsVectorSlope, ippsMul_32f32fc)
+then: table size 4096, the phase and the FM depths into this operator times the new size
+```
+
+Implemented as read (`sytrus/band.rs`) with an f64 FFT where FL's is
+f32. FL keeps every copy it ever made; here each band-limited operator
+has room for 32, made on the audio thread without allocating, and a note
+that finds all 32 in use reads the one with the nearest low limit.
+
 ## Corrections
 
 - Operator `header[0]` is the phase wheel, not an output level: the voice
@@ -816,3 +861,6 @@ gain) a frame; the voice's first tick takes them as they are.
   serial, tempo. `FUN_00842100` is the decimator of the oversampling,
   not the EQ, whose kernel is `0x625db0`.
 - Main wheel 0 (REC 547) is the send's pan, `0x61e4 = v / 256`.
+- Operator articulator 5 is the plucked operator's damping, which
+  `0x86aba0` turns into the pluck's loop filter; it is no shape morph, and
+  it does nothing for an operator that is not plucked.
