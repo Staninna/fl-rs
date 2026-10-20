@@ -606,7 +606,14 @@ impl Line {
     /// Once this frame's sample is in, what was put in `back` frames
     /// before it. Until then `tap(0)` is the sample that is about to leave.
     pub(crate) fn tap(&self, back: usize) -> f32 {
-        self.samples[(self.at + back) % self.samples.len()]
+        // What `% len` gives, without a division: a tap is mostly shorter
+        // than its line.
+        let len = self.samples.len();
+        let mut at = self.at + back;
+        while at >= len {
+            at -= len;
+        }
+        self.samples[at]
     }
 
     pub(crate) fn step(&mut self) {
