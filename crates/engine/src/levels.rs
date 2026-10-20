@@ -12,7 +12,9 @@
 //! - The channel's own cutoff and resonance. How 219 `Levels` stores them
 //!   is not read, so a note's mods are its own plus tracking.
 //! - A layer's levels on its children's notes. Layer channels do not play.
-//! - Slides, which move a sounding voice's pitch tick by tick.
+//! - Slides, which move a sounding voice's levels tick by tick. The
+//!   pitch is [`crate::slide`]'s, and the pan, volume and mods a slide
+//!   moves as well are left out.
 //! - A voice that follows its channel's automation keeps the pan that
 //!   tracking gave it when it started. FL works the levels out again on
 //!   every tick.

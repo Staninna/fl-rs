@@ -9,6 +9,7 @@ use crate::generator::{Cue, Rack};
 use crate::mix::{Mixer, Told};
 use crate::sample::Sample;
 use crate::sequence::{self, Song};
+use crate::slide::Slides;
 use crate::voice::{self, Voice};
 use crate::{Curves, Error, levels};
 use model::{Channel, ChannelKind, Project};
@@ -134,6 +135,9 @@ impl Graph {
         let mut rack = Rack::default();
         rack.plugin_dir = plugin_dir.map(Path::to_path_buf);
         let mut played = BTreeSet::new();
+        // The slides of the sampler channels' notes, by channel and by
+        // the note's place in `events`.
+        let mut slides = Slides::default();
         let mut notes = 0;
         let mut len = clock.sample(song.end).min(limit);
         for note in &song.notes {
@@ -155,16 +159,29 @@ impl Graph {
                 let Some(place) = rack.place(channel, insert, timing, adjusts, curves) else {
                     continue;
                 };
+                if automation.drives_pitch(channel.index) {
+                    rack.follow_pitch(place);
+                }
+                // A slide note starts no voice: it bends the notes that
+                // sound.
+                if note.note.slide() {
+                    rack.slide(place, note, &clock);
+                    continue;
+                }
                 let levels = levels::trigger(&note.note, channel, curves);
                 // A clip on the channel's pitch moves the note as it starts.
-                let shift = levels::shift(channel)
-                    + automation.pitch_shift(channel.index, note.tick as f64);
+                let clip = automation.pitch_shift(channel.index, note.tick as f64);
+                let shift = (levels::shift(channel), clip);
                 let done = rack.cue(place, note, start, &levels, shift, &clock);
                 len = len.max(done.min(limit));
                 played.insert(insert);
                 continue;
             }
             if channel.kind != Some(ChannelKind::Sampler) || channel.enabled == Some(false) {
+                continue;
+            }
+            if note.note.slide() {
+                slides.slide(usize::from(channel.index), note, &clock);
                 continue;
             }
             let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) else {
@@ -189,7 +206,24 @@ impl Graph {
             let voice = following(voice, channel, levels.vol, levels.pan, &automation, curves);
             len = len.max(start.saturating_add(voice.frames()).min(limit));
             played.insert(insert);
+            let done = start.saturating_add(voice.frames());
+            slides.note(usize::from(channel.index), events.len(), note, done);
             events.push(Event { start, voice });
+        }
+        // A voice that slides plays at the speed each step of its slides
+        // takes it to, from where the step falls in it.
+        let mut steps = slides.steps(&clock);
+        steps.sort_by_key(|step| step.id);
+        for of_one in steps.chunk_by(|a, b| a.id == b.id) {
+            let event = &mut events[of_one[0].id];
+            let bends: Vec<_> = (of_one.iter())
+                .map(|step| {
+                    let ratio = curves.pitch_ratio(f64::from(step.cents) / 100.0);
+                    (step.at - event.start, ratio)
+                })
+                .collect();
+            event.voice = event.voice.clone().bending(bends.into());
+            len = len.max(event.start.saturating_add(event.voice.frames()).min(limit));
         }
 
         // A clip plays its channel's sample for as long as the item is, at
@@ -268,7 +302,7 @@ impl Graph {
                 hosted.generator.set_sample(&path, file);
             }
         }
-        let cues = rack.cues();
+        let cues = rack.cues(&clock);
         let approximated_generators = rack.approximated();
         mixer.host(rack.hosted);
         mixer.set_tempo(automation.tempo_at(0.0).unwrap_or(tempo));

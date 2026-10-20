@@ -4,7 +4,7 @@
 //! that make up for the plugins that are late.
 
 use crate::eq::InsertEq;
-use crate::generator::{Cue, Hosted as Generator, Signal};
+use crate::generator::{Cue, Hosted as Generator};
 use crate::voice::Voice;
 use crate::{Curves, Error, pool};
 use model::{InsertMix, Project, Slot};
@@ -1316,26 +1316,50 @@ impl Mixer {
         self.generators.len()
     }
 
-    /// Hand a generator its note on or its note off, for the first frame
-    /// of the next block.
+    /// Hand a generator its note on, its note off or a slide, for the
+    /// first frame of the next block.
     pub fn cue(&mut self, cue: &Cue) {
         let at = self.cued.get(cue.generator).copied();
         let Some(hosted) = at.and_then(|at| self.generators.get_mut(at)) else {
             return;
         };
-        match cue.signal {
-            Signal::On(note) => hosted.generator.note_on(note),
-            Signal::Off(voice) => {
-                hosted.generator.note_off(voice);
-                self.tail = self.tail.max(hosted.generator.tail());
+        if hosted.hear(cue) {
+            self.tail = self.tail.max(hosted.generator.tail());
+        }
+    }
+
+    /// Whether a generator follows a clip on its channel's pitch.
+    pub fn bending(&self) -> bool {
+        let follows = |hosted: &Generator| hosted.bend.as_ref().is_some_and(|b| b.follows);
+        self.generators.iter().any(follows)
+    }
+
+    /// Tell the generators that follow a clip on their channel's pitch
+    /// what `shift` says the clip has moved it by, in cents, at output
+    /// sample `at`.
+    pub fn bend(&mut self, at: usize, shift: impl Fn(u16) -> f32) {
+        for hosted in &mut self.generators {
+            if hosted.bend.as_ref().is_some_and(|b| b.follows) {
+                hosted.bend(at, shift(hosted.channel));
             }
         }
+    }
+
+    /// Whether `shift` moves the pitch of a generator that follows a clip
+    /// on its channel's pitch from what it was last told.
+    pub fn moves(&self, shift: impl Fn(u16) -> f32) -> bool {
+        let moved = |hosted: &Generator| {
+            let bend = hosted.bend.as_ref();
+            bend.is_some_and(|b| b.follows && b.shift() != shift(hosted.channel))
+        };
+        self.generators.iter().any(moved)
     }
 
     /// Let go of every note the generators hold. They play their tails.
     pub fn release(&mut self) {
         for hosted in &mut self.generators {
             hosted.generator.all_notes_off();
+            hosted.forget();
             self.tail = self.tail.max(hosted.generator.tail());
         }
     }
@@ -1344,6 +1368,7 @@ impl Mixer {
     pub fn cut(&mut self) {
         for hosted in &mut self.generators {
             hosted.generator.reset();
+            hosted.forget();
         }
         self.tail = 0;
     }

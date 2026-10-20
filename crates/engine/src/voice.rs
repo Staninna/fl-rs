@@ -111,6 +111,15 @@ pub(crate) struct Voice {
     gains: (f32, f32),
     /// Set for a voice on a channel whose volume or pan a clip drives.
     follow: Option<Follow>,
+    /// What automation and the note's slides make of the speed it was made
+    /// with, which `step` is the product of.
+    automated: f64,
+    slid: f64,
+    /// The note's slides: from its output sample `.0` on it plays at `.1`
+    /// times the speed it was made with, before automation. The next is at
+    /// `next_bend`.
+    bends: Option<Arc<[(usize, f64)]>>,
+    next_bend: usize,
 }
 
 impl Voice {
@@ -137,6 +146,10 @@ impl Voice {
             held,
             gains,
             follow: None,
+            automated: 1.0,
+            slid: 1.0,
+            bends: None,
+            next_bend: 0,
         }
     }
 
@@ -146,18 +159,46 @@ impl Voice {
     /// as it would at the slowest speed, and ends early where it runs off
     /// the sample.
     pub fn following(mut self, follow: Follow) -> Self {
-        if let Some(slowest) = follow.slowest {
-            let len = self.sample.left.len() as f64;
-            let left = if self.step < 0.0 {
-                self.origin + 1.0
-            } else {
-                len - self.origin
-            };
-            let most = (left / (self.step.abs() * slowest.min(1.0))).ceil() as usize;
-            self.frames = self.held.map_or(most, |held| held.min(most));
-        }
         self.follow = Some(follow);
+        self.lengthen();
         self
+    }
+
+    /// The note slides: from output sample `at` of the voice on it plays at
+    /// `ratio` times the speed it was made with, for every `(at, ratio)` of
+    /// `bends`, which are in order. It lasts as long as it would at the
+    /// slowest of them, and ends early where it runs off the sample. Call
+    /// it last, on a new voice.
+    pub fn bending(mut self, bends: Arc<[(usize, f64)]>) -> Self {
+        self.bends = Some(bends);
+        self.lengthen();
+        self
+    }
+
+    /// Whether the voice's speed may move, so that it knows its end only
+    /// when it gets there.
+    fn pitched(&self) -> bool {
+        self.bends.is_some() || self.follow.is_some_and(|f| f.slowest.is_some())
+    }
+
+    /// Make a voice whose speed may move as long as it lasts at the
+    /// slowest it can go.
+    fn lengthen(&mut self) {
+        if !self.pitched() {
+            return;
+        }
+        let automated = self.follow.and_then(|f| f.slowest).unwrap_or(1.0);
+        let bends = self.bends.as_deref().unwrap_or(&[]);
+        let slid = bends.iter().map(|b| b.1).fold(1.0, f64::min);
+        let len = self.sample.left.len() as f64;
+        let left = if self.step < 0.0 {
+            self.origin + 1.0
+        } else {
+            len - self.origin
+        };
+        let slowest = automated.min(1.0) * slid;
+        let most = (left / (self.step.abs() * slowest)).ceil() as usize;
+        self.frames = self.held.map_or(most, |held| held.min(most));
     }
 
     pub fn follows(&self) -> Option<Follow> {
@@ -172,7 +213,14 @@ impl Voice {
     /// Play at `ratio` times the speed the voice was made with, from the
     /// next sample on. The voice goes on from where it is in the sample.
     pub fn set_pitch(&mut self, ratio: f64) {
-        let step = self.made * ratio;
+        self.automated = ratio;
+        self.retune();
+    }
+
+    /// Play at what automation and the slides make of the speed the voice
+    /// was made with, from the next sample on.
+    fn retune(&mut self) {
+        let step = self.made * self.automated * self.slid;
         if step != self.step {
             self.origin += (self.done - self.since) as f64 * self.step;
             self.since = self.done;
@@ -211,9 +259,37 @@ impl Voice {
     /// Add the voice's next samples to a bus and move the voice on by as
     /// many. A voice that ends inside the bus leaves the rest alone.
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let Some(bends) = self.bends.clone() else {
+            self.render_run(left, right);
+            return;
+        };
+        let len = left.len().min(right.len());
+        let mut at = 0;
+        while at < len && !self.finished() {
+            while let Some(&(from, ratio)) = bends.get(self.next_bend) {
+                if from > self.done {
+                    break;
+                }
+                self.slid = ratio;
+                self.retune();
+                self.next_bend += 1;
+            }
+            let next = bends.get(self.next_bend).map_or(usize::MAX, |b| b.0);
+            let run = (len - at).min(next - self.done);
+            let before = self.done;
+            self.render_run(&mut left[at..at + run], &mut right[at..at + run]);
+            if self.done == before {
+                break;
+            }
+            at += self.done - before;
+        }
+    }
+
+    /// [`Voice::render`] at the speed the voice has now.
+    fn render_run(&mut self, left: &mut [f32], right: &mut [f32]) {
         let count = (self.frames - self.done).min(left.len()).min(right.len());
         let len = self.sample.left.len() as f64;
-        let pitched = self.follow.is_some_and(|f| f.slowest.is_some());
+        let pitched = self.pitched();
         let outs = left[..count].iter_mut().zip(&mut right[..count]);
         for (i, (l, r)) in outs.enumerate() {
             // A product and not a running sum, so the position does not

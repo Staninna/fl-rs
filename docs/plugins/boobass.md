@@ -189,6 +189,10 @@ The final `* 3` and the `0.5` pan smoothing are read from the listing (`asm`).
 
 ## Corrections from the implementation (crates/plugins/src/boobass.rs)
 
+- The per-block `FUN_180003f90` is run when the host moves the note's
+  pitch (`Generator::set_note_pitch`, for a slide or a clip on the
+  channel's pitch), which gives the same steps from the next block on: the
+  pitch does not move between.
 - Samples are raw 16-bit PCM in `.data` of `BooBass_Eng_x64.dll`, behind pointer tables at RVA 0xcb920 (attacks) and 0xcb980 (loops); each second pointer is a byte count, not an end.
 - The saturator is `sin(x·π/2)`, not tanh. The slew limit is `(attack progress + 0.0328)·44100/SR`, not pitch-dependent.
 - The level table uses `v·48` with entry 0 = 0. The doc's trims belong to the attacks; loops have their own (4, 3.5, 3, 3.25, 3.5, 3 dB), negated. `+0x104` is `1.5 − mid`.
