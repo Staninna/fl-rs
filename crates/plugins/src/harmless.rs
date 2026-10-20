@@ -2164,6 +2164,9 @@ impl Harmless {
         let d = &*self.d;
         let p = &self.state.params;
         let tick = d.tick as f32;
+        // Below quality 2 the curves are read at the point below
+        // (`FUN_0077c450` sets each table's quality).
+        let nearest = self.state.selectors[6] < 2;
         voice.step_slide();
         // The filter envelope.
         voice.fenv_pos += voice.fenv_inc;
@@ -2279,13 +2282,13 @@ impl Harmless {
         if p[55] == 0 {
             let offset = self.filter.centre - fc * w;
             for k in 0..n {
-                voice.levels[k] *= self.filter.clamped(voice.log2_hz[k], w, offset);
+                voice.levels[k] *= clamped(&self.filter, nearest, voice.log2_hz[k], w, offset);
             }
         } else {
             let scale = w * 0.9 / cut_hz;
             let offset = self.filter.centre - w * 0.9;
             for k in 0..n {
-                voice.levels[k] *= self.filter.clamped(voice.hz[k], scale, offset);
+                voice.levels[k] *= clamped(&self.filter, nearest, voice.hz[k], scale, offset);
             }
         }
         if p[64] > 0 {
@@ -2330,13 +2333,17 @@ impl Harmless {
             let table = &self.resonance;
             for k in 0..n {
                 let shape = if p[60] == 0 {
-                    table.clamped(
+                    clamped(
+                        table,
+                        nearest,
                         voice.log2_hz[k],
                         scale,
                         table.centre - (fc + d.res_offset) * scale,
                     )
                 } else {
-                    table.clamped(
+                    clamped(
+                        table,
+                        nearest,
                         voice.hz[k],
                         scale,
                         table.centre - cut_hz * d.res_ratio * scale,
@@ -2368,16 +2375,16 @@ impl Harmless {
                 let shape = match p[72] {
                     0 => {
                         let scale = octaves.exp2() as f32 * 12.0 * table.period;
-                        table.wrapped(voice.log2_hz[k], scale, offset - kt * scale)
+                        wrapped(table, nearest, voice.log2_hz[k], scale, offset - kt * scale)
                     }
                     1 => {
                         let scale = octaves.exp2() as f32 * 12.0 * 0.005 * table.period;
-                        table.wrapped(voice.hz[k], scale, offset - kt * len)
+                        wrapped(table, nearest, voice.hz[k], scale, offset - kt * len)
                     }
                     _ => {
                         let width = d.phaser_width + lfo * d.phaser_width_lfo;
                         let scale = (2.0 - width) * table.period / voice.f0_hz;
-                        table.wrapped(voice.hz[k], scale, offset - kt * len)
+                        wrapped(table, nearest, voice.hz[k], scale, offset - kt * len)
                     }
                 };
                 if shift {
@@ -2787,6 +2794,28 @@ impl Voice {
 /// A partial's weight by its frequency: nothing under 16 Hz or over 17
 /// kHz, squared fades from 16 to 32 Hz and from 16 to 17 kHz
 /// (`FUN_007453c0` and the loop after it in the voice).
+/// A curve at `x * scale + offset`, the first or last point outside it
+/// (`FUN_0077c540`): between the two points either side, or with
+/// `nearest` the point below (`FUN_0077c470`).
+fn clamped(table: &ShapeTable, nearest: bool, x: f32, scale: f32, offset: f32) -> f32 {
+    if !nearest {
+        return table.clamped(x, scale, offset);
+    }
+    let at = (x * scale + offset).max(0.0).min((table.len() - 1) as f32);
+    table.get(at as usize)
+}
+
+/// A curve at `x * scale + offset` read round and round (`FUN_0077c760`):
+/// between the two points either side, or with `nearest` the point toward
+/// 0 (`FUN_0077c690`).
+fn wrapped(table: &ShapeTable, nearest: bool, x: f32, scale: f32, offset: f32) -> f32 {
+    if !nearest {
+        return table.wrapped(x, scale, offset);
+    }
+    let i = ((x * scale + offset) as i32) & (table.len() as i32 - 1);
+    table.get(i as usize)
+}
+
 fn alias_weight(hz: f32) -> f32 {
     if hz > 16_000.0 {
         if hz > 17_000.0 {
@@ -3049,8 +3078,6 @@ impl Generator for Harmless {
     fn fidelity(&self) -> Fidelity {
         if self.missing_compression {
             Fidelity::Approximate("Harmless without its compression preset")
-        } else if self.state.selectors[6] < 2 {
-            Fidelity::Approximate("Harmless curve lookups at quality 0 and 1")
         } else {
             Fidelity::Exact
         }
@@ -3110,6 +3137,23 @@ mod tests {
         // The main volume at its default is 3/4.
         let plugin = Harmless::default();
         assert!((plugin.d.main_volume - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn below_quality_2_a_curve_is_read_at_the_point_below() {
+        let table = ShapeTable::new(8, 0.0, 1.0, 0.0, |i| i as f64 * 10.0);
+        // Between points 2 and 3, a quarter of the way.
+        assert_eq!(clamped(&table, false, 2.25, 1.0, 0.0), 22.5);
+        assert_eq!(clamped(&table, true, 2.25, 1.0, 0.0), 20.0);
+        assert_eq!(clamped(&table, true, 2.99, 1.0, 0.0), 20.0);
+        // The ends outside.
+        assert_eq!(clamped(&table, true, -3.0, 1.0, 0.0), 0.0);
+        assert_eq!(clamped(&table, true, 30.0, 1.0, 0.0), 70.0);
+        // Round and round: 10.5 is point 2, and -1.5 truncates to -1,
+        // which is point 7.
+        assert_eq!(wrapped(&table, true, 10.5, 1.0, 0.0), 20.0);
+        assert_eq!(wrapped(&table, true, -1.5, 1.0, 0.0), 70.0);
+        assert_eq!(wrapped(&table, false, 10.5, 1.0, 0.0), 25.0);
     }
 
     #[test]
