@@ -5,11 +5,12 @@
 
 use crate::generator::{Cue, Hosted as Generator, Signal};
 use crate::voice::Voice;
-use crate::{Curves, Error};
+use crate::{Curves, Error, pool};
 use model::{InsertMix, Project, Slot};
 use plugins::{Effect, Fidelity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Mutex;
 
 /// The samples a bus holds, and the most [`Mixer::process`] takes at once.
 pub(crate) const BLOCK: usize = 512;
@@ -354,6 +355,25 @@ struct Strip {
     /// The loudest sample the insert has put out on the left and on the
     /// right since [`Mixer::take_peaks`] last asked.
     peak: (f32, f32),
+    /// The strip's place in the order the routes were walked in, which is
+    /// the order its senders' sends add up in.
+    rank: usize,
+    /// The places in [`Mixer::strips`] of the strips that send here, by
+    /// their [`Strip::rank`].
+    incoming: Vec<usize>,
+    /// The generators that play into the insert: where they start in
+    /// [`Mixer::generators`] and how many there are.
+    generators: (usize, usize),
+    /// What the voices and generators of the insert played, when that is
+    /// read late, and a slot's input for a slot whose mix level is not all
+    /// the way up. [`BLOCK`] long.
+    dry_left: Vec<f32>,
+    dry_right: Vec<f32>,
+    /// What one generator puts out, before its channel's volume and pan.
+    made_left: Vec<f32>,
+    made_right: Vec<f32>,
+    /// How long the insert's generators and slots took.
+    spent: Spent,
 }
 
 impl Strip {
@@ -388,20 +408,18 @@ fn arrivals(strips: &mut [Strip], chain: impl Fn(&Strip) -> usize) {
     }
 }
 
-/// Add to `left` and `right` what the generators that play into an insert
-/// put out, each at the gains of its channel. `made` is as long as the
-/// block and holds one generator's output at a time.
+/// Add to `left` and `right` what `generators` put out, each at the gains
+/// of its channel. `made` is as long as the block and holds one
+/// generator's output at a time.
 fn generate(
     generators: &mut [Generator],
-    insert: u16,
     made: (&mut [f32], &mut [f32]),
     left: &mut [f32],
     right: &mut [f32],
     spent: &mut Spent,
 ) {
     let (made_left, made_right) = made;
-    let playing = generators.iter_mut();
-    for hosted in playing.filter(|hosted| hosted.insert == insert) {
+    for hosted in generators {
         made_left.fill(0.0);
         made_right.fill(0.0);
         let channel = hosted.channel;
@@ -416,6 +434,176 @@ fn generate(
             *out += v * hosted.gains.1;
         }
     }
+}
+
+/// The fewest frames a block has for its strips to be mixed on the worker
+/// threads.
+const PARALLEL_FRAMES: usize = 64;
+
+/// The strips of a run, each with the generators that play into it.
+struct Pieces<'a> {
+    strips: std::slice::IterMut<'a, Strip>,
+    /// The generators of the strips not handed out yet, in strip order.
+    generators: &'a mut [Generator],
+}
+
+impl<'a> Iterator for Pieces<'a> {
+    type Item = (&'a mut Strip, &'a mut [Generator]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let strip = self.strips.next()?;
+        let generators = std::mem::take(&mut self.generators);
+        let (mine, rest) = generators.split_at_mut(strip.generators.1.min(generators.len()));
+        self.generators = rest;
+        Some((strip, mine))
+    }
+}
+
+/// Bring into the bus of the strip at `at` what comes to it before its own
+/// plugins run: what the strips before it send and their plugins' second
+/// outputs, in the order of their ranks and each sender's second outputs
+/// first, then its voices. Voices whose sound is read late go to the
+/// strip's dry buffer instead, for [`mix_strip`] to put through its line.
+fn gather(strips: &mut [Strip], at: usize, voices: &mut [Voice], len: usize) {
+    let (senders, rest) = strips.split_at_mut(at);
+    let strip = &mut rest[0];
+    for &from in &strip.incoming {
+        let sender = &mut senders[from];
+        let (to_left, to_right) = (&mut strip.left[..len], &mut strip.right[..len]);
+        // The second outputs come in as their slots ran, which was before
+        // the sender's sends.
+        for aux in sender
+            .effects
+            .iter_mut()
+            .filter_map(|hosted| hosted.aux.as_mut())
+        {
+            if aux.dest != at {
+                continue;
+            }
+            if !aux.tap.direct() {
+                aux.line.add(&mut aux.tap, 1.0, to_left, to_right);
+                continue;
+            }
+            for (out, v) in to_left.iter_mut().zip(&aux.left[..len]) {
+                *out += v;
+            }
+            for (out, v) in to_right.iter_mut().zip(&aux.right[..len]) {
+                *out += v;
+            }
+        }
+        let Strip {
+            sends,
+            sent,
+            left: bus_left,
+            right: bus_right,
+            ..
+        } = sender;
+        let (bus_left, bus_right) = (&bus_left[..len], &bus_right[..len]);
+        for send in sends.iter_mut().filter(|send| send.dest == at) {
+            // The sidechain input is read where the send is, through a tap
+            // of its own so that a fade moves on once.
+            if let Some(side) = send.side.and_then(|side| strip.side.get_mut(side)) {
+                let (side_left, side_right) = (&mut side.left[..len], &mut side.right[..len]);
+                if send.tap.direct() {
+                    side_left.copy_from_slice(bus_left);
+                    side_right.copy_from_slice(bus_right);
+                } else {
+                    let mut tap = send.tap;
+                    sent.add(&mut tap, 1.0, side_left, side_right);
+                }
+            }
+            if !send.tap.direct() {
+                sent.add(&mut send.tap, send.gain, to_left, to_right);
+                continue;
+            }
+            for (out, v) in to_left.iter_mut().zip(bus_left) {
+                *out += v * send.gain;
+            }
+            for (out, v) in to_right.iter_mut().zip(bus_right) {
+                *out += v * send.gain;
+            }
+        }
+    }
+    // What was sent here is in the bus already. The voices go on top in
+    // the order they started, and the generators after them, by way of
+    // their line when the sends can come in late.
+    let playing = voices.iter_mut().filter(|v| v.insert == strip.index);
+    if strip.played.reach() == 0 {
+        let (bus_left, bus_right) = (&mut strip.left[..len], &mut strip.right[..len]);
+        for voice in playing {
+            voice.render(bus_left, bus_right);
+        }
+    } else {
+        let (dry_left, dry_right) = (&mut strip.dry_left[..len], &mut strip.dry_right[..len]);
+        dry_left.fill(0.0);
+        dry_right.fill(0.0);
+        for voice in playing {
+            voice.render(dry_left, dry_right);
+        }
+    }
+}
+
+/// Mix a block of a strip whose bus [`gather`] has filled: add its
+/// generators, run the bus through its slots, put its volume and pan on and
+/// keep what it puts out for the strips it sends to. Nothing here reaches
+/// outside the strip, so the strips of a run can be mixed side by side.
+fn mix_strip(strip: &mut Strip, generators: &mut [Generator], len: usize) {
+    let (bus_left, bus_right) = (&mut strip.left[..len], &mut strip.right[..len]);
+    let (dry_left, dry_right) = (&mut strip.dry_left[..len], &mut strip.dry_right[..len]);
+    let made = (&mut strip.made_left[..len], &mut strip.made_right[..len]);
+    let spent = &mut strip.spent;
+    if strip.played.reach() == 0 {
+        generate(generators, made, bus_left, bus_right, spent);
+    } else {
+        generate(generators, made, dry_left, dry_right, spent);
+        strip.played.write(dry_left, dry_right);
+        strip
+            .played
+            .add(&mut strip.played_tap, 1.0, bus_left, bus_right);
+    }
+    if !strip.enabled {
+        return;
+    }
+    for slot in &mut strip.effects {
+        let dry = (&mut *dry_left, &mut *dry_right);
+        let part = Part::Slot {
+            insert: strip.index,
+            slot: slot.slot,
+        };
+        let run = spent.time(|| part, || slot.play(&strip.side, bus_left, bus_right, dry));
+        // The plugin's second output goes into the bus of its insert, with
+        // nothing for the frames the plugin sat out. [`gather`] adds it.
+        let Some(aux) = &mut slot.aux else {
+            continue;
+        };
+        let (aux_left, aux_right) = (&mut aux.left[..len], &mut aux.right[..len]);
+        aux_left.fill(0.0);
+        aux_right.fill(0.0);
+        if let Some((made_left, made_right)) = slot.effect.aux_output() {
+            let made = run.min(made_left.len()).min(made_right.len());
+            aux_left[..made].copy_from_slice(&made_left[..made]);
+            aux_right[..made].copy_from_slice(&made_right[..made]);
+        }
+        aux.line.write(aux_left, aux_right);
+    }
+    let (gain_left, gain_right) = (strip.volume * strip.pan.0, strip.volume * strip.pan.1);
+    if strip.cross == (0.0, 0.0) {
+        bus_left.iter_mut().for_each(|v| *v *= gain_left);
+        bus_right.iter_mut().for_each(|v| *v *= gain_right);
+    } else {
+        let from_right = strip.volume * strip.cross.0;
+        let from_left = strip.volume * strip.cross.1;
+        for (l, r) in bus_left.iter_mut().zip(bus_right.iter_mut()) {
+            let (left, right) = (*l, *r);
+            *l = left * gain_left + right * from_right;
+            *r = right * gain_right + left * from_left;
+        }
+    }
+    strip.peak = (
+        raised(strip.peak.0, bus_left),
+        raised(strip.peak.1, bus_right),
+    );
+    strip.sent.write(bus_left, bus_right);
 }
 
 /// A peak, lifted to the loudest sample of a block when that is louder.
@@ -542,6 +730,15 @@ fn visit(
 /// tick: that FL leaves it out is inferred from the plugin putting its LFO
 /// back in step when it is switched on.
 ///
+/// The strips sit in runs that send nothing to each other, the strips one
+/// step from a strip with no route in first. A block brings into every
+/// strip of a run what its senders put out and plays its voices, then
+/// mixes the strips of the run side by side on the process's worker
+/// threads ([`crate::pool`]): their generators, their slots, their volume
+/// and pan. A strip's senders add into its bus in the order the routes
+/// were walked in, as they would one strip at a time, so the output is the
+/// same to the bit with any number of threads.
+///
 /// Stereo separation, the EQ, polarity and the left-right swap are not
 /// applied.
 pub(crate) struct Mixer {
@@ -556,19 +753,21 @@ pub(crate) struct Mixer {
     /// Whether a block has been mixed. Until one has, a tap moves at once:
     /// there is nothing to fade from.
     started: bool,
-    /// A slot's input for the block being mixed, [`BLOCK`] long, kept for
-    /// a slot whose mix level is not all the way up.
-    dry_left: Vec<f32>,
-    dry_right: Vec<f32>,
-    /// The generators of the plugin channels the engine hosts, in the
-    /// order their first notes come.
+    /// The generators of the plugin channels the engine hosts, by the
+    /// place of the strip they play into and, for one strip, in the order
+    /// their first notes come.
     generators: Vec<Generator>,
+    /// Where each generator went in `generators`, by its place in the list
+    /// [`Mixer::host`] was handed, which is what a [`Cue`] names.
+    cued: Vec<usize>,
+    /// The strips in runs that can be mixed side by side, as the first
+    /// place and the one past the last: no strip in a run sends to another
+    /// in it, so each run needs only the ones before it.
+    waves: Vec<(usize, usize)>,
+    /// The places of the strips by their [`Strip::rank`].
+    ranked: Vec<usize>,
     /// How long each generator and slot took in the engine's last call.
     pub(crate) spent: Spent,
-    /// What one generator puts out for the block being mixed, [`BLOCK`]
-    /// long, before its channel's volume and pan.
-    made_left: Vec<f32>,
-    made_right: Vec<f32>,
     /// The frames the generators may still sound for with every note let
     /// go: the longest tail of a note off that is not played out.
     tail: usize,
@@ -735,6 +934,8 @@ impl Mixer {
         // the insert each plugin's second output goes to.
         let mut sends: Vec<Vec<(u16, f32)>> = Vec::new();
         let mut seconds: Vec<Vec<Option<u16>>> = Vec::new();
+        // Every route of each strip, heard or not, for the ranks.
+        let mut routes_out: Vec<Vec<u16>> = Vec::new();
         for (index, destinations) in routes.order {
             if !reached.contains(&index) {
                 continue;
@@ -749,6 +950,7 @@ impl Mixer {
                 second_output(number, &destinations).filter(|_| enabled)
             };
             let second: Vec<Option<u16>> = effects.iter().map(second).collect();
+            routes_out.push(destinations.clone());
             if enabled {
                 for dest in destinations {
                     let level = strip.send_level_raw(dest).unwrap_or(0);
@@ -785,8 +987,40 @@ impl Mixer {
                 sent: Line::default(),
                 side: Vec::new(),
                 peak: (0.0, 0.0),
+                rank: strips.len(),
+                incoming: Vec::new(),
+                generators: (0, 0),
+                dry_left: vec![0.0; BLOCK],
+                dry_right: vec![0.0; BLOCK],
+                made_left: vec![0.0; BLOCK],
+                made_right: vec![0.0; BLOCK],
+                spent: Spent::default(),
             });
         }
+        // Each strip goes after every strip on a route to it, as many
+        // steps from a strip with no route in as the longest way there,
+        // and in walk order among the strips that many steps in: then the
+        // strips of one step can be mixed side by side. Every route counts,
+        // the ones at level 0 too, since a sidechain input may ride one.
+        let walked: BTreeMap<u16, usize> =
+            strips.iter().map(|strip| strip.index).zip(0..).collect();
+        let mut steps = vec![0; strips.len()];
+        for (at, destinations) in routes_out.iter().enumerate() {
+            for dest in destinations.iter().filter_map(|dest| walked.get(dest)) {
+                steps[*dest] = steps[*dest].max(steps[at] + 1);
+            }
+        }
+        let mut stepped: Vec<_> = steps
+            .into_iter()
+            .zip(strips)
+            .zip(sends.into_iter().zip(seconds))
+            .collect();
+        stepped.sort_by_key(|((step, _), _)| *step);
+        let (strips, (sends, seconds)): (Vec<Strip>, (Vec<_>, Vec<_>)) = stepped
+            .into_iter()
+            .map(|((_, strip), wired)| (strip, wired))
+            .unzip();
+        let mut strips = strips;
         let places: BTreeMap<u16, usize> =
             strips.iter().map(|strip| strip.index).zip(0..).collect();
         let place = |index: u16| places.get(&index).copied();
@@ -883,12 +1117,11 @@ impl Mixer {
             main: curves.insert_gain(project.main_volume_raw()),
             tempo,
             started: false,
-            dry_left: vec![0.0; BLOCK],
-            dry_right: vec![0.0; BLOCK],
             generators: Vec::new(),
+            cued: Vec::new(),
+            waves: Vec::new(),
+            ranked: Vec::new(),
             spent: Spent::default(),
-            made_left: vec![0.0; BLOCK],
-            made_right: vec![0.0; BLOCK],
             tail: 0,
             hosted_slots,
             unhosted_slots,
@@ -896,8 +1129,52 @@ impl Mixer {
             sidechain_routes,
             sidechain_slots,
         };
+        mixer.wire();
         mixer.lay_lines();
         Ok(mixer)
+    }
+
+    /// Work out what the strips' places give: who sends to each strip, the
+    /// runs of strips that can be mixed side by side, and the strips by
+    /// rank. Every destination comes after its sender.
+    fn wire(&mut self) {
+        let mut ranked: Vec<usize> = (0..self.strips.len()).collect();
+        ranked.sort_by_key(|at| self.strips[*at].rank);
+        for strip in &mut self.strips {
+            strip.incoming.clear();
+        }
+        for &at in &ranked {
+            let strip = &self.strips[at];
+            let auxes = strip
+                .effects
+                .iter()
+                .filter_map(|hosted| hosted.aux.as_ref());
+            let dests: Vec<usize> = strip
+                .sends
+                .iter()
+                .map(|send| send.dest)
+                .chain(auxes.map(|aux| aux.dest))
+                .collect();
+            for dest in dests {
+                assert!(dest > at, "a strip sends to one before it");
+                let incoming = &mut self.strips[dest].incoming;
+                if !incoming.contains(&at) {
+                    incoming.push(at);
+                }
+            }
+        }
+        self.waves.clear();
+        let mut start = 0;
+        for at in 0..self.strips.len() {
+            if self.strips[at].incoming.iter().any(|from| *from >= start) {
+                self.waves.push((start, at));
+                start = at;
+            }
+        }
+        if start < self.strips.len() {
+            self.waves.push((start, self.strips.len()));
+        }
+        self.ranked = ranked;
     }
 
     /// Give every strip the delay lines its voices, its sends and its
@@ -971,7 +1248,27 @@ impl Mixer {
     /// Take the generators of the song's plugin channels. Each plays into
     /// an insert that was among the `played` the mixer was built with.
     pub fn host(&mut self, generators: Vec<Generator>) {
-        self.generators = generators;
+        let strips = &self.strips;
+        let place = |insert: u16| strips.iter().position(|strip| strip.index == insert);
+        let mut placed: Vec<(usize, usize, Generator)> = generators
+            .into_iter()
+            .enumerate()
+            .map(|(cued, hosted)| (place(hosted.insert).unwrap_or(usize::MAX), cued, hosted))
+            .collect();
+        placed.sort_by_key(|(at, cued, _)| (*at, *cued));
+        self.cued = vec![0; placed.len()];
+        for (now, (_, cued, _)) in placed.iter().enumerate() {
+            self.cued[*cued] = now;
+        }
+        for (at, strip) in self.strips.iter_mut().enumerate() {
+            let first = placed.partition_point(|(place, _, _)| *place < at);
+            let count = placed[first..]
+                .iter()
+                .take_while(|(place, _, _)| *place == at)
+                .count();
+            strip.generators = (first, count);
+        }
+        self.generators = placed.into_iter().map(|(_, _, hosted)| hosted).collect();
     }
 
     /// How many generators the mixer hosts.
@@ -982,7 +1279,8 @@ impl Mixer {
     /// Hand a generator its note on or its note off, for the first frame
     /// of the next block.
     pub fn cue(&mut self, cue: &Cue) {
-        let Some(hosted) = self.generators.get_mut(cue.generator) else {
+        let at = self.cued.get(cue.generator).copied();
+        let Some(hosted) = at.and_then(|at| self.generators.get_mut(at)) else {
             return;
         };
         match cue.signal {
@@ -1165,7 +1463,11 @@ impl Mixer {
     /// is.
     pub fn tick(&mut self, tick: u64, mut each: impl FnMut(u16, u8, &[f32])) {
         let tempo = self.tempo;
-        for strip in self.strips.iter_mut().filter(|strip| strip.enabled) {
+        for &at in &self.ranked {
+            let strip = &mut self.strips[at];
+            if !strip.enabled {
+                continue;
+            }
             let controllers = strip.effects.iter_mut();
             for hosted in controllers.filter(|hosted| hosted.ticks && hosted.enabled) {
                 hosted.effect.tick(tick, tempo);
@@ -1182,7 +1484,8 @@ impl Mixer {
     /// volume and pan, and for the master in front of the main volume. An
     /// insert that is switched off puts out nothing.
     pub fn take_peaks(&mut self, mut each: impl FnMut(u16, (f32, f32))) {
-        for strip in &mut self.strips {
+        for &at in &self.ranked {
+            let strip = &mut self.strips[at];
             each(strip.index, std::mem::take(&mut strip.peak));
         }
     }
@@ -1202,115 +1505,54 @@ impl Mixer {
                 side.right[..len].fill(0.0);
             }
         }
-        for at in 0..self.strips.len() {
-            let (senders, later) = self.strips.split_at_mut(at + 1);
-            let strip = &mut senders[at];
-            let (bus_left, bus_right) = (&mut strip.left[..len], &mut strip.right[..len]);
-            let (dry_left, dry_right) = (&mut self.dry_left[..len], &mut self.dry_right[..len]);
-            let made = (&mut self.made_left[..len], &mut self.made_right[..len]);
-            let generators = &mut self.generators;
-            let spent = &mut self.spent;
-            // What was sent here is in the bus already. The voices go on
-            // top in the order they started and the generators after
-            // them, by way of their line when the sends can come in late.
-            let playing = voices.iter_mut().filter(|v| v.insert == strip.index);
-            if strip.played.reach() == 0 {
-                for voice in playing {
-                    voice.render(bus_left, bus_right);
-                }
-                generate(generators, strip.index, made, bus_left, bus_right, spent);
-            } else {
-                dry_left.fill(0.0);
-                dry_right.fill(0.0);
-                for voice in playing {
-                    voice.render(dry_left, dry_right);
-                }
-                generate(generators, strip.index, made, dry_left, dry_right, spent);
-                strip.played.write(dry_left, dry_right);
-                let tap = &mut strip.played_tap;
-                strip.played.add(tap, 1.0, bus_left, bus_right);
+        // Too short a block costs more to share out than it saves.
+        let pool = (len >= PARALLEL_FRAMES)
+            .then(pool::shared)
+            .filter(|pool| pool.workers() > 0);
+        for &(start, end) in &self.waves {
+            for at in start..end {
+                gather(&mut self.strips, at, voices, len);
             }
-            if !strip.enabled {
-                continue;
-            }
-            for slot in &mut strip.effects {
-                let dry = (&mut *dry_left, &mut *dry_right);
-                let part = Part::Slot {
-                    insert: strip.index,
-                    slot: slot.slot,
-                };
-                let run = spent.time(|| part, || slot.play(&strip.side, bus_left, bus_right, dry));
-                // The plugin's second output goes into the bus of its
-                // insert, with nothing for the frames the plugin sat out.
-                let Some(aux) = &mut slot.aux else {
-                    continue;
-                };
-                let (aux_left, aux_right) = (&mut aux.left[..len], &mut aux.right[..len]);
-                aux_left.fill(0.0);
-                aux_right.fill(0.0);
-                if let Some((made_left, made_right)) = slot.effect.aux_output() {
-                    let made = run.min(made_left.len()).min(made_right.len());
-                    aux_left[..made].copy_from_slice(&made_left[..made]);
-                    aux_right[..made].copy_from_slice(&made_right[..made]);
+            let first = self.strips[start].generators.0;
+            let last = self.strips[start..end]
+                .iter()
+                .map(|strip| strip.generators.0 + strip.generators.1)
+                .max()
+                .unwrap_or(first)
+                .max(first);
+            let generators = &mut self.generators[first..last];
+            let strips = &mut self.strips[start..end];
+            let busy = |strip: &&mut Strip| strip.generators.1 > 0 || !strip.effects.is_empty();
+            match pool {
+                Some(pool) if strips.iter_mut().filter(busy).nth(1).is_some() => {
+                    let pieces = Mutex::new(Pieces {
+                        strips: strips.iter_mut(),
+                        generators,
+                    });
+                    pool.run(&|| {
+                        loop {
+                            let piece = pieces.lock().unwrap_or_else(|p| p.into_inner()).next();
+                            let Some((strip, generators)) = piece else {
+                                break;
+                            };
+                            mix_strip(strip, generators, len);
+                        }
+                    });
                 }
-                aux.line.write(aux_left, aux_right);
-                let to = &mut later[aux.dest - at - 1];
-                let (to_left, to_right) = (&mut to.left[..len], &mut to.right[..len]);
-                if !aux.tap.direct() {
-                    aux.line.add(&mut aux.tap, 1.0, to_left, to_right);
-                    continue;
-                }
-                for (out, v) in to_left.iter_mut().zip(&*aux_left) {
-                    *out += v;
-                }
-                for (out, v) in to_right.iter_mut().zip(&*aux_right) {
-                    *out += v;
-                }
-            }
-            let (gain_left, gain_right) = (strip.volume * strip.pan.0, strip.volume * strip.pan.1);
-            if strip.cross == (0.0, 0.0) {
-                bus_left.iter_mut().for_each(|v| *v *= gain_left);
-                bus_right.iter_mut().for_each(|v| *v *= gain_right);
-            } else {
-                let from_right = strip.volume * strip.cross.0;
-                let from_left = strip.volume * strip.cross.1;
-                for (l, r) in bus_left.iter_mut().zip(bus_right.iter_mut()) {
-                    let (left, right) = (*l, *r);
-                    *l = left * gain_left + right * from_right;
-                    *r = right * gain_right + left * from_left;
-                }
-            }
-            strip.peak = (
-                raised(strip.peak.0, bus_left),
-                raised(strip.peak.1, bus_right),
-            );
-            strip.sent.write(bus_left, bus_right);
-            for send in &mut strip.sends {
-                let to = &mut later[send.dest - at - 1];
-                // The sidechain input is read where the send is, through
-                // a tap of its own so that a fade moves on once.
-                if let Some(side) = send.side.and_then(|side| to.side.get_mut(side)) {
-                    let (side_left, side_right) = (&mut side.left[..len], &mut side.right[..len]);
-                    if send.tap.direct() {
-                        side_left.copy_from_slice(bus_left);
-                        side_right.copy_from_slice(bus_right);
-                    } else {
-                        let mut tap = send.tap;
-                        strip.sent.add(&mut tap, 1.0, side_left, side_right);
+                _ => {
+                    for (strip, generators) in (Pieces {
+                        strips: strips.iter_mut(),
+                        generators,
+                    }) {
+                        mix_strip(strip, generators, len);
                     }
                 }
-                let (to_left, to_right) = (&mut to.left[..len], &mut to.right[..len]);
-                if !send.tap.direct() {
-                    strip.sent.add(&mut send.tap, send.gain, to_left, to_right);
-                    continue;
-                }
-                for (out, v) in to_left.iter_mut().zip(&*bus_left) {
-                    *out += v * send.gain;
-                }
-                for (out, v) in to_right.iter_mut().zip(&*bus_right) {
-                    *out += v * send.gain;
-                }
             }
+        }
+        #[cfg(feature = "profile")]
+        for &at in &self.ranked {
+            let parts = &mut self.strips[at].spent.parts;
+            self.spent.parts.append(parts);
         }
         match self.master {
             Some(slot) => {
@@ -1421,23 +1663,33 @@ mod tests {
             sent: Line::default(),
             side: Vec::new(),
             peak: (0.0, 0.0),
+            rank: 0,
+            incoming: Vec::new(),
+            generators: (0, 0),
+            dry_left: vec![0.0; BLOCK],
+            dry_right: vec![0.0; BLOCK],
+            made_left: vec![0.0; BLOCK],
+            made_right: vec![0.0; BLOCK],
+            spent: Spent::default(),
         }
     }
 
     /// A mixer of these strips, the last of which is the master.
-    fn mixer(strips: Vec<Strip>) -> Mixer {
+    fn mixer(mut strips: Vec<Strip>) -> Mixer {
+        for (rank, strip) in strips.iter_mut().enumerate() {
+            strip.rank = rank;
+        }
         let mut mixer = Mixer {
             master: Some(strips.len() - 1),
             strips,
             main: 1.0,
             tempo: 120.0,
             started: false,
-            dry_left: vec![0.0; BLOCK],
-            dry_right: vec![0.0; BLOCK],
             generators: Vec::new(),
+            cued: Vec::new(),
+            waves: Vec::new(),
+            ranked: Vec::new(),
             spent: Spent::default(),
-            made_left: vec![0.0; BLOCK],
-            made_right: vec![0.0; BLOCK],
             tail: 0,
             hosted_slots: 0,
             unhosted_slots: BTreeMap::new(),
@@ -1446,6 +1698,7 @@ mod tests {
             sidechain_slots: 0,
             ticking: false,
         };
+        mixer.wire();
         mixer.lay_lines();
         mixer
     }
