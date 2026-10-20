@@ -36,40 +36,41 @@ impl Wave {
         self.left.len()
     }
 
-    /// Both sides at `pos` frames in. A whole position is the frame as the
-    /// file has it, which is what FL's player does at a step of 1. Between
-    /// frames this is a 4-point Hermite curve, in place of FL's kernels.
-    pub(crate) fn frame(&self, pos: f64) -> (f32, f32) {
-        let side = |side: &[f32]| {
-            if pos.fract() == 0.0 && pos >= 0.0 {
-                side.get(pos as usize).copied().unwrap_or(0.0)
-            } else {
-                dsp::resample::read_hermite(side, pos)
-            }
-        };
-        let left = side(&self.left);
-        (left, self.right.as_deref().map_or(left, side))
-    }
-
     /// Both sides at `pos` frames in, read by `reader` as FL's player reads
     /// them: at a speed of 1 from a whole place the frames are copied, and
     /// otherwise they go through the interpolator, the file's end frames
     /// held past its ends.
     pub(crate) fn read(&self, pos: f64, reader: &Interpolator) -> (f32, f32) {
+        self.read_in(0..self.len(), pos, reader)
+    }
+
+    /// The same, for a player FL gives only the frames `region` of the
+    /// file: `pos` counts from the region's start, and the region's own end
+    /// frames are the ones held past its ends.
+    pub(crate) fn read_in(
+        &self,
+        region: std::ops::Range<usize>,
+        pos: f64,
+        reader: &Interpolator,
+    ) -> (f32, f32) {
+        let end = region.end.min(self.len());
+        let start = region.start.min(end);
+        let left = &self.left[start..end];
+        let right = self.right.as_deref().map(|right| &right[start..end]);
         if reader.speed() == 1.0 && pos.fract() == 0.0 && pos >= 0.0 {
             let side = |side: &[f32]| side.get(pos as usize).copied().unwrap_or(0.0);
-            let left = side(&self.left);
-            return (left, self.right.as_deref().map_or(left, side));
+            let l = side(left);
+            return (l, right.map_or(l, side));
         }
         let index = pos.floor() as i64;
         let frac = pos - index as f64;
-        match &self.right {
+        match right {
             Some(right) => {
-                let [l, r] = reader.read([&self.left, right], index, frac);
+                let [l, r] = reader.read([left, right], index, frac);
                 (l, r)
             }
             None => {
-                let l = reader.frame(&self.left, index, frac);
+                let l = reader.frame(left, index, frac);
                 (l, l)
             }
         }
@@ -321,15 +322,21 @@ mod tests {
             right: None,
             rate: 44_100,
         };
-        assert_eq!(wave.frame(1.0), (1.0, 1.0));
-        assert_eq!(wave.frame(4.0), (0.0, 0.0));
-        let between = wave.frame(1.5).0;
-        assert!(between > 0.4 && between < 0.7, "{between}");
+        let copy = reader(1.0);
+        assert_eq!(wave.read(1.0, &copy), (1.0, 1.0));
+        assert_eq!(wave.read(4.0, &copy), (0.0, 0.0));
+        let between = wave.read(1.5, &copy).0;
+        assert_eq!(between, copy.frame(&wave.left, 1, 0.5));
         let stereo = Wave {
             right: Some(vec![0.25; 4]),
             ..wave
         };
-        assert_eq!(stereo.frame(3.0), (-1.0, 0.25));
+        assert_eq!(stereo.read(3.0, &copy), (-1.0, 0.25));
+        // A region holds its own ends, far from them.
+        let slow = reader(0.5);
+        let held = stereo.read_in(1..3, 40.5, &slow).0;
+        assert!((held - 0.0).abs() < 1e-3, "{held}");
+        assert!((stereo.read_in(1..3, -40.5, &slow).0 - 1.0).abs() < 1e-3);
     }
 
     #[test]
