@@ -40,6 +40,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::directwave::NAME, Port::Gaps),
     (crate::drumpad::NAME, Port::Gaps),
     (crate::dx10::NAME, Port::Gaps),
+    (crate::edison::NAME, Port::Gaps),
     (crate::effector::NAME, Port::Gaps),
     (crate::emphasis::NAME, Port::Gaps),
     (crate::equo::NAME, Port::Gaps),
@@ -51,6 +52,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::flangus::NAME, Port::Exact),
     (crate::fpc::NAME, Port::Gaps),
     (crate::free_filter::NAME, Port::Exact),
+    (crate::frequency_shifter::NAME, Port::Gaps),
     (crate::frequency_splitter::NAME, Port::Gaps),
     (crate::fruit_kick::NAME, Port::Gaps),
     (crate::fruity_slicer::NAME, Port::Gaps),
@@ -96,6 +98,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::waveshaper::NAME, Port::Gaps),
     (crate::wrapper::NAME, Port::Gaps),
     (crate::xy_controller::NAME, Port::Gaps),
+    (crate::zgameeditor::NAME, Port::Gaps),
 ];
 
 /// The port of a plugin by its event 201 name, in any case.
