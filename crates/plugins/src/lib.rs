@@ -56,6 +56,7 @@ pub mod directwave;
 pub mod drumpad;
 mod drumpad_voice;
 pub mod dx10;
+pub mod edison;
 pub mod effector;
 pub mod emphasis;
 mod emphasis_dsp;
@@ -69,6 +70,7 @@ pub mod flanger;
 pub mod flangus;
 pub mod fpc;
 pub mod free_filter;
+pub mod frequency_shifter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
 pub mod fruity_slicer;
@@ -131,6 +133,7 @@ pub mod wave_candy;
 pub mod waveshaper;
 pub mod wrapper;
 pub mod xy_controller;
+pub mod zgameeditor;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
@@ -384,6 +387,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_3::Delay3::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
+    } else if is(edison::NAME) {
+        Some(Box::new(edison::Edison))
     } else if is(effector::NAME) {
         Some(Box::new(effector::Effector::default()))
     } else if is(emphasis::NAME) {
@@ -410,6 +415,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
         Some(Box::new(flangus::Flangus::default()))
+    } else if is(frequency_shifter::NAME) {
+        Some(Box::new(frequency_shifter::FrequencyShifter::default()))
     } else if is(frequency_splitter::NAME) {
         Some(Box::new(frequency_splitter::FrequencySplitter::default()))
     } else if is(gross_beat::NAME) {
@@ -472,6 +479,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(control_surface::ControlSurface::default()))
     } else if is(xy_controller::NAME) {
         Some(Box::new(xy_controller::XyController::default()))
+    } else if is(zgameeditor::NAME) {
+        Some(Box::new(zgameeditor::ZGameEditor))
     } else if is(wrapper::NAME) {
         Some(Box::new(wrapper::Wrapper::default()))
     } else {
@@ -721,7 +730,12 @@ mod tests {
             match effect.set_state(&saved.state) {
                 // A wrapper of an effect not built yet, which
                 // `wrapper::tests` counts.
-                Err(StateError::Unhosted) if saved.plugin == wrapper::NAME => continue,
+                // Counted in `edison::tests`.
+                Err(StateError::Unhosted)
+                    if saved.plugin == wrapper::NAME || saved.plugin == edison::NAME =>
+                {
+                    continue;
+                }
                 Err(error) => panic!("{} in {}: {error}", saved.plugin, saved.file),
                 Ok(()) => {}
             }
@@ -731,10 +745,14 @@ mod tests {
         // What the docs count in the 165 projects, but for Soft Clipper,
         // where the doc has 27.
         for (plugin, len, uses) in [
+            ("edison", 625, 1),
+            ("edison", 667, 2),
+            ("edison", 695, 2),
             ("effector", 316, 27),
             ("emphasis", 64, 4),
             ("emphasis", 67, 1),
             ("equo", 4143, 10),
+            ("frequency shifter", 52, 5),
             ("fruity bass boost", 12, 2),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
@@ -818,13 +836,15 @@ mod tests {
             // Counted in their own tests.
             "control surface",
             "fruity x-y controller",
+            // Counted in `zgameeditor::tests`.
+            "zgameeditor visualizer",
         ];
         // Any state does for an effect that leaves the sound alone.
         let passes = |plugin: &str| PASS_THROUGH.iter().any(|n| n.eq_ignore_ascii_case(plugin));
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 51);
+        assert_eq!(lengths.count(), 55);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
