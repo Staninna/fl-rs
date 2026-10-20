@@ -4,6 +4,8 @@
 //! (`0x86aba0`, the pluck branch of the kernel `0x877270`). Section 12 of
 //! `docs/plugins/sytrus.md`.
 
+use crate::autogun_engine::rand_uniform;
+
 /// The string's samples at a frequency of 1 Hz: it is drawn at 88.2 kHz
 /// whatever the rate (`0x86ab6c`).
 const DRAWN: f32 = 88_200.0;
@@ -109,8 +111,10 @@ impl Pluck {
     /// from -1 to 1 at `1.5 noise` for a noise wheel at `noise` (its
     /// level), less its mean. `base` is the operator's frequency without
     /// its pitch articulator and `pitch` with it, in cycles a sample;
-    /// `damping` the damping articulator kept to 0..1.
-    #[allow(clippy::too_many_arguments)]
+    /// `damping` the damping articulator kept to 0..1. The noise is
+    /// `ippsRandUniform_Direct_32f(-1, 1)` (the pointer at `0x90d668`,
+    /// called at `0x86a9fc`) over the string's samples, seeded by the
+    /// start phase in 2^32ths of a cycle.
     pub(super) fn start(
         &mut self,
         buffer: &mut [f32],
@@ -119,7 +123,6 @@ impl Pluck {
         phase: f64,
         noise: f32,
         damping: f32,
-        seed: &mut u32,
     ) {
         let len = (f64::from(DRAWN / (base * rate)).round_ties_even() as i64).max(2) as usize;
         let len = len.min(buffer.len());
@@ -131,6 +134,10 @@ impl Pluck {
         } else {
             (1.0 - noise, (f64::from(noise) * 1.5) as f32)
         };
+        if wet != 0.0 {
+            let mut seed = at as i32;
+            rand_uniform(&mut buffer[..len], -1.0, 1.0, &mut seed);
+        }
         let mut sum = 0.0f32;
         // A table of 2^14 samples, read by the top 14 bits of the phase
         // and between two by the other 18; none for an operator that
@@ -148,9 +155,7 @@ impl Pluck {
                 v = (f64::from(t) + f64::from((table[next] - t) * frac as f32)) as f32;
             }
             if wet != 0.0 {
-                *seed = seed.wrapping_mul(0x0808_8405).wrapping_add(1);
-                let white = (f64::from(*seed) / 2_147_483_648.0 - 1.0) as f32;
-                v = v * dry + white * wet;
+                v = v * dry + *sample * wet;
             }
             *sample = v;
             sum += v;
@@ -245,16 +250,7 @@ mod tests {
         let slot = strings.take();
         let mut pluck = Pluck::IDLE;
         let buffer = strings.buffer(slot).unwrap();
-        let mut seed = 1;
-        pluck.start(
-            buffer,
-            &sine_table(),
-            (f, f, rate),
-            0.0,
-            0.0,
-            1.0,
-            &mut seed,
-        );
+        pluck.start(buffer, &sine_table(), (f, f, rate), 0.0, 0.0, 1.0);
         // 88200 / 441 = 200 samples, two a sample at 44.1 kHz.
         assert_eq!(pluck.len, 200);
         assert_eq!(pluck.whole, 2);
@@ -264,15 +260,7 @@ mod tests {
         assert!((partial(&out[1000..5410], turns) - 1.0).abs() < 0.01);
         // Damped, it dies away and its period grows by the filter's delay.
         let mut damped = Pluck::IDLE;
-        damped.start(
-            buffer,
-            &sine_table(),
-            (f, f, rate),
-            0.0,
-            0.0,
-            0.2,
-            &mut seed,
-        );
+        damped.start(buffer, &sine_table(), (f, f, rate), 0.0, 0.0, 0.2);
         assert!(damped.period > 200.0);
         let out: Vec<f32> = (0..44_100).map(|_| damped.next(buffer)).collect();
         let early = out[..2000].iter().fold(0f32, |p, v| p.max(v.abs()));
@@ -280,5 +268,27 @@ mod tests {
         assert!(late < early * 0.5, "{early} {late}");
         strings.give_back(slot);
         assert_eq!(strings.take(), slot);
+    }
+
+    #[test]
+    fn the_noise_is_ipp_s_uniform_numbers_seeded_by_the_start_phase() {
+        let rate = 44_100.0f32;
+        let f = 441.0 / rate;
+        let mut strings = Strings::new();
+        let slot = strings.take();
+        let buffer = strings.buffer(slot).unwrap();
+        // No table, so the string is the noise alone: 1.5 x the numbers
+        // for a wheel at 1, less their mean.
+        let phase = 0.25;
+        let mut pluck = Pluck::IDLE;
+        pluck.start(buffer, &[], (f, f, rate), phase, 1.0, 1.0);
+        let mut numbers = vec![0.0f32; 200];
+        let mut seed = 1 << 30;
+        rand_uniform(&mut numbers, -1.0, 1.0, &mut seed);
+        let wet: Vec<f32> = numbers.iter().map(|n| n * 1.5).collect();
+        let mean = wet.iter().sum::<f32>() / 200.0;
+        for (got, want) in buffer[..200].iter().zip(&wet) {
+            assert_eq!(*got, want - mean);
+        }
     }
 }
