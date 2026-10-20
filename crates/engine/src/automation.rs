@@ -9,14 +9,26 @@
 //! A clip plays where the playlist has an item for its channel, from the
 //! beat the item's trim starts at. What it drives comes from
 //! [`model::Project::automation_bindings`]. The engine plays the bindings
-//! to an insert's volume, pan and send levels, to the volume and pan of a
-//! sampler or audio clip channel, and to the tempo. Of an effect slot whose
-//! plugin the engine hosts it plays the bindings to the slot's switch, to
-//! its mix level and to the parameters the plugin has. Of a plugin channel
-//! whose generator the engine hosts it plays the bindings to the channel's
-//! volume and pan and to the parameters the generator has. A control that
-//! a clip has driven stays where the clip left it, and before any clip has
-//! started it is what the project says.
+//! to an insert's volume, pan and send levels, to the volume, pan, pitch,
+//! pan offset and volume multiplier of a sampler or audio clip channel, and
+//! to the tempo. Of an effect slot whose plugin the engine hosts it plays
+//! the bindings to the slot's switch, to its mix level and to the
+//! parameters the plugin has. Of a plugin channel whose generator the
+//! engine hosts it plays the bindings to the same five levels of the
+//! channel and to the parameters the generator has. A control that a clip
+//! has driven stays where the clip left it, and before any clip has started
+//! it is what the project says.
+//!
+//! `docs/rec-channel.md` maps a channel's controls. Its pitch moves the
+//! speed of the voices that are sounding on a sampler or audio clip
+//! channel, from where each is in its sample. A generator's note takes the
+//! pitch the channel has as it starts, and as FL hands a plugin's voices
+//! the channel's pitch again on every tick, the engine reads the clip on
+//! the pitch of a plugin channel on every tick and tells the generator of
+//! each note it moves ([`plugins::Generator::set_note_pitch`],
+//! [`Automation::pitch_shift`]). The others the engine
+//! leaves out, mod X and Y, the arpeggiator, the time stretch, the
+//! envelopes and a clip's own LFO, have no part in it to drive.
 //!
 //! A plugin's parameter `n` is control `0x8000 + n` of its slot, or of its
 //! channel for a generator. The clip's
@@ -58,9 +70,10 @@
 
 use crate::formula::Formula;
 use crate::generator;
+use crate::levels;
 use crate::mix::{self, BLOCK, Mixer};
 use crate::sequence::Song;
-use crate::voice::{self, Voice};
+use crate::voice::{self, Follow, Voice};
 use crate::{Curves, clock::Clock};
 use flp::event::layout::Point;
 use model::rec::{ControllerOutput, control};
@@ -417,14 +430,23 @@ enum Control {
     /// Of the insert with this loader number.
     InsertVolume(u16),
     InsertPan(u16),
+    InsertSeparation(u16),
+    /// A gain, frequency or width of the insert's EQ, by its control
+    /// number less 0x1FD0.
+    InsertEq {
+        insert: u16,
+        offset: u16,
+    },
     /// The level of the send from one insert to another.
     Send {
         from: u16,
         to: u16,
     },
-    /// Of the channel whose 64 has this index.
-    ChannelVolume(u16),
-    ChannelPan(u16),
+    /// A level of the channel whose 64 has this index.
+    Channel {
+        channel: u16,
+        level: Level,
+    },
     Tempo,
     /// Whether this slot of this insert is switched on.
     SlotEnabled {
@@ -448,6 +470,21 @@ enum Control {
         channel: u16,
         index: u16,
     },
+}
+
+/// A level of a channel that a clip can drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Level {
+    /// 219 @4, 0 to 12800.
+    Volume,
+    /// 219 @0, 0 to 12800 with 6400 in the centre.
+    Pan,
+    /// The pitch knob, 219 @8, in cents.
+    Pitch,
+    /// 229 @0, which adds to the pan.
+    PanOffset,
+    /// 229 @4, 12800 at unity.
+    VolumeMultiplier,
 }
 
 /// The control number of the first parameter of a slot's plugin, and of a
@@ -558,19 +595,22 @@ fn set(control: Control, raw: f64, levels: &mut [Levels], mixer: &mut Mixer, cur
         Control::InsertVolume(insert) => {
             mixer.set_volume(insert, curves.insert_gain(raw as i32));
         }
-        Control::InsertPan(insert) => {
-            let raw = raw as i32;
-            mixer.set_pan(insert, curves.insert_pan(raw), curves.insert_cross(raw));
-        }
+        Control::InsertPan(insert) => mixer.set_pan(insert, raw as i32, curves),
+        Control::InsertSeparation(insert) => mixer.set_separation(insert, raw as i32, curves),
+        Control::InsertEq { insert, offset } => mixer.set_eq(insert, offset, raw as i32),
         Control::Send { from, to } => {
             mixer.set_send(from, to, curves.send_gain(raw as i32));
         }
-        Control::ChannelVolume(channel) | Control::ChannelPan(channel) => {
-            let levels = levels.iter_mut().find(|l| l.channel == channel);
-            match (levels, control) {
-                (Some(levels), Control::ChannelVolume(_)) => levels.volume = raw as u32,
-                (Some(levels), _) => levels.pan = raw as u32,
-                (None, _) => {}
+        Control::Channel { channel, level } => {
+            let Some(levels) = levels.iter_mut().find(|l| l.channel == channel) else {
+                return;
+            };
+            match level {
+                Level::Volume => levels.volume = raw as u32,
+                Level::Pan => levels.pan = raw as u32,
+                Level::Pitch => levels.pitch = raw as i32,
+                Level::PanOffset => levels.pan_offset = raw as i32,
+                Level::VolumeMultiplier => levels.adjust = raw as i32,
             }
         }
         Control::Tempo => {}
@@ -591,14 +631,27 @@ fn set(control: Control, raw: f64, levels: &mut [Levels], mixer: &mut Mixer, cur
     }
 }
 
-/// The volume and pan of a channel that has one of them automated, as the
-/// channel's 219 stores them.
+/// The levels of a channel that has one of them automated, as the
+/// channel's 219 and 229 store them.
 struct Levels {
     channel: u16,
     volume: u32,
     pan: u32,
-    /// The channel's [`voice::adjust`], which no clip drives.
+    /// The channel's [`voice::pan_offset`].
+    pan_offset: i32,
+    /// The channel's [`voice::adjust`], its volume multiplier.
     adjust: i32,
+    /// The pitch knob in cents, and what the project has it at, which the
+    /// channel's voices were made with.
+    pitch: i32,
+    knob: i32,
+}
+
+impl Levels {
+    /// The pan [`voice::gains`] takes: the pan and the pan offset.
+    fn pan(&self) -> i32 {
+        self.pan as i32 + self.pan_offset
+    }
 }
 
 /// An automation channel that is on the playlist.
@@ -696,6 +749,17 @@ impl Automation {
             // A clip whose 234 did not decode has no curve to play.
             let curve = channel.automation.as_ref().map(|d| Curve::new(&d.envelope));
             for binding in bound.clone() {
+                // A control of a slot that holds no plugin changes nothing:
+                // the slot passes its input on whatever it is set to.
+                if let RecTarget::Insert {
+                    index,
+                    slot: Some(slot),
+                    ..
+                } = binding.target
+                    && empty_slot(project, index, slot)
+                {
+                    continue;
+                }
                 let lane = automation.lane(project, binding, tempo);
                 match (lane, curve.is_some()) {
                     (Some((lane, min, max)), true) => {
@@ -746,7 +810,7 @@ impl Automation {
                 None => Some(None),
             };
             let driven = formula.and_then(|formula| {
-                let target = project.rec_target(ids.target);
+                let target = project.link_target(ids.target);
                 let (control, _, range) = self.control(project, target, tempo)?;
                 (control != Control::Tempo).then_some((control, range, formula))
             });
@@ -818,7 +882,7 @@ impl Automation {
     fn gains(&self, mixer: &mut Mixer, curves: &dyn Curves) {
         for levels in &self.levels {
             let level = curves.volume_adjust_gain(levels.adjust);
-            let gains = voice::gains(levels.volume, levels.pan, level, 0.0, curves);
+            let gains = voice::gains(levels.volume, levels.pan(), level, 0.0, curves);
             mixer.set_channel_gains(levels.channel, gains);
         }
     }
@@ -848,6 +912,25 @@ impl Automation {
                 let (found, initial) = match control {
                     control::VOLUME => (Control::InsertVolume(index), strip.volume_raw()),
                     control::PAN => (Control::InsertPan(index), strip.pan_raw()),
+                    control::SEPARATION => {
+                        (Control::InsertSeparation(index), strip.separation_raw())
+                    }
+                    eq if (control::EQ_GAIN..control::EQ_WIDTH + 3).contains(&eq) => {
+                        let offset = eq - control::EQ_GAIN;
+                        let band = strip.eq_band((offset & 7) as u8)?;
+                        let initial = match offset >> 3 {
+                            0 => band.gain,
+                            1 => band.frequency,
+                            _ => band.width,
+                        };
+                        (
+                            Control::InsertEq {
+                                insert: index,
+                                offset,
+                            },
+                            initial,
+                        )
+                    }
                     send => {
                         let to = send.checked_sub(control::SEND)?;
                         let send = Control::Send { from: index, to };
@@ -874,20 +957,28 @@ impl Automation {
                     return None;
                 }
                 let (volume, pan) = voice::levels(channel);
+                let levels = Levels {
+                    channel: index,
+                    volume,
+                    pan,
+                    pan_offset: voice::pan_offset(project, channel),
+                    adjust: voice::adjust(project, channel),
+                    pitch: levels::knob(channel),
+                    knob: levels::knob(channel),
+                };
+                let (level, initial) = match control {
+                    control::CHANNEL_VOLUME => (Level::Volume, volume as i32),
+                    control::CHANNEL_PAN => (Level::Pan, pan as i32),
+                    control::CHANNEL_PITCH => (Level::Pitch, levels.knob),
+                    control::CHANNEL_PAN_OFFSET => (Level::PanOffset, levels.pan_offset),
+                    control::CHANNEL_VOLUME_MULTIPLIER => (Level::VolumeMultiplier, levels.adjust),
+                    _ => return None,
+                };
                 if !self.levels.iter().any(|l| l.channel == index) {
-                    self.levels.push(Levels {
-                        channel: index,
-                        volume,
-                        pan,
-                        adjust: voice::adjust(project, channel),
-                    });
+                    self.levels.push(levels);
                 }
-                match control {
-                    control::CHANNEL_VOLUME => {
-                        (Control::ChannelVolume(index), volume as i32, range)
-                    }
-                    _ => (Control::ChannelPan(index), pan as i32, range),
-                }
+                let channel = index;
+                (Control::Channel { channel, level }, initial, range)
             }
             RecTarget::Global { .. } => {
                 let range = target.raw_range()?;
@@ -989,9 +1080,64 @@ impl Automation {
         sends.collect()
     }
 
-    /// Whether a clip drives the volume or the pan of this channel.
-    pub fn follows(&self, channel: u16) -> bool {
-        self.levels.iter().any(|l| l.channel == channel)
+    /// What a voice on this channel needs to follow its automation, when
+    /// a clip drives the channel's volume, pan, pitch, pan offset or volume
+    /// multiplier. `level` and `pan` are the voice's own, as
+    /// [`voice::gains`] takes them, the level without the channel's volume
+    /// multiplier.
+    pub fn following(
+        &self,
+        channel: u16,
+        level: f32,
+        pan: f32,
+        curves: &dyn Curves,
+    ) -> Option<Follow> {
+        let levels = self.levels.iter().find(|l| l.channel == channel)?;
+        // The lowest the pitch can go: the project's, or the lowest a clip
+        // gives it.
+        let slowest = self.pitch_lane(channel).map(|lane| {
+            let ends = lane.sources.iter().flat_map(|s| [s.min, s.max]);
+            let lowest = ends
+                .fold(f64::from(levels.knob), f64::min)
+                .max(lane.range.0);
+            curves.pitch_ratio((lowest.round() - f64::from(levels.knob)) / 100.0)
+        });
+        Some(Follow {
+            channel,
+            level,
+            pan,
+            slowest,
+        })
+    }
+
+    /// Whether a clip drives the pitch knob of this channel.
+    pub fn drives_pitch(&self, channel: u16) -> bool {
+        self.pitch_lane(channel).is_some()
+    }
+
+    /// The lane of the pitch knob of this channel, when a clip drives it.
+    fn pitch_lane(&self, channel: u16) -> Option<&Lane> {
+        let pitch = Control::Channel {
+            channel,
+            level: Level::Pitch,
+        };
+        self.lanes.iter().find(|l| l.control == pitch)
+    }
+
+    /// How far, in cents, a clip has moved the pitch knob of this channel
+    /// from what the project has it at, at `tick`. 0 for a channel whose
+    /// pitch no clip drives. A note that a generator plays starts at this
+    /// pitch, and moves with it on every tick.
+    pub fn pitch_shift(&self, channel: u16, tick: f64) -> f32 {
+        let lane = self.pitch_lane(channel);
+        let levels = self.levels.iter().find(|l| l.channel == channel);
+        match (lane, levels) {
+            (Some(lane), Some(levels)) => {
+                let raw = lane.raw_at(&self.clips, tick, self.ppq).round();
+                (raw - f64::from(levels.knob)) as f32
+            }
+            _ => 0.0,
+        }
     }
 
     /// The counts over the clips that start before output sample `limit`.
@@ -1041,7 +1187,9 @@ impl Automation {
     }
 
     /// Give every voice on an automated channel the gains that go with
-    /// the channel's volume and pan as [`Automation::apply`] left them.
+    /// the channel's volume, pan, pan offset and volume multiplier as
+    /// [`Automation::apply`] left them, and the speed that goes with its
+    /// pitch.
     pub fn follow(&self, voices: &mut [Voice], curves: &dyn Curves) {
         if self.levels.is_empty() {
             return;
@@ -1051,8 +1199,13 @@ impl Automation {
                 continue;
             };
             if let Some(levels) = self.levels.iter().find(|l| l.channel == own.channel) {
-                let gains = voice::gains(levels.volume, levels.pan, own.level, own.pan, curves);
+                let level = own.level * curves.volume_adjust_gain(levels.adjust);
+                let gains = voice::gains(levels.volume, levels.pan(), level, own.pan, curves);
                 voice.set_gains(gains);
+                if own.slowest.is_some() {
+                    let cents = f64::from(levels.pitch - levels.knob);
+                    voice.set_pitch(curves.pitch_ratio(cents / 100.0));
+                }
             }
         }
     }
@@ -1064,6 +1217,18 @@ impl Automation {
 /// the width is taken in f64.
 fn raw_at(low: i32, high: i32, part: i32) -> f64 {
     f64::from(low) + f64::from(part) / 12_800.0 * (f64::from(high) - f64::from(low))
+}
+
+/// Whether a slot of an insert holds no plugin.
+fn empty_slot(project: &Project, insert: u16, slot: u8) -> bool {
+    let slots = project
+        .insert_mix(insert)
+        .insert()
+        .map(|insert| &insert.slots);
+    let found = slots.and_then(|slots| slots.iter().find(|s| s.index == i32::from(slot)));
+    found
+        .and_then(|slot| slot.plugin_name.as_deref())
+        .is_none_or(str::is_empty)
 }
 
 #[cfg(test)]

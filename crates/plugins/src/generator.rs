@@ -30,10 +30,38 @@ pub struct NoteOn {
     pub mod_x: f32,
     pub mod_y: f32,
     /// A slide note. FL sounds no voice for one: it bends the voices that
-    /// are sounding to its key.
+    /// are sounding to its key. A host that does that itself, with
+    /// [`Generator::set_note_pitch`], does not send one.
     pub slide: bool,
     /// A note that glides in from the one before it.
     pub porta: bool,
+    /// The note's colour, 0 to 15, where 0 is FL's first: the low nibble
+    /// of byte 19 of its record, which FL's host keeps at `rec+0x26c` of
+    /// the voice and hands a plugin for `FPV_GetColor`
+    /// (`docs/plugins/host-voice.md`). FL also takes it as the note's MIDI
+    /// channel.
+    pub color: u8,
+}
+
+impl Default for NoteOn {
+    /// Voice 0 at key 60, as a new note in FL's piano roll is: velocity
+    /// 100, which is a gain of 1, in the centre, release 64, the mods in
+    /// the middle and the first colour.
+    fn default() -> Self {
+        NoteOn {
+            voice: 0,
+            key: 60,
+            velocity: 1.0,
+            pan: 0.0,
+            fine_pitch: 0.0,
+            release: 0.5,
+            mod_x: 0.0,
+            mod_y: 0.0,
+            slide: false,
+            porta: false,
+            color: 0,
+        }
+    }
 }
 
 /// One plugin on a channel.
@@ -80,6 +108,19 @@ pub trait Generator: Send {
 
     /// Let go of every note, as [`Generator::note_off`] does for one.
     fn all_notes_off(&mut self);
+
+    /// The pitch of the note the host gave this number has moved, from the
+    /// first frame of the next block: a slide note bends it, or a clip
+    /// moves its channel's pitch. `pitch` is in cents from key 60, as
+    /// `(key - 60) * 100 + fine_pitch` of its [`NoteOn`] was, and stands
+    /// in for that from now on: it is FL's `FinalLevels.Pitch`, which FL's
+    /// host works out again on every tick (`FUN_00d265e0`) and a plugin
+    /// reads as its voices run. A note let go of may still be told until
+    /// its release is over.
+    ///
+    /// Nothing happens for a number no sounding note has, nor in a plugin
+    /// that does not say: its notes keep the pitch they started with.
+    fn set_note_pitch(&mut self, _voice: u32, _pitch: f32) {}
 
     /// Add one block of the generator's sound to what `left` and `right`
     /// hold. The two sides are as long as each other.
@@ -161,14 +202,23 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::bassdrum::NAME, || {
         Box::new(crate::bassdrum::BassDrum::default())
     }),
+    (crate::beepmap::NAME, || {
+        Box::new(crate::beepmap::BeepMap::default())
+    }),
     (crate::boobass::NAME, || {
         Box::new(crate::boobass::BooBass::default())
     }),
     (crate::directwave::NAME, || {
         Box::new(crate::directwave::DirectWave::default())
     }),
+    (crate::drumaxx::NAME, || {
+        Box::new(crate::drumaxx::Drumaxx::default())
+    }),
     (crate::drumpad::NAME, || {
         Box::new(crate::drumpad::Drumpad::default())
+    }),
+    (crate::drumsynth_live::NAME, || {
+        Box::new(crate::drumsynth_live::DrumSynthLive::default())
     }),
     (crate::dx10::NAME, || Box::new(crate::dx10::Dx10::default())),
     (crate::fl_keys::NAME, || {
@@ -178,11 +228,21 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
     }),
+    (crate::fruity_slicer::NAME, || {
+        Box::new(crate::fruity_slicer::FruitySlicer::default())
+    }),
+    (crate::gms::NAME, || Box::new(crate::gms::Gms::default())),
     (crate::harmless::NAME, || {
         Box::new(crate::harmless::Harmless::default())
     }),
     (crate::harmor::NAME, || {
         Box::new(crate::harmor::Harmor::default())
+    }),
+    (crate::kepler::NAME, || {
+        Box::new(crate::kepler::Kepler::default())
+    }),
+    (crate::minisynth::NAME, || {
+        Box::new(crate::minisynth::MiniSynth::default())
     }),
     (crate::ogun::NAME, || Box::new(crate::ogun::Ogun::default())),
     (crate::three_osc::NAME, || {
@@ -217,9 +277,13 @@ mod tests {
     fn the_four_generators_are_found_with_their_defaults_and_no_other_of_fl_s() {
         // The name, as FL's projects and as its presets have it, and what
         // the parameters start at.
+        // 3x Osc's 21, two that are nobody's, and the instrument tab's.
+        let tab = *crate::three_osc::ThreeOsc::default().articulation();
         let osc: Vec<f32> = [0, 0, 0, 0, 0, 0, 64, 0, 0, -12, 0, 0, 0, 32, 0, 0, -24]
             .iter()
-            .chain(&[0; 4])
+            .chain(&[0; 6])
+            .chain(tab.blocks.as_flattened())
+            .chain(&[0, 0, tab.cutoff, tab.resonance, 0, tab.filter])
             .map(|value| *value as f32)
             .collect();
         let drum = [

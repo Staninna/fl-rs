@@ -74,8 +74,29 @@ impl Matrix {
             }
             return;
         }
-        let (mut m, step) = self.ramp(len);
-        for (l, r) in frames {
+        let (m, step) = self.ramp(len);
+        Matrix::run(m, step, left, right);
+    }
+
+    /// [`Matrix::apply`] with each gain moving by no more than `cap` a
+    /// frame, by [`glide`], as PanOMatic's ramp (`FUN_005dfe70`) has it.
+    pub(crate) fn apply_capped(&mut self, left: &mut [f32], right: &mut [f32], cap: f32) {
+        let len = left.len().min(right.len());
+        let [_, _, rl, lr] = self.current;
+        if len == 0 || (self.current == self.target && rl == 0.0 && lr == 0.0) {
+            self.apply(left, right);
+            return;
+        }
+        let (mut m, mut step) = ([0.0; 4], [0.0; 4]);
+        for k in 0..4 {
+            (m[k], step[k]) = glide(&mut self.current[k], self.target[k], cap, len);
+        }
+        Matrix::run(m, step, left, right);
+    }
+
+    /// A block through gains that start at `m` and add `step` a frame.
+    fn run(mut m: [f32; 4], step: [f32; 4], left: &mut [f32], right: &mut [f32]) {
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             (*l, *r) = Matrix::mix(&m, *l, *r);
             for (gain, step) in m.iter_mut().zip(step) {
                 *gain += step;
@@ -146,6 +167,16 @@ impl Follower {
     pub(crate) fn flush(&mut self) {
         for state in [&mut self.y, &mut self.v] {
             if state.is_subnormal() {
+                *state = 0.0;
+            }
+        }
+    }
+
+    /// What Fruity Center's kernel does after every block instead: a part
+    /// of the state nearer 0 than `floor` becomes 0.
+    pub(crate) fn clear_below(&mut self, floor: f64) {
+        for state in [&mut self.y, &mut self.v] {
+            if state.abs() < floor {
                 *state = 0.0;
             }
         }

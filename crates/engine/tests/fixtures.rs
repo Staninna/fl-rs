@@ -1007,6 +1007,121 @@ fn an_insert_panned_left_silences_the_right_side() {
     assert_eq!(out.right[0], 1.0);
 }
 
+const SEPARATION: u32 = 0x1FC2;
+const EQ_GAIN: u32 = 0x1FD0;
+const EQ_FREQUENCY: u32 = 0x1FD8;
+const EQ_WIDTH: u32 = 0x1FE0;
+
+/// Set the flags word of an insert's 236: bit 3 is on, bit 0 reverses the
+/// polarity and bit 1 swaps the sides.
+fn flags(project: &mut Project, insert: usize, bits: u32) {
+    project.inserts[insert].flags.as_mut().unwrap().flags = bits;
+}
+
+#[test]
+fn an_insert_s_polarity_turns_it_over_and_its_swap_trades_its_sides() {
+    let dir = Dir::new("insert-flags");
+    let mut reversed = one_click();
+    flags(&mut reversed, 1, 0b1001);
+    let out = render(&reversed, &dir);
+    assert_impulses(&out.left, &[0]);
+    assert_eq!((out.left[0], out.right[0]), (-1.0, -1.0));
+
+    // Panned all the way left and swapped, the click is on the right.
+    let mut swapped = one_click();
+    set(&mut swapped, 1, PAN, -6400);
+    flags(&mut swapped, 1, 0b1010);
+    let out = render(&swapped, &dir);
+    assert!(out.left.iter().all(|v| *v == 0.0));
+    assert_eq!(out.right[0], 1.0);
+    flags(&mut swapped, 1, 0b1011);
+    assert_eq!(render(&swapped, &dir).right[0], -1.0);
+
+    // On FL's curves the swap trades what the pan feeds across too: all
+    // of both inputs at -3 dB goes right.
+    let exact = render_exact(&swapped, &dir);
+    let level = (new_channel() / SQRT_2) as f32;
+    assert_gains(
+        &exact,
+        0,
+        (0.0, -2.0 * level * std::f32::consts::FRAC_1_SQRT_2),
+    );
+
+    // A switched off insert stays silent whatever its other bits say.
+    flags(&mut swapped, 1, 0b0011);
+    assert!(render(&swapped, &dir).right.iter().all(|v| *v == 0.0));
+}
+
+/// The mixer fixture with the click on the left alone, on its way to the
+/// master through insert 2.
+fn left_through_2() -> Project {
+    let mut left = one_click();
+    set(&mut left, 1, PAN, -6400);
+    route(&mut left, 1, &[2]);
+    left
+}
+
+#[test]
+fn stereo_separation_merges_above_0_and_separates_below() {
+    let dir = Dir::new("insert-separation");
+    let out = render(&left_through_2(), &dir);
+    assert_eq!((out.left[0], out.right[0]), (1.0, 0.0));
+
+    // All the way merged, each side is the mean of the two.
+    let mut merged = left_through_2();
+    set(&mut merged, 2, SEPARATION, 64);
+    let out = render(&merged, &dir);
+    assert_eq!((out.left[0], out.right[0]), (0.5, 0.5));
+    // All the way separated, each side is its own at 1.5 less the other's
+    // at 0.5.
+    let mut separated = left_through_2();
+    set(&mut separated, 2, SEPARATION, -64);
+    let out = render(&separated, &dir);
+    assert_eq!((out.left[0], out.right[0]), (1.5, -0.5));
+    // Half way merged is (5^0.5 - 1) / 4 of the way, not half of it.
+    let mut half = left_through_2();
+    set(&mut half, 2, SEPARATION, 32);
+    let out = render(&half, &dir);
+    let across = (5f32.sqrt() - 1.0) / 8.0;
+    assert!((out.right[0] - across).abs() < 1e-6, "{}", out.right[0]);
+    assert!((out.left[0] - (1.0 - across)).abs() < 1e-6);
+    // A sound alike on both sides has nothing to merge or separate.
+    let mut centred = one_click();
+    set(&mut centred, 1, SEPARATION, -40);
+    let out = render(&centred, &dir);
+    assert!((out.left[0] - 1.0).abs() < 1e-6 && (out.right[0] - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn an_insert_s_eq_shapes_its_bus_and_does_nothing_at_0_db() {
+    let dir = Dir::new("insert-eq");
+    // Bands without a gain run nothing, wherever they are set.
+    let mut flat = one_click();
+    set(&mut flat, 1, EQ_FREQUENCY, 20_000);
+    set(&mut flat, 1, EQ_WIDTH + 1, 60_000);
+    let out = render(&flat, &dir);
+    assert_impulses(&out.left, &[0]);
+    assert_eq!((out.left[0], out.right[0]), (1.0, 1.0));
+
+    // A low shelf 18 dB up lifts what is under it 18 dB: the click's
+    // response sums to 10^(18/20).
+    let mut low = one_click();
+    set(&mut low, 1, EQ_GAIN, 1800);
+    let out = render(&low, &dir);
+    assert_eq!(out.left, out.right);
+    let dc = out.left.iter().map(|v| f64::from(*v)).sum::<f64>();
+    assert!((dc - 10f64.powf(0.9)).abs() < 1e-3, "{dc}");
+    // A peak and a high shelf leave the bottom where it was, and the high
+    // shelf 18 dB down takes most of the click's first sample.
+    let mut high = one_click();
+    set(&mut high, 1, EQ_GAIN + 1, 1200);
+    set(&mut high, 1, EQ_GAIN + 2, -1800);
+    let out = render(&high, &dir);
+    let dc = out.left.iter().map(|v| f64::from(*v)).sum::<f64>();
+    assert!((dc - 1.0).abs() < 1e-3, "{dc}");
+    assert!(out.left[0] < 0.5);
+}
+
 #[test]
 fn a_route_carries_an_insert_through_another_to_the_master() {
     let dir = Dir::new("route");
@@ -2318,15 +2433,16 @@ fn a_clip_bound_to_nothing_the_engine_plays_is_counted() {
     let out = render(&unbound, &dir);
     assert_eq!((out.automation_clips, out.unsupported_targets), (0, 0));
 
-    // Links to a plugin parameter of channel 0, to the mix level of a
-    // slot of insert 1, to insert 1's stereo separation and to the main
-    // volume: four controls the engine does not play.
+    // Links to a plugin parameter of channel 0, to a fourth EQ band of
+    // insert 1, which it has not, and to the main volume: three controls
+    // the engine does not play. The mix level of a slot of insert 1 that
+    // holds no plugin changes nothing, and is not counted.
     let mut bound = base();
     let clip = add_automation(&mut bound, &line, FULL);
     for target in [
         0x8003,
         insert_control(1, 0x1F01) + (2 << 16),
-        insert_control(1, 0x1FC2),
+        insert_control(1, 0x1FD3),
         MAIN_VOLUME,
     ] {
         bind(&mut bound, clip, target);
@@ -2334,13 +2450,13 @@ fn a_clip_bound_to_nothing_the_engine_plays_is_counted() {
     place(&mut bound, clip, 0, BAR);
     place(&mut bound, clip, BAR, BAR);
     let out = render(&bound, &dir);
-    assert_eq!((out.automation_clips, out.unsupported_targets), (0, 4));
+    assert_eq!((out.automation_clips, out.unsupported_targets), (0, 3));
     assert!(out.left[..96_000] == plain.left[..]);
     // One link the engine plays makes it a clip that plays, and the other
-    // four stay counted.
+    // three stay counted.
     bind(&mut bound, clip, insert_control(1, VOLUME));
     let out = render(&bound, &dir);
-    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 4));
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 3));
     assert_eq!(out.left[0], 0.0);
 
     // The volume of a channel the engine does not play is one more.
@@ -2441,6 +2557,378 @@ fn a_clip_on_a_channel_s_volume_and_pan_moves_its_notes() {
 /// A beat of the audio clip channel.
 fn clip_item(position: i32) -> PlaylistItem {
     clip(position, BEAT)
+}
+
+/// A channel's pitch knob, control 4: -4800 to 4800 cents over the clip's
+/// whole range, so 0.625 is an octave up and 0.375 an octave down.
+const PITCH: u32 = 4;
+/// A channel's pan offset and volume multiplier, its 229 @0 and @4.
+const PAN_OFFSET: u32 = 0x10;
+const VOLUME_MULTIPLIER: u32 = 0x11;
+
+/// The fixture's sampler channel playing `ramp.wav` on one step sequencer
+/// note, which plays the sample to its end.
+fn ramp_note() -> Project {
+    let mut project = project(&[(1, &[note(0)])], &[item(0, 1)]);
+    project.channels[0].sample_path = Some("ramp.wav".to_owned());
+    project
+}
+
+#[test]
+fn a_clip_on_a_channel_s_pitch_moves_the_speed_of_its_voices() {
+    let dir = Dir::new("automation-pitch");
+    dir.ramp();
+    // An octave up from the start: every other frame, for 500 samples.
+    let mut up = ramp_note();
+    let clip = add_automation(&mut up, &[Point::new(0.0, 0.625)], FULL);
+    bind(&mut up, clip, PITCH);
+    place(&mut up, clip, 0, BAR);
+    let out = render(&up, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    for i in 0..500 {
+        assert_eq!(out.left[i], ramp(2 * i), "sample {i}");
+    }
+    assert!(out.left[500..].iter().all(|v| *v == 0.0));
+
+    // A voice that is sounding speeds up where the controls are read
+    // next, the 512th sample, and goes on from the frame it is at.
+    let jump = [
+        Point::new(0.0, 0.5),
+        hold(0.01, 0.625),
+        Point::new(1.0, 0.625),
+    ];
+    let mut late = ramp_note();
+    let clip = add_automation(&mut late, &jump, FULL);
+    bind(&mut late, clip, PITCH);
+    place(&mut late, clip, 0, BAR);
+    let out = render(&late, &dir);
+    assert_ramp(&out.left, 0, 0..512, 1.0);
+    assert_ramp(&out.left, 512, (512..RAMP).step_by(2), 1.0);
+    assert!(out.left[756..].iter().all(|v| *v == 0.0));
+
+    // An octave down lasts twice as long, and the render runs to its end.
+    let mut down = ramp_note();
+    let clip = add_automation(&mut down, &[Point::new(0.0, 0.375)], FULL);
+    bind(&mut down, clip, PITCH);
+    place(&mut down, clip, 0, BAR);
+    let out = render(&down, &dir);
+    for i in 0..RAMP {
+        assert_eq!(out.left[2 * i], ramp(i), "sample {}", 2 * i);
+    }
+    assert!(out.left[1001] > out.left[1000] && out.left[1999] != 0.0);
+    assert!(out.left[2000..].iter().all(|v| *v == 0.0));
+
+    // An audio clip channel's pitch moves its clips the same way.
+    let mut clips = clips(&[clip_item(0)]);
+    let clip = add_automation(&mut clips, &[Point::new(0.0, 0.625)], FULL);
+    bind(&mut clips, clip, (1 << 16) + PITCH);
+    place(&mut clips, clip, 0, BAR);
+    let out = render(&clips, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    for i in 0..500 {
+        assert_eq!(out.left[i], ramp(2 * i), "sample {i}");
+    }
+    assert!(out.left[500..24_000].iter().all(|v| *v == 0.0));
+}
+
+#[test]
+fn a_clip_on_a_channel_s_pitch_moves_a_generator_s_notes_as_they_start() {
+    let dir = Dir::new("automation-generator-pitch");
+    // The pitch knob is at 0 for the first note and an octave up for the
+    // second, from beat 1 on.
+    let steps = [
+        Point::new(0.0, 0.5),
+        hold(1.0, 0.625),
+        Point::new(3.0, 0.625),
+    ];
+    let mut song = sine_song(&[sine_note(0, BEAT, 69), sine_note(2 * BEAT, BEAT, 69)]);
+    let clip = add_automation(&mut song, &steps, FULL);
+    bind(&mut song, clip, (1 << 16) + PITCH);
+    place(&mut song, clip, 0, BAR);
+    let out = render(&song, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    for n in (0..24_000).step_by(7) {
+        assert_eq!(out.left[n], sine_frame(69, n), "frame {n}");
+        assert_eq!(out.left[48_000 + n], sine_frame(81, n), "frame {n}");
+    }
+}
+
+/// What TestSine puts out for `notes`, each a key and the frames it is held
+/// for from frame 0, when the pitch of note `i` is moved to `pitch` cents
+/// from key 60 on frame `at` for every `(at, i, pitch)` of `moves`.
+fn moved_sines(notes: &[(i16, usize)], moves: &[(usize, u32, f32)], len: usize) -> Vec<f32> {
+    let mut sine = TestSine::default();
+    for (voice, &(key, _)) in notes.iter().enumerate() {
+        let voice = voice as u32;
+        sine.note_on(plugins::NoteOn {
+            voice,
+            key,
+            ..plugins::NoteOn::default()
+        });
+    }
+    // Note offs are moves to NaN.
+    let offs = notes.iter().enumerate();
+    let offs = offs.map(|(voice, &(_, held))| (held, voice as u32, f32::NAN));
+    let mut events: Vec<_> = moves.iter().copied().chain(offs).collect();
+    events.sort_by_key(|&(at, _, _)| at);
+    let (mut left, mut right) = (vec![0.0; len], vec![0.0; len]);
+    let mut done = 0;
+    for (at, voice, pitch) in events {
+        sine.process(&mut left[done..at], &mut right[done..at]);
+        done = at;
+        if pitch.is_nan() {
+            sine.note_off(voice);
+        } else {
+            sine.set_note_pitch(voice, pitch);
+        }
+    }
+    sine.process(&mut left[done..], &mut right[done..]);
+    left
+}
+
+/// A slide note for channel 1.
+fn slide_note(position: i32, length: i32, key: i16) -> Note {
+    Note {
+        tag: 0x4008,
+        ..sine_note(position, length, key)
+    }
+}
+
+#[test]
+fn a_slide_note_bends_the_held_note_to_its_key_a_tick_at_a_time() {
+    let dir = Dir::new("generator-slide");
+    // Key 69 held for the bar, and from beat 1 a slide up an octave over
+    // 47 ticks: 48 steps of 25 cents, the first on the slide's own tick.
+    let song = sine_song(&[sine_note(0, BAR, 69), slide_note(BEAT, 47, 81)]);
+    let out = render(&song, &dir);
+    assert_eq!((out.notes, out.hosted_generators), (2, 1));
+    let moves: Vec<_> = (0..48)
+        .map(|k| (24_000 + 250 * k, 0, 900.0 + 25.0 * (k + 1) as f32))
+        .collect();
+    let want = moved_sines(&[(69, 96_000)], &moves, out.left.len());
+    assert!(out.left == want, "the slide");
+    // It stays at the slide's key.
+    let last = 24_000 + 250 * 47;
+    assert!(out.left[last + 1000] != sine_frame(69, last + 1000));
+
+    // A slide that comes while another runs starts from where that one
+    // has got to: half way up, then back to 69 in one tick.
+    let song = sine_song(&[
+        sine_note(0, BAR, 69),
+        slide_note(BEAT, 95, 81),
+        slide_note(BEAT + 48, 0, 69),
+    ]);
+    let out = render(&song, &dir);
+    let mut moves: Vec<_> = (0..48)
+        .map(|k| (24_000 + 250 * k, 0, 900.0 + 12.5 * (k + 1) as f32))
+        .collect();
+    moves.push((36_000, 0, 900.0));
+    let want = moved_sines(&[(69, 96_000)], &moves, out.left.len());
+    assert!(out.left == want, "the slide cut short");
+
+    // A slide note with no note held moves nothing and sounds nothing.
+    let song = sine_song(&[slide_note(0, 10, 81), sine_note(BEAT, BEAT, 69)]);
+    let out = render(&song, &dir);
+    assert!(out.left[..24_000].iter().all(|v| *v == 0.0));
+    assert_eq!(out.left[24_100], sine_frame(69, 100));
+}
+
+#[test]
+fn a_slide_note_on_a_sampler_channel_moves_the_speed_of_the_held_voice() {
+    let dir = Dir::new("sampler-slide");
+    dir.ramp();
+    // The ramp held for a beat, and on tick 1 a slide an octave up in one
+    // tick: from sample 250 on it reads every other frame.
+    let mut song = ramp_note();
+    song.patterns[0].notes[0].length = BEAT;
+    let slide = Note {
+        tag: 0x4008,
+        key: 72,
+        ..note(1)
+    };
+    song.patterns[0].notes.push(slide);
+    let out = render(&song, &dir);
+    assert_eq!((out.notes, out.voices), (2, 1));
+    for i in 0..250 {
+        assert_eq!(out.left[i], ramp(i), "sample {i}");
+    }
+    for i in 250..625 {
+        assert_eq!(out.left[i], ramp(250 + 2 * (i - 250)), "sample {i}");
+    }
+    assert!(out.left[625..].iter().all(|v| *v == 0.0));
+
+    // Down an octave over two ticks: the voice lasts until it runs off the
+    // sample.
+    song.patterns[0].notes[1] = Note {
+        length: 1,
+        key: 48,
+        ..slide
+    };
+    let out = render(&song, &dir);
+    assert_eq!(out.left[..250], (0..250).map(ramp).collect::<Vec<_>>());
+    let last = out.left.iter().rposition(|v| *v != 0.0).unwrap();
+    assert!(last > 1000, "{last}");
+
+    // A slide note with no note held sounds nothing: here the step
+    // sequencer note is let go of on its first sample.
+    song.patterns[0].notes[0].length = 0;
+    let out = render(&song, &dir);
+    assert_eq!(out.left[..RAMP], (0..RAMP).map(ramp).collect::<Vec<_>>());
+    assert_eq!(out.voices, 1);
+}
+
+#[test]
+fn a_slide_note_bends_the_notes_of_its_colour_and_keeps_a_chord_s_shape() {
+    let dir = Dir::new("generator-slide-colour");
+    // A chord of 60 and 64 in the first colour and 69 in the second. The
+    // slide to 67 in the first colour takes the highest of its notes
+    // there in one tick, and the other along with it: 60 goes to 63.
+    let mut other = sine_note(0, BAR, 69);
+    other.flags = 1;
+    let mut stray = slide_note(2 * BEAT, 0, 50);
+    stray.flags = 2;
+    let song = sine_song(&[
+        sine_note(0, BAR, 60),
+        sine_note(0, BAR, 64),
+        other,
+        slide_note(BEAT, 0, 67),
+        stray,
+    ]);
+    let out = render(&song, &dir);
+    let notes = [(60, 96_000), (64, 96_000), (69, 96_000)];
+    let moves = [(24_000, 0, 300.0), (24_000, 1, 700.0)];
+    let want = moved_sines(&notes, &moves, out.left.len());
+    assert!(out.left == want);
+}
+
+#[test]
+fn a_clip_on_a_channel_s_pitch_moves_a_generator_s_sounding_note() {
+    let dir = Dir::new("automation-generator-held-pitch");
+    // One note held over the clip's step up an octave on beat 1, and a
+    // second that starts after it.
+    let steps = [
+        Point::new(0.0, 0.5),
+        hold(1.0, 0.625),
+        Point::new(3.0, 0.625),
+    ];
+    let mut song = sine_song(&[sine_note(0, 2 * BEAT, 69), sine_note(3 * BEAT, 10, 57)]);
+    let clip = add_automation(&mut song, &steps, FULL);
+    bind(&mut song, clip, (1 << 16) + PITCH);
+    place(&mut song, clip, 0, BAR);
+    let out = render(&song, &dir);
+    let want = moved_sines(&[(69, 48_000)], &[(24_000, 0, 2100.0)], 72_000);
+    assert!(out.left[..72_000] == want, "the held note");
+    for n in (0..2_000).step_by(7) {
+        assert_eq!(out.left[72_000 + n], sine_frame(69, n), "frame {n}");
+    }
+
+    // The same in blocks of any size.
+    let samples = engine::prepare(&song, &dir.0).unwrap();
+    for block in [1, 100, 512, 1000] {
+        let mut engine = Engine::new(&song, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, out.left.len());
+        assert!(sink.left == out.left, "blocks of {block}");
+    }
+}
+
+#[test]
+fn slides_come_out_the_same_in_blocks_of_any_size() {
+    let dir = Dir::new("generator-slide-blocks");
+    let song = sine_song(&[
+        sine_note(1, 200, 69),
+        sine_note(3, 150, 64),
+        slide_note(20, 33, 72),
+        slide_note(40, 3, 60),
+    ]);
+    let offline = render(&song, &dir);
+    let samples = engine::prepare(&song, &dir.0).unwrap();
+    for block in [1, 64, 256, 1000] {
+        let mut engine = Engine::new(&song, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, offline.left.len());
+        assert!(sink.left == offline.left, "blocks of {block}");
+    }
+
+    // And on a sampler channel.
+    dir.ramp();
+    let mut ramp = ramp_note();
+    ramp.patterns[0].notes[0].length = BEAT;
+    for (position, length, key) in [(1, 2, 67), (3, 5, 55)] {
+        ramp.patterns[0].notes.push(Note {
+            tag: 0x4008,
+            length,
+            key,
+            ..note(position)
+        });
+    }
+    let offline = render(&ramp, &dir);
+    let samples = engine::prepare(&ramp, &dir.0).unwrap();
+    for block in [1, 64, 256, 1000] {
+        let mut engine = Engine::new(&ramp, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, offline.left.len());
+        assert!(sink.left == offline.left, "sampler in blocks of {block}");
+    }
+}
+
+#[test]
+fn a_channel_s_pan_offset_adds_to_its_pan_and_a_clip_moves_it() {
+    let dir = Dir::new("automation-pan-offset");
+    // The 229 of the project puts the channel hard left.
+    let mut left = project(&[(1, &four_beats())], &[item(0, 1)]);
+    left.channels[0].level_adjusts = Some(layout::LevelAdjusts {
+        unknown_0: (-6400i32).to_le_bytes(),
+        unknown_4: 12_800i32.to_le_bytes(),
+        unknown_8: [0; 12],
+    });
+    left.channels[0].order.push(Placed {
+        pos: 150,
+        item: Item::Field(Id::LevelAdjusts),
+    });
+    let out = render(&left, &dir);
+    assert_impulses(&out.left, &[0, 24_000, 48_000, 72_000]);
+    assert_impulses(&out.right, &[]);
+
+    // A clip takes it to the right from beat 2 on.
+    let sides = [Point::new(0.0, 0.0), hold(2.0, 1.0), Point::new(2.0, 1.0)];
+    let clip = add_automation(&mut left, &sides, FULL);
+    bind(&mut left, clip, PAN_OFFSET);
+    place(&mut left, clip, 0, BAR);
+    let out = render(&left, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    assert_impulses(&out.left, &[0, 24_000]);
+    assert_impulses(&out.right, &[48_000, 72_000]);
+}
+
+#[test]
+fn a_clip_on_a_channel_s_volume_multiplier_scales_its_voices() {
+    let dir = Dir::new("automation-volume-multiplier");
+    dir.tone(96_000);
+    // The multiplier at unity for two beats, then at half of it.
+    let steps = [Point::new(0.0, 0.5), hold(2.0, 0.25), Point::new(2.0, 0.25)];
+    let mut held = note(0);
+    held.length = BAR;
+    let mut sung = project(&[(1, &[held])], &[item(0, 1)]);
+    sung.channels[0].sample_path = Some("tone.wav".to_owned());
+    let clip = add_automation(&mut sung, &steps, FULL);
+    bind(&mut sung, clip, VOLUME_MULTIPLIER);
+    place(&mut sung, clip, 0, BAR);
+    let out = render_exact(&sung, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    let unity = out.left[0];
+    assert!(unity > 0.0);
+    assert!(out.left[..48_000].iter().all(|v| *v == unity));
+    let half = unity * engine::FlExact.volume_adjust_gain(6400);
+    // Beat 2 is 128 samples before a 512th sample.
+    let after = out.left[48_128];
+    assert!((after - half).abs() < 1e-6, "{after} {half}");
+    assert!(out.left[48_128..96_000].iter().all(|v| *v == after));
+    assert!(out.left[48_000..48_128].iter().all(|v| *v == unity));
+    assert!(half < 0.5 * unity);
 }
 
 #[test]
@@ -4067,9 +4555,20 @@ fn a_controller_drives_a_parameter_of_a_hosted_plugin() {
     let plain = render(&kick_and_bare_tone(&dir), &dir);
     assert!(out.left == plain.left);
     assert!(out.right[..KICK + TICK] == plain.right[..KICK + TICK]);
-    // PanOMatic ramps to where its volume is put over the block, which is
-    // the tick, so the tone is gone a tick after the fader went down.
-    let down = &out.right[KICK + 2 * TICK..KICK + 10 * TICK];
+    // PanOMatic ramps to where its volume is put by no more than
+    // `0.001 * 44100 / 48000` a frame, so the tone takes 1089 frames,
+    // four ticks and a half, to go, and is gone after that.
+    let cap = 0.001 * 44_100.0 / 48_000.0;
+    let fading = &out.right[KICK + TICK..KICK + 5 * TICK];
+    let first = KICK + TICK;
+    for (n, v) in fading.iter().enumerate() {
+        let floor = (1.0 - cap * (n + 1) as f32).max(0.0);
+        assert!(
+            v.abs() >= (floor * plain.right[first + n]).abs() - 1e-4,
+            "{n}"
+        );
+    }
+    let down = &out.right[KICK + 6 * TICK..KICK + 10 * TICK];
     assert!(down.iter().all(|v| *v == 0.0));
     assert!(out.right[KICK + 34 * TICK..24_000] == plain.right[KICK + 34 * TICK..24_000]);
 }
@@ -4102,12 +4601,53 @@ fn panomatic_pans_and_scales_what_plays_into_its_insert() {
     assert!((db(out.left[0]) + 12.7).abs() < 0.05 && out.left[0] == out.right[0]);
     assert!(out.approximated_slots.is_empty());
 
-    // With its LFO on, the plugin says its rate is FL's formula as read,
-    // which the render's 48 kHz puts off the wheel's.
+    // With its LFO on at the render's 48 kHz, its rate is FL's too.
     let mut moving = one_click();
     let auto_pan = params(&[128, 256, 1, 1, 87, 45_614]);
     add_effect(&mut moving, 1, 0, "Fruity PanOMatic", &auto_pan);
     let out = render(&moving, &dir);
-    let said: Vec<_> = out.approximated_slots.iter().collect();
-    assert_eq!(said, [(&"PanOMatic LFO rate at non-44.1k", &1)]);
+    assert!(out.approximated_slots.is_empty());
+}
+
+#[test]
+fn clips_drive_an_insert_s_separation_and_eq() {
+    let dir = Dir::new("automation-separation-eq");
+    dir.tone(3 * 96_000);
+    // The tone on the left alone, through insert 2, whose separation a
+    // clip holds all the way merged over the first bar. A clip's whole
+    // range is the control's -64 to 64.
+    let mut merged = tone(BAR + 2 * BEAT);
+    set(&mut merged, 1, PAN, -6400);
+    route(&mut merged, 1, &[2]);
+    let hold = add_automation(
+        &mut merged,
+        &[Point::new(0.0, 1.0), Point::new(4.0, 1.0)],
+        FULL,
+    );
+    bind(&mut merged, hold, insert_control(2, SEPARATION));
+    place(&mut merged, hold, 0, BAR);
+    let out = render(&merged, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    assert_eq!((out.left[1000], out.right[1000]), (0.5, 0.5));
+
+    // A clip that holds the low shelf of insert 1 at the top of its range,
+    // 18 dB, lifts the tone, which is all bottom, by as much once the
+    // shelf has settled.
+    let mut lifted = tone(BAR + 2 * BEAT);
+    let hold = add_automation(
+        &mut lifted,
+        &[Point::new(0.0, 1.0), Point::new(4.0, 1.0)],
+        FULL,
+    );
+    bind(&mut lifted, hold, insert_control(1, EQ_GAIN));
+    place(&mut lifted, hold, 0, BAR);
+    let out = render(&lifted, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    let want = 10f32.powf(0.9);
+    assert!(
+        (out.left[40_000] - want).abs() < 1e-3,
+        "{}",
+        out.left[40_000]
+    );
+    assert_eq!(out.left[40_000], out.right[40_000]);
 }

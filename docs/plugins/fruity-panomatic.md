@@ -130,14 +130,21 @@ P    = round((50001^(i / 65536) - 1) * i * (2048 / SR))     // 0x6c6530 = 50001,
 0x16c = 2^32 / P                                   // FUN_005ae800: increment per sample
 ```
 
+In detail (`0x006c64b0..0x006c652e`): `d = float(Exp(double(float(i /
+65536)) * Ln(50001)) - 1.0)`, then `float(d * float(i)) * 0x180` in singles,
+rounded by `CVTSD2SI` (half to even, `FUN_00409d00`); `FUN_005ae800` is
+`MOV EDX,1; XOR EAX,EAX; DIV ECX`, so `2^32 / P` truncated. `0x180` is
+`float(2048.0 / double(SR))`, written by the dispatcher's case 4
+(`0x006c5e2e`), `FPD_SetSampleRate`, whose value is the rate.
+
 So `P` is the period in samples and the frequency is `SR / P`. At 44.1 kHz:
 p5 = 0 gives 0.29 mHz (an hour per cycle), 27500 (the default) 0.047 Hz
 (21 s), 45614 (the corpus favourite) 1.1 Hz, 55000 19.2 Hz. Because `P`
 carries `1/SR`, the frequency scales with SR^2: the same project runs the
 LFO 18 % faster at 48 kHz than at 44.1 kHz. That is what the listing says
-(`CVTSI2SS i; MULSS (d-1); MULSS [rbx+0x180]`); whether it is FL's intent or a
-bug is not something the binary can settle. The GUI shows the knob as a
-percentage of 55000, not as Hz.
+(`CVTSI2SS i; MULSS (d-1); MULSS [rbx+0x180]`), and `0x180` is set from the
+rate the host sends, so it is what FL does, meant or not. The GUI shows the
+knob as a percentage of 55000, not as Hz.
 
 Dispatcher (`FUN_006c5c10`): `FPD_Flush` (2) copies the target matrix into
 the current one and zeroes the LFO phase; `FPD_SetSampleRate` (4) stores
@@ -176,10 +183,8 @@ not read (`inferred` from the SDK comment). Shape 0..2 index the first three.
   `.bss`.
 - `K = ln 11` for the volume curve is inferred from the same `.bss`
   constant the other Fruity plugins use.
-- The SR^2 dependence of the LFO rate is as read; a runtime check against
-  FL at two sample rates would confirm or refute it.
-- The host wavetable contents (whether the triangle and square are naive or
-  band-limited) were not read from FLEngine.
+- The host wavetables are the ones `crates/plugins/src/three_osc.rs`
+  rebuilds for 3x Osc, read there, not here.
 - GUI only: the Dispatcher's window messages, the `Left/Centered` pan hint
   and the dB formatter.
 
@@ -189,3 +194,12 @@ Found while implementing `crates/plugins/src/panomatic.rs` against the corpus:
 
 - LFO speed 45614 is 1.85 Hz, not 1.1 Hz.
 - The LFO target counts in the corpus are 163 OFF, 26 PAN and 4 VOL, not 177, 14 and 3.
+
+## Implementation notes (crates/plugins/src/panomatic.rs)
+
+- The LFO period is `FUN_006c64b0` in its order of operations, `Exp` and `Ln`
+  by Rust's (they may be an ulp from Delphi's), at every rate.
+- `FUN_005dfe70` is `parts::glide`: each of the four gains moves by no more
+  than the engine info's `+0x34` a frame, `0.001 * 44100 / SR`
+  (`TAudioRenderer`, as Convolver and Delay Bank have it), and snaps to 0 under
+  2^-24 when the cap bites. `Matrix::apply_capped` runs it.

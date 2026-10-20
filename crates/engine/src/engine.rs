@@ -34,6 +34,9 @@ pub struct Engine {
     /// The first tick of the song that does not start before `position`:
     /// the next one the mixer's controller plugins are told of.
     next_tick: Ticks,
+    /// The same for the generators that follow a clip on their channel's
+    /// pitch.
+    next_bend: Ticks,
     playing: bool,
     /// The song has ended and its last voices and generator notes are
     /// playing out. The clock runs on under them until they are done, and
@@ -134,6 +137,7 @@ impl Engine {
             next: 0,
             next_cue: 0,
             next_tick: 0,
+            next_bend: 0,
             playing: false,
             ringing: false,
             looping: false,
@@ -228,6 +232,7 @@ impl Engine {
         self.next = 0;
         self.next_cue = 0;
         self.next_tick = 0;
+        self.next_bend = 0;
     }
 
     /// Move the clock and cut every voice and every note a generator is
@@ -296,6 +301,7 @@ impl Engine {
             tick += 1;
         }
         self.next_tick = tick;
+        self.next_bend = tick;
     }
 
     /// Fill both buffers with what comes next and move the clock on by
@@ -446,6 +452,29 @@ impl Engine {
                 }
                 automation.carry(&mut graph.mixer, curves);
                 count = count.min(graph.clock.sample(self.next_tick) - self.position);
+            }
+            // FL's host works a voice's pitch out again on every tick, so a
+            // generator that follows a clip on its channel's pitch hears
+            // of it as the tick starts. A block ends at the next tick
+            // where the clip moves the pitch, and only there, so where it
+            // does not the blocks fall as they would without it.
+            if graph.mixer.bending() {
+                let clock = &graph.clock;
+                let automation = &*automation;
+                let shift =
+                    |tick: Ticks| move |channel| automation.pitch_shift(channel, tick as f64);
+                while clock.sample(self.next_bend) <= self.position {
+                    graph.mixer.bend(self.position, shift(self.next_bend));
+                    self.next_bend += 1;
+                }
+                let mut tick = self.next_bend;
+                while clock.sample(tick) < self.position + count {
+                    if graph.mixer.moves(shift(tick)) {
+                        count = clock.sample(tick) - self.position;
+                        break;
+                    }
+                    tick += 1;
+                }
             }
             automation.follow(&mut self.voices, curves);
             let block = at..at + count;

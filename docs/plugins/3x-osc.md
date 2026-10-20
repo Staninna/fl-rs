@@ -44,7 +44,7 @@ parent `TDelphiFruityPlug` VMT `0x00722348`). Generator slots in FL SDK order:
 
 `TFruityPlugInfo` @ `0x00791978` (packed): SDK version 1, "3x Osc" / "3xOsc",
 Flags `0x11600039` (bits 0 Generator, 3 GetChanCustomShape, 4 GetNoteInput, 5
-WantNewTick, 21 NewVoiceParams, 22, 24, 28), NumParams 114 (21 own + 93 of the
+WantNewTick, 21 NewVoiceParams, 22, 24, 28), NumParams 114 (21 own, two unused, 91 of the
 instrument tab), DefPoly 0. `FPF_UseSampler` and `FPF_RenderVoice` are not set:
 the host calls `Gen_Render` once per block and the plugin renders and
 articulates its own voices.
@@ -193,7 +193,29 @@ checked by hand decodes with the table above):
 
 ## 2. Parameter semantics (`ProcessParam` @ 0x00739060)
 
-Indexes 21..113 go to the instrument tab's handler (object at `this+0x22c`).
+Indexes 23..113 go to the instrument tab's handler (object at `this+0x22c`,
+`*(form+0x898)+0x6ac`, class `*0x733e28`, VMT `0x733ef0`, ProcessParam slot 0
+`FUN_007378a0`); 21 and 22 reach neither and do nothing. The handler's index
+record (`*0x00792f88` = `0x804628`) is filled by `FUN_0072c440(23)` from
+`0x0073ad35` (Fruit Kick passes 6):
+
+```
+first 23, stride 17; blocks 23..107: block b = (i - 23) / 17, word w = (i - 23) % 17
+     -> tab+8 + 0xa0 b + 4 w, then FUN_0072a400 (the block's derived values), tab+0x334 = 1
+cutoff 110 -> tab+0x328, resonance 111 -> tab+0x32c, type 113 -> tab+0x330 (tab = frame+0x6b8)
+108, 109, 112: nothing stored, nothing read
+REC_FromMIDI (0x20): the control from FUN_007369e0 (frame+0x6a4 [w], built by
+     FUN_007364a0: w 0 none, w 1 the "use envelope" box, w 2..16 the Tag 0x1000 + w
+     wheels; 0x640 / 0x638 / 0x630 for cutoff, resonance and type), rescaled by
+     FUN_00737820 over its Min (+0x3a8) .. Max (+0x3ac); words 8 and 11 (envelope and
+     LFO amount) over -a..a with a = *0x790a60[b] = 64, 128, 128, 128, 2400
+     (pan, volume, mod X, mod Y, pitch); w 0 has no control and is stored as given
+```
+
+Ranges (DFM): predelay, attack, hold, decay, release, LFO predelay and LFO
+attack 100..65536, sustain 0..128, LFO speed 200..65536, LFO shape 0..2,
+tensions -128..128, cutoff and resonance 0..256, type 0..7.
+
 For 0..20: REC_FromMIDI rescales with the wheel's Min/Max; REC_UpdateValue
 stores the int and recomputes, by `(idx + 1) mod 7` with osc `i = (idx + 1) div 7`:
 
@@ -224,7 +246,11 @@ is 523.25 Hz (the constant is `2^32 * 523.2511`). The host's
 `FinalLevels.Pitch` is `(key - 60) * 100 + fine pitch + channel pitch`
 (`host-voice.md`, section 3), so an oscillator at 0 semitones plays 523.25 Hz
 for C5 (MIDI 60): one octave above a standard instrument, which is what the
-default preset's -12 and -24 on oscillators 2 and 3 lean on.
+default preset's -12 and -24 on oscillators 2 and 3 lean on. The voice
+reads `FinalLevels.Pitch` again every tick (3.1), so a pitch the host moves
+under a sounding note (a slide note, a clip on the channel's pitch) is
+heard from the next tick: `three_osc.rs` takes it from
+`Generator::set_note_pitch`.
 
 Dispatcher (`FUN_00737f90`): 1 FPD_ProcessMode -> `0x1fd = value & 2`; 4
 SetSampleRate -> `0xe4`, engine `dispatch(obj, 2, SR)`; 7 FPD_UseVoiceLevels

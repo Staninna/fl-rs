@@ -37,30 +37,41 @@
 //! summed. Unison makes up to nine voices of a note with their own pitch,
 //! pan, phase and attack.
 //!
-//! After the voices: stereo tremolo, chorus, delay, reverb and the
-//! compression, which is a Maximus loaded from
+//! Each voice then takes the stereo tremolo; after the voices come the
+//! chorus, delay, reverb and the compression, which is a Maximus loaded from
 //! `Harmless/Data/Compression/<n>.fst` under the directory
 //! [`Generator::set_resource_dir`] is handed. The chorus, delay and reverb
 //! are FL's own classes from [`crate::fl_fx`], set from Harmless's tables.
+//!
+//! # Notes and their colours
+//!
+//! A note's colour ([`NoteOn::color`]) is its group: legato (`MonoBox`)
+//! hands a sounding note's voices to a new note of its group, and
+//! portamento (`PortaBox`) glides a new note from the last of its group.
+//! A note of the 14th colour turns `MonoBox` round for itself and one of
+//! the 15th `PortaBox`, in the first colour's group when that turns the
+//! box on. A note of the 16th colour is a filter note: it sounds nothing,
+//! and while it is held the cutoff follows its pitch, two octaves over its
+//! frequency, from the middle of the filter's range; where the last one
+//! ends the cutoff stays. A note's pitch follows the host's
+//! ([`Generator::set_note_pitch`]) on its next control tick.
 //!
 //! # What is not FL's
 //!
 //! - The effects are told a host block of 256 frames, which sets when
 //!   they sleep after the last voice. The delay keeps its time down to 20
 //!   BPM and is only made when the state loads with it on.
-//! - The stereo tremolo's shape is read from its setter, its smoothing is
-//!   not.
-//! - Mono mode cuts the voices before it and portamento glides in a
-//!   straight line in cents; FL's legato and slide handling is not built.
-//! - The phaser's frequency-shift type (9) and the noise resonance type
-//!   (8) are played as the types before them.
-//! - The host's per-voice volume and pan ramps are a straight ramp a block.
+//! - The noise resonance and the per-note LFO value draw from a
+//!   generator of their own: FL's is a Mersenne twister seeded from the
+//!   performance counter (`FUN_0074bcf0`), so no two runs of FL agree
+//!   either.
 
+use crate::autogun_engine::rand_uniform;
 use crate::fl_fx::{
     Delay32, DelayKernel, FlangerSettings, FruityReverb, ReverbSettings, StereoFlanger,
 };
 use crate::three_osc::pan_law;
-use crate::{Effect, Fidelity, Generator, NoteOn, StateError, knob_value, maximus::Maximus};
+use crate::{Effect, Fidelity, Generator, NoteOn, StateError, knob_value, maximus::Maximus, parts};
 use dsp::additive::{ShapeTable, SineBank};
 use std::f64::consts::{LN_2, PI, TAU};
 use std::path::Path;
@@ -84,6 +95,33 @@ pub const IMAGE: usize = 524;
 
 /// The voices the plugin keeps, unison copies counted.
 const VOICES: usize = 96;
+
+/// The most notes legato keeps held under the one that sounds.
+const HELD: usize = 64;
+
+/// The colours a note can have, each a group of its own for legato and
+/// portamento (`FPV_GetColor & 0xf`).
+const GROUPS: usize = 16;
+
+/// The colour that turns `MonoBox` round for its note.
+const MONO_COLOR: u8 = 13;
+/// The colour that turns `PortaBox` round for its note.
+const PORTA_COLOR: u8 = 14;
+/// The colour of a filter note, which sounds nothing and moves the
+/// filter's cutoff to its pitch.
+const FILTER_COLOR: u8 = 15;
+
+/// What Harmless keeps of a group of notes (`0x340 + 0x20 g`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Slot {
+    /// The note whose voices answer for the group (FL's voice at +0), and
+    /// when it started.
+    lead: Option<u32>,
+    lead_age: u64,
+    /// The levels the last note of the group left (+8..+0x1c): `None` is
+    /// FL's 0x7fffffff in its cents.
+    last: Option<[f32; 6]>,
+}
 
 /// A voice whose envelope falls under -80 dB after its attack is over.
 const END_LEVEL: f32 = 1e-4;
@@ -824,6 +862,10 @@ struct Derived {
     keytrack: f32,
     flfo: f32,
     res_offset: f32,
+    /// The noise resonance's hold in ms (0x720) and the part of it a tick
+    /// is (0x718).
+    noise_len: f64,
+    noise_rate: f64,
     res_ratio: f32,
     res_scale: f32,
     res_bias: f32,
@@ -849,7 +891,13 @@ struct Derived {
     vib_attack: f32,
     pluck_rate: f64,
     pluck_start: i64,
-    tremolo_rate: f64,
+    /// The tremolo's rate in turns a sample (0x7a4), the frames a new
+    /// voice fades it in over (0x7ac) and the fade's step (0x7a8).
+    tremolo_rate: f32,
+    tremolo_fade: i32,
+    tremolo_fade_step: f32,
+    /// The most a host gain moves a frame (`TAudioRenderer` +0x34).
+    ramp_cap: f32,
 }
 
 /// A curve of the filter envelope: `FUN_005fd4d0`'s `(t, 1 / |t|,
@@ -942,6 +990,8 @@ impl Derived {
             keytrack: 1.0,
             flfo: 0.0,
             res_offset: 0.0,
+            noise_len: 2.0,
+            noise_rate: 0.0,
             res_ratio: 1.0,
             res_scale: 1024.0,
             res_bias: -0.125,
@@ -968,6 +1018,9 @@ impl Derived {
             pluck_rate: 0.0,
             pluck_start: 0,
             tremolo_rate: 0.0,
+            tremolo_fade: 0,
+            tremolo_fade_step: 0.0,
+            ramp_cap: 0.001,
         }
     }
 }
@@ -1069,17 +1122,35 @@ struct Voice {
     id: u32,
     /// Its order of starting, for taking the oldest.
     age: u64,
-    /// The note's cents from C5 and the glide toward them.
+    /// The note's cents from C5.
     pitch: f32,
-    glide_from: f32,
-    glide_left: f32,
-    glide_step: f32,
+    /// The note's group, a colour (`voice+0x3c`).
+    group: u8,
     velocity: f32,
     vel01: f32,
     pan: f32,
     mod_x: f32,
     mod_y: f32,
     release_value: f32,
+    /// What the note's glides take their time by (`voice+0x24`).
+    porta_scale: f32,
+    /// The first unison voice of its note: FL's voice record that owns the
+    /// others (`+0xa0` 0).
+    lead: bool,
+    /// The glide (`voice+0x4c..+0x7c`): what it puts on the note's pan,
+    /// volume, cents, Mod X, Mod Y and velocity, what it adds to them a
+    /// tick, how many ticks it has left (below 0 for one that falls by
+    /// `slide_coef` a tick for good).
+    slide: [f32; 6],
+    slide_step: [f32; 6],
+    slide_ticks: i32,
+    slide_coef: f32,
+    /// The frames left of the tremolo's fade in (`voice+0x80`).
+    trem_fade: i32,
+    /// The noise resonance's seed (`voice+0x1a8`) and how far through
+    /// its hold it is (`+0x1b0`).
+    noise_seed: i32,
+    noise_time: f64,
     phase_offset: f32,
     pan_offset: f32,
     pitch_offset: f32,
@@ -1132,15 +1203,22 @@ impl Voice {
             id: 0,
             age: 0,
             pitch: 0.0,
-            glide_from: 0.0,
-            glide_left: 0.0,
-            glide_step: 0.0,
+            group: 0,
             velocity: 1.0,
             vel01: 0.78,
             pan: 0.0,
             mod_x: 0.0,
             mod_y: 0.0,
             release_value: 0.5,
+            porta_scale: 1.0,
+            lead: false,
+            slide: [0.0; 6],
+            slide_step: [0.0; 6],
+            slide_ticks: 0,
+            slide_coef: 1.0,
+            trem_fade: 0,
+            noise_seed: 0,
+            noise_time: 0.0,
             phase_offset: 0.5,
             pan_offset: 0.0,
             pitch_offset: 0.0,
@@ -1182,6 +1260,119 @@ impl Voice {
             gains: [0.0; 2],
             mono: [0.0; CHUNK],
             env_buf: [0.0; CHUNK],
+        }
+    }
+}
+
+/// What a note brings a voice and keeps when legato hands the voice on
+/// (the first 0x28 bytes of FL's voice record and its `TVoiceParams`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Note {
+    id: u32,
+    /// When it started, for the newest held note.
+    age: u64,
+    /// Its group, a colour (`voice+0x3c`).
+    group: u8,
+    pitch: f32,
+    velocity: f32,
+    vel01: f32,
+    pan: f32,
+    mod_x: f32,
+    mod_y: f32,
+    release: f32,
+    porta_scale: f32,
+}
+
+impl Note {
+    /// The levels a glide works on (`FUN_00787ec0`): pan, volume, cents,
+    /// Mod X, Mod Y and velocity.
+    fn levels(&self, to_volume: bool) -> [f32; 6] {
+        let volume = if to_volume { self.velocity } else { 1.0 };
+        [
+            self.pan, volume, self.pitch, self.mod_x, self.mod_y, self.vel01,
+        ]
+    }
+}
+
+impl Voice {
+    fn note(&self, age: u64) -> Note {
+        Note {
+            id: self.id,
+            age,
+            group: self.group,
+            pitch: self.pitch,
+            velocity: self.velocity,
+            vel01: self.vel01,
+            pan: self.pan,
+            mod_x: self.mod_x,
+            mod_y: self.mod_y,
+            release: self.release_value,
+            porta_scale: self.porta_scale,
+        }
+    }
+
+    fn take_note(&mut self, note: &Note) {
+        self.id = note.id;
+        self.group = note.group;
+        self.pitch = note.pitch;
+        self.velocity = note.velocity;
+        self.vel01 = note.vel01;
+        self.pan = note.pan;
+        self.mod_x = note.mod_x;
+        self.mod_y = note.mod_y;
+        self.release_value = note.release;
+        self.porta_scale = note.porta_scale;
+    }
+
+    /// Glide from `from` to the voice's own note (`FUN_00784630`): the
+    /// glide takes on the difference, and moves it off over `porta`
+    /// ticks times the note's scale, a hundredth a time when that is
+    /// above 0 and in a straight line over one tick more than it when not.
+    /// A new note's glide (`fresh`) leaves its pan, volume and velocity
+    /// alone, and `wrap` takes octaves off the cents until they are 1250
+    /// or less.
+    fn glide(&mut self, from: &[f32; 6], to: &[f32; 6], wrap: bool, fresh: bool, porta: f32) {
+        for k in [0, 1, 5] {
+            self.slide[k] = if fresh {
+                0.0
+            } else {
+                self.slide[k] + from[k] - to[k]
+            };
+        }
+        for k in 2..5 {
+            self.slide[k] = self.slide[k] + from[k] - to[k];
+        }
+        if wrap && self.slide[2] != 0.0 {
+            let octave = 1200f32.copysign(self.slide[2]);
+            while f64::from(self.slide[2]).abs() > 1250.0 {
+                self.slide[2] -= octave;
+            }
+        }
+        let ticks = porta * self.porta_scale;
+        if ticks > 0.0 {
+            self.slide_ticks = i32::MIN + 1;
+            self.slide_coef = (0.01f64.ln() / f64::from(ticks)).exp() as f32;
+        } else {
+            let n = 1 - round(f64::from(ticks)) as i32;
+            self.slide_ticks = n;
+            let by = (-1.0 / f64::from(n)) as f32;
+            for k in 0..6 {
+                self.slide_step[k] = self.slide[k] * by;
+            }
+        }
+    }
+
+    /// A tick of the glide (`FUN_00784a10`, at the top of the tick).
+    fn step_slide(&mut self) {
+        if self.slide_ticks < 0 {
+            for x in &mut self.slide {
+                *x *= self.slide_coef;
+            }
+        } else if self.slide_ticks > 0 {
+            for k in 0..6 {
+                self.slide[k] += self.slide_step[k];
+            }
+            self.slide_ticks -= 1;
         }
     }
 }
@@ -1229,7 +1420,24 @@ pub struct Harmless {
     vibrato_phase: f32,
     phaser_phase: f64,
     seed: u32,
-    last_pitch: Option<f32>,
+    /// The notes held under the one that sounds, in legato: FL's voice
+    /// records of type 2.
+    held: [Note; HELD],
+    held_len: usize,
+    /// A slot for each colour of note (`0x340 + 0x20 g`): the note whose
+    /// voices answer for the notes of the group, and the levels the last
+    /// one left, which a glide starts from.
+    slots: [Slot; GROUPS],
+    /// The filter notes, notes of the 16th colour: FL's voice records of
+    /// type 1. The newest is the one that moves the filter (0x338), and
+    /// the cutoff it adds in log2 Hz (0x6dc) stays when it ends.
+    filters: [Note; HELD],
+    filters_len: usize,
+    filter_offset: f32,
+    /// The tremolo's depth as it glides to the wheel's (0x7a0), and its
+    /// gains for the block, left and right side by side (set 0 +0x30).
+    trem_depth: f32,
+    trem: [f32; 2 * CHUNK],
     compression: Option<Box<Maximus>>,
     compression_states: [Option<Vec<u8>>; 4],
     missing_compression: bool,
@@ -1257,7 +1465,14 @@ impl Default for Harmless {
             vibrato_phase: 0.0,
             phaser_phase: 0.0,
             seed: 0x1234_5678,
-            last_pitch: None,
+            held: [Note::default(); HELD],
+            held_len: 0,
+            slots: [Slot::default(); GROUPS],
+            filters: [Note::default(); HELD],
+            filters_len: 0,
+            filter_offset: 0.0,
+            trem_depth: 0.0,
+            trem: [0.0; 2 * CHUNK],
             compression: None,
             compression_states: [None, None, None, None],
             missing_compression: false,
@@ -1383,7 +1598,7 @@ impl Harmless {
         }
         d.mask_mix = k(p[23]) as f32;
         d.mask_lfo = k(p[24]) as f32;
-        d.tremolo = k(p[25]) as f32;
+        d.tremolo = p[25] as f32 * 0.001f32;
         d.attack = sr * (((k(p[26]) * 101f64.ln()).exp() - 1.0) as f32 as f64) * 0.05;
         d.decay = if p[27] < 1000 {
             sr * (((k(p[27]) * 1001f64.ln()).exp() - 1.0) as f32 as f64 * 0.11995 + 0.05)
@@ -1409,9 +1624,15 @@ impl Harmless {
             let e = ((v.abs() as f32 as f64 * 101f64.ln()).exp() - 1.0) as f32;
             (f64::from(e * v.signum() as f32) * 12.0) as f32
         };
+        // The glide time in ticks, signed (`ProcessParam` 45, 0x548): above
+        // 0 a glide falls to a hundredth in it, at or below 0 it runs
+        // straight over one tick more than its size.
         d.porta = {
-            let v = k(p[45]).abs();
-            ((v * 41f64.ln()).exp() - 1.0) as f32 / 26.666_666
+            let v = p[45];
+            let e =
+                ((f64::from(v.unsigned_abs() as f32 * 0.001f32) * 41f64.ln()).exp() - 1.0) as f32;
+            let sr = (f64::from(v.signum()) * sr.round()) as f32;
+            (f64::from(sr * e) / (d.tick as f64 * 26.666_666_666_666_668)) as f32
         };
         d.fenv_attack = if p[48] < 1000 {
             let e = ((k(p[48]) * 1001f64.ln()).exp() - 1.0) as f32;
@@ -1441,6 +1662,12 @@ impl Harmless {
         d.keytrack = k(p[57]) as f32;
         d.flfo = (k(p[58]) * 6.0) as f32;
         d.res_offset = (f64::from(p[61]) / 1200.0) as f32;
+        // `ProcessParam` 61: the noise holds `(201^x - 1) 2.49 + 2.0` ms,
+        // x the wheel from 0 to 1.
+        let x = (f64::from(p[61] + 2400) * 0.000_208_333_333_333_333_35) as f32;
+        let e = ((f64::from(x) * 201f64.ln()).exp() - 1.0) as f32;
+        d.noise_len = f64::from(e) * 2.490_022_675_736_961_2 + 1.995_464_852_607_709_7;
+        d.noise_rate = d.tick as f64 / (d.noise_len * 0.001 * sr.round());
         d.res_ratio = f64::from(d.res_offset).exp2() as f32;
         let (scale, bias) = match (p[60] > 0, p[63] > 0) {
             (false, false) => (1024.0, -0.125),
@@ -1487,7 +1714,11 @@ impl Harmless {
         d.vib_attack = (3.0 / sr) as f32;
         d.pluck_rate = 0.01f64.ln() * d.tick as f64 / sr;
         d.pluck_start = 1 - round(sr * 0.002 / d.tick as f64) as i64;
-        d.tremolo_rate = 2.5 / sr;
+        // `FUN_0077f170`.
+        d.tremolo_rate = (2.5 / sr.round()) as f32;
+        d.tremolo_fade = round(sr.round() * 0.1) as i32;
+        d.tremolo_fade_step = (1.0 / f64::from(d.tremolo_fade + 1)) as f32;
+        d.ramp_cap = (0.001 * 44_100.0 / sr) as f32;
 
         self.set_effects();
     }
@@ -1619,39 +1850,96 @@ impl Harmless {
         self.compression = Some(maximus);
     }
 
-    fn uses_porta(&self) -> bool {
-        self.on(43) && self.param(45) != 0
-    }
-
     fn random(&mut self) -> f32 {
         self.seed = self.seed.wrapping_mul(0x0808_8405).wrapping_add(1);
         (f64::from(self.seed) * 2.328_306_437_080_797_4e-10) as f32
     }
 
+    /// Forget the last note of every group (`FUN_00788030`).
+    fn forget_last(&mut self) {
+        for slot in &mut self.slots {
+            slot.last = None;
+        }
+    }
+
+    /// Move the filter to the newest filter note's pitch (`Gen_Render`,
+    /// `0x78893f`): two octaves over the note's frequency, from the middle
+    /// of the filter's range (0x6c4), in log2 Hz. With none the cutoff
+    /// stays where the last one left it.
+    fn follow_filter_note(&mut self) {
+        let Some(newest) = self.filters[..self.filters_len].last() else {
+            return;
+        };
+        let d = &*self.d;
+        let middle = (f64::from(d.fmin + d.fmax) * 0.5) as f32;
+        let log2_440 = 440f64.ln() * (1.0 / 2f64.ln());
+        let key = f64::from(newest.pitch * 0.01 + 84.0);
+        self.filter_offset = ((log2_440 + (key - 57.0) * (1.0 / 12.0)) - f64::from(middle)) as f32;
+    }
+
     /// Start the unison copies of a note (`FUN_00782940`).
     fn start(&mut self, note: NoteOn) {
+        let filter_offset = self.filter_offset;
         let d = &*self.d;
         let p = self.state.params;
         let host_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         let vel01 = ((f64::from(note.velocity) * 10.0 + 1.0).ln() / 11f64.ln() * 100.0 / 128.0)
             .clamp(0.0, 1.0) as f32;
-        let glide = if (self.uses_porta() || note.porta) && self.last_pitch.is_some() {
-            let from = self.last_pitch.unwrap_or(host_pitch);
-            let ticks = (d.porta * d.rate as f32 / d.tick as f32).max(1.0);
-            Some((from, ticks))
+        // The note's glide time scale (`FUN_00782810`).
+        let porta_scale = if p[46] > 0 {
+            let s = (1.0 - f64::from(vel01) * 0.85) as f32;
+            s * s
         } else {
-            None
+            1.0
         };
-        self.last_pitch = Some(host_pitch);
-        if self.on(44) {
-            // Mono: what sounds is let go of fast.
-            for voice in self.voices.iter_mut().filter(|v| v.active) {
-                if voice.state < 6 {
-                    voice.state = 6;
-                    voice.end = -1;
-                }
+        let mut this = Note {
+            id: note.voice,
+            age: self.next_age,
+            group: note.color & 0xf,
+            pitch: host_pitch,
+            velocity: note.velocity,
+            vel01,
+            pan: note.pan,
+            mod_x: note.mod_x,
+            mod_y: note.mod_y,
+            release: note.release,
+            porta_scale,
+        };
+        // A note of the 16th colour is a filter note: a record of type 1
+        // that sounds nothing, whose pitch the filter follows.
+        if this.group == FILTER_COLOR {
+            self.next_age += 1;
+            if self.filters_len == HELD {
+                self.filters.copy_within(1.., 0);
+                self.filters_len -= 1;
+            }
+            self.filters[self.filters_len] = this;
+            self.filters_len += 1;
+            return;
+        }
+        // Legato (`MonoBox`, which the 14th colour turns round, and then
+        // in the first colour's group): while a note of the group sounds,
+        // a new one takes its voices over and glides them to itself.
+        let mono = self.on(44) != (this.group == MONO_COLOR);
+        if mono {
+            if !self.on(44) {
+                this.group = 0;
+            }
+            if let Some(lead) = self.slots[usize::from(this.group)].lead
+                && self.voices.iter().any(|v| v.active && v.id == lead)
+            {
+                self.legato(lead, this);
+                return;
             }
         }
+        // Portamento (`PortaBox`, which the 15th colour turns round in the
+        // same way), from the last note of the group.
+        let mut porta = self.on(43) != (this.group == PORTA_COLOR);
+        if porta && !self.on(43) {
+            this.group = 0;
+        }
+        let group = usize::from(this.group);
+        porta = (porta || note.porta) && self.slots[group].last.is_some();
         let n = d.unison;
         let global_random = if self.on(87) {
             Some(self.random())
@@ -1661,6 +1949,9 @@ impl Harmless {
         let spreads = FAT_PITCH[self.state.params[70].clamp(0, 2) as usize];
         for (i, spread_of) in spreads.iter().enumerate().take(n) {
             let r = global_random.unwrap_or_else(|| self.random());
+            // A seed of its own for the noise resonance (`FUN_0074bb70`).
+            self.random();
+            let self_seed = self.seed as i32;
             let slot = self.free_slot();
             let age = self.next_age;
             self.next_age += 1;
@@ -1669,25 +1960,12 @@ impl Harmless {
             voice.active = true;
             voice.id = note.voice;
             voice.age = age;
-            voice.pitch = host_pitch;
-            match glide {
-                Some((from, ticks)) => {
-                    voice.glide_from = from - host_pitch;
-                    voice.glide_left = ticks;
-                    voice.glide_step = voice.glide_from / ticks;
-                }
-                None => {
-                    voice.glide_from = 0.0;
-                    voice.glide_left = 0.0;
-                    voice.glide_step = 0.0;
-                }
-            }
-            voice.velocity = note.velocity;
-            voice.vel01 = vel01;
-            voice.pan = note.pan;
-            voice.mod_x = note.mod_x;
-            voice.mod_y = note.mod_y;
-            voice.release_value = note.release;
+            voice.take_note(&this);
+            voice.lead = i == 0;
+            voice.slide = [0.0; 6];
+            voice.slide_step = [0.0; 6];
+            voice.slide_ticks = 0;
+            voice.trem_fade = d.tremolo_fade;
             if n == 1 {
                 voice.phase_offset = 0.5;
                 voice.pan_offset = 0.0;
@@ -1719,6 +1997,8 @@ impl Harmless {
                 voice.variance = s * p[69] as f32 / 256.0;
             }
             voice.random = r;
+            voice.noise_seed = self_seed;
+            voice.noise_time = 0.0;
             voice.countdown = 0;
             voice.first = true;
             voice.lfo_phase = 0.0;
@@ -1727,7 +2007,7 @@ impl Harmless {
             voice.fenv_pos = 0.0;
             voice.fenv_inc = d.fenv_attack * d.tick as f32;
             voice.fenv_decaying = false;
-            voice.cutoff = d.fcut;
+            voice.cutoff = d.fcut + filter_offset;
             voice.res_mt = f32::MAX;
             voice.last_cents = f32::NAN;
             voice.count = 0;
@@ -1760,6 +2040,72 @@ impl Harmless {
             voice.pluck_tick = d.pluck_start.min(-(round(d.attack / d.tick as f64) as i64));
             voice.gains = [0.0; 2];
         }
+        // Portamento: every voice of the note glides from the last note's
+        // levels.
+        let to = this.levels(self.on(37));
+        if porta && let Some(from) = self.slots[group].last {
+            let porta_ticks = self.d.porta;
+            for voice in self.voices.iter_mut() {
+                if voice.active && voice.id == this.id {
+                    voice.glide(&from, &to, true, true, porta_ticks);
+                }
+            }
+        }
+        self.slots[group] = Slot {
+            lead: Some(this.id),
+            lead_age: this.age,
+            last: Some(to),
+        };
+    }
+
+    /// A new note while `lead` sounds, in legato: FL makes a voice record
+    /// for the new note that sounds nothing, then `FUN_00787ef0` swaps
+    /// it with the lead's (`FUN_00784560`), so the lead's voices go on
+    /// under the new note and the old one waits among the held notes.
+    fn legato(&mut self, lead: u32, this: Note) {
+        let Some(old) = self
+            .voices
+            .iter()
+            .find(|v| v.active && v.id == lead && v.lead)
+            .or_else(|| self.voices.iter().find(|v| v.active && v.id == lead))
+            .map(|v| v.note(self.slots[usize::from(this.group)].lead_age))
+        else {
+            return;
+        };
+        self.next_age += 1;
+        self.hold(old);
+        self.hand_on(&old, this);
+        self.slots[usize::from(this.group)].lead_age = this.age;
+    }
+
+    /// Keep a note among the held ones; when they are full the oldest
+    /// goes.
+    fn hold(&mut self, note: Note) {
+        if self.held_len == HELD {
+            self.held.copy_within(1.., 0);
+            self.held_len -= 1;
+        }
+        self.held[self.held_len] = note;
+        self.held_len += 1;
+    }
+
+    /// Give the voices of `from` to `to` and glide them over
+    /// (`FUN_00787ef0` after the swap): the glide starts from the old
+    /// note's levels and the new note's become the last.
+    fn hand_on(&mut self, from: &Note, to: Note) {
+        let on37 = self.on(37);
+        let start = from.levels(on37);
+        let end = to.levels(on37);
+        let porta = self.d.porta;
+        for voice in self.voices.iter_mut() {
+            if voice.active && voice.id == from.id {
+                voice.take_note(&to);
+                voice.glide(&start, &end, false, false, porta);
+            }
+        }
+        let slot = &mut self.slots[usize::from(to.group)];
+        slot.lead = Some(to.id);
+        slot.last = Some(end);
     }
 
     /// The voice to use for a new one: a silent one, or the oldest.
@@ -1772,7 +2118,7 @@ impl Harmless {
     }
 
     /// Let go of a voice (`FUN_00783910`).
-    fn release(voice: &mut Voice, d: &Derived, pluck_on_release: bool) {
+    fn release(voice: &mut Voice, d: &Derived) {
         if voice.state >= 6 {
             return;
         }
@@ -1785,7 +2131,9 @@ impl Harmless {
             voice.fenv_decaying = true;
             voice.fenv_pos = d.fenv_tension[1].inverse(value);
         }
-        if pluck_on_release && d.pluck >= 0.0 {
+        // The pluck starts now if it has not (it waited for the release
+        // with `PluckRel`), and no later than now if it has.
+        if d.pluck >= 0.0 {
             voice.pluck_on = true;
             voice.pluck_tick = voice.pluck_tick.max(0);
         }
@@ -1808,7 +2156,10 @@ impl Harmless {
                 let u = voice.random * att2;
                 (u * 2.0 - 1.0, u)
             }
-            12 => (voice.vel01 * att2, voice.vel01 * att2),
+            12 => {
+                let v = (voice.vel01 + voice.slide[5]) * att2;
+                (v, v)
+            }
             13 => {
                 let v = ((cents + d.lfo_key_offset) as f64 / 3600.0).clamp(-1.0, 1.0) as f32;
                 bipolar(v)
@@ -1862,7 +2213,7 @@ impl Harmless {
         let d = &*self.d;
         let mut width = d.sfx_width;
         if self.on(82) {
-            width *= voice.vel01;
+            width *= voice.vel01 + voice.slide[5];
         }
         let swing = if d.sfx_width_lfo <= 0.0 {
             d.sfx_width_lfo.max(-width)
@@ -1909,6 +2260,10 @@ impl Harmless {
         let d = &*self.d;
         let p = &self.state.params;
         let tick = d.tick as f32;
+        // Below quality 2 the curves are read at the point below
+        // (`FUN_0077c450` sets each table's quality).
+        let nearest = self.state.selectors[6] < 2;
+        voice.step_slide();
         // The filter envelope.
         voice.fenv_pos += voice.fenv_inc;
         if voice.fenv_pos >= 1.0 && voice.fenv_inc > 0.0 {
@@ -1921,23 +2276,17 @@ impl Harmless {
         let curve = d.fenv_tension[usize::from(voice.fenv_decaying)];
         let fenv = curve.at(voice.fenv_pos.min(1.0));
         // The cutoff glides to the wheel.
-        voice.cutoff = d.fcut + (voice.cutoff - d.fcut) * d.cutoff_glide;
+        let fcut = d.fcut + self.filter_offset;
+        voice.cutoff = fcut + (voice.cutoff - fcut) * d.cutoff_glide;
         // Pitch.
-        if voice.glide_left > 0.0 {
-            voice.glide_from -= voice.glide_step;
-            voice.glide_left -= 1.0;
-            if voice.glide_left <= 0.0 {
-                voice.glide_from = 0.0;
-            }
-        }
-        let mut cents = voice.pitch + voice.glide_from + d.main_pitch;
+        let mut cents = voice.pitch + d.main_pitch + voice.slide[2];
         if p[41] > 0 {
             let vib = (self.vibrato_phase * std::f32::consts::TAU).sin();
             cents += vib * d.vibrato * voice.vib_att * voice.vib_att;
         }
         let (lfo, lfo01) = self.lfo(voice, fenv, cents);
         let fat = if p[99] > 0 {
-            voice.pitch_offset * voice.vel01
+            voice.pitch_offset * (voice.vel01 + voice.slide[5])
         } else {
             voice.pitch_offset
         };
@@ -2003,9 +2352,9 @@ impl Harmless {
         // The filter.
         let keyed = (f64::from(voice.log2_f0) - 7.0) as f32 * d.keytrack;
         let floor = d.fmin + keyed;
-        let mut fc = voice.cutoff + keyed + voice.mod_x * d.frange * 0.5;
+        let mut fc = voice.cutoff + keyed + (voice.mod_x + voice.slide[3]) * d.frange * 0.5;
         fc = fc.clamp(floor, d.fmax);
-        let mut res_x = p[59] as f32 / 1000.0 + voice.mod_y * 0.5;
+        let mut res_x = p[59] as f32 / 1000.0 + (voice.mod_y + voice.slide[4]) * 0.5;
         res_x = res_x.clamp(0.0, 1.0);
         let mut resonance = (level(f64::from(res_x)) * 0.25) as f32;
         let lfo_room = if d.flfo <= 0.0 {
@@ -2016,7 +2365,7 @@ impl Harmless {
         fc += lfo01 * lfo_room;
         let mut amount = d.fenv_amount;
         if p[53] > 0 {
-            amount *= voice.vel01;
+            amount *= voice.vel01 + voice.slide[5];
         }
         if p[47] == 0 {
             fc += (fenv - 0.5) * amount;
@@ -2030,13 +2379,13 @@ impl Harmless {
         if p[55] == 0 {
             let offset = self.filter.centre - fc * w;
             for k in 0..n {
-                voice.levels[k] *= self.filter.clamped(voice.log2_hz[k], w, offset);
+                voice.levels[k] *= clamped(&self.filter, nearest, voice.log2_hz[k], w, offset);
             }
         } else {
             let scale = w * 0.9 / cut_hz;
             let offset = self.filter.centre - w * 0.9;
             for k in 0..n {
-                voice.levels[k] *= self.filter.clamped(voice.hz[k], scale, offset);
+                voice.levels[k] *= clamped(&self.filter, nearest, voice.hz[k], scale, offset);
             }
         }
         if p[64] > 0 {
@@ -2048,7 +2397,30 @@ impl Harmless {
             let moved = (fc - voice.res_mt).abs();
             resonance *= (moved * moved).min(1.0);
         }
-        if resonance > 0.0 {
+        if resonance > 0.0 && self.state.selectors[1] == 8 {
+            // Noise (resonance type 8): a partial is silent with the
+            // chance `t / (t + 1)`, `t = 9999 (4 r)^3 / hold`, and the
+            // rest go up by `sqrt(t + 1)` so the power stays; the draw is
+            // held for the noise's hold (ippsRandUniform_Direct_32f,
+            // ippsThreshold_LTVal, ippsThreshold_GTVal).
+            let x = f64::from(resonance * 4.0);
+            let t = (x * x * x * 9999.0 / d.noise_len) as f32;
+            let top = t + 1.0;
+            let keep = f64::from(top).sqrt() as f32;
+            let seed = voice.noise_seed;
+            let draw = &mut voice.scratch[..n];
+            rand_uniform(draw, 0.0, top, &mut voice.noise_seed);
+            for (level, v) in voice.levels[..n].iter_mut().zip(draw.iter()) {
+                let v = if *v < t { 0.0 } else { *v };
+                *level *= if v > 0.0 { keep } else { v };
+            }
+            voice.noise_time += d.noise_rate;
+            if voice.noise_time < 1.0 {
+                voice.noise_seed = seed;
+            } else {
+                voice.noise_time = frac(voice.noise_time);
+            }
+        } else if resonance > 0.0 {
             let scale = if p[63] > 0 {
                 d.res_scale / voice.f0_hz
             } else {
@@ -2058,13 +2430,17 @@ impl Harmless {
             let table = &self.resonance;
             for k in 0..n {
                 let shape = if p[60] == 0 {
-                    table.clamped(
+                    clamped(
+                        table,
+                        nearest,
                         voice.log2_hz[k],
                         scale,
                         table.centre - (fc + d.res_offset) * scale,
                     )
                 } else {
-                    table.clamped(
+                    clamped(
+                        table,
+                        nearest,
                         voice.hz[k],
                         scale,
                         table.centre - cut_hz * d.res_ratio * scale,
@@ -2087,24 +2463,41 @@ impl Harmless {
                 * len
                 - (self.phaser_phase as f32) * table.period;
             let mix = p[71] as f32 / 1000.0;
+            let shift = self.state.selectors[2] == 9;
+            let m = p[71] as f32 * 0.001f32;
+            let bend = (f64::from(m * m * m) * LN_2 * 0.25) as f32;
+            let inv_rate = (1.0 / d.rate) as f32;
             let octaves = ((d.phaser_width - 1.0) * 8.0 + lfo * d.phaser_width_lfo * 2.0) as f64;
             for k in 0..n {
                 let shape = match p[72] {
                     0 => {
                         let scale = octaves.exp2() as f32 * 12.0 * table.period;
-                        table.wrapped(voice.log2_hz[k], scale, offset - kt * scale)
+                        wrapped(table, nearest, voice.log2_hz[k], scale, offset - kt * scale)
                     }
                     1 => {
                         let scale = octaves.exp2() as f32 * 12.0 * 0.005 * table.period;
-                        table.wrapped(voice.hz[k], scale, offset - kt * len)
+                        wrapped(table, nearest, voice.hz[k], scale, offset - kt * len)
                     }
                     _ => {
                         let width = d.phaser_width + lfo * d.phaser_width_lfo;
                         let scale = (2.0 - width) * table.period / voice.f0_hz;
-                        table.wrapped(voice.hz[k], scale, offset - kt * len)
+                        wrapped(table, nearest, voice.hz[k], scale, offset - kt * len)
                     }
                 };
-                voice.levels[k] *= shape * mix + (1.0 - mix);
+                if shift {
+                    // Type 9 moves the partial instead: by `2^(curve
+                    // mix^3 / 4)` (`ippsExp_32f` of `curve * mix^3 ln2 /
+                    // 4`, times the partial's Hz and 1/SR, into the
+                    // bank), with the frequency weight over again.
+                    let e = f64::from(shape * bend).exp() as f32;
+                    let f = e * voice.hz[k] * inv_rate;
+                    if k > 0 {
+                        voice.bank.set_freq(k, f64::from(f));
+                        voice.alias[k] = alias_weight((f64::from(f) * d.rate) as f32);
+                    }
+                } else {
+                    voice.levels[k] *= shape * mix + (1.0 - mix);
+                }
             }
         }
         if sfx && sfx_at == 2 {
@@ -2162,7 +2555,12 @@ impl Harmless {
         };
         voice.levels[0] = d.subs[0] * resonance * pluck1;
         let osc_hz = f64::from(cut_hz) * f64::from(d.res_ratio);
-        voice.bank.set_freq(0, osc_hz / d.rate);
+        // FL sets the resonance partial, and starts it again, only when
+        // its frequency moves (`FUN_00784a10`).
+        let osc = osc_hz / d.rate;
+        if voice.bank.freq(0) != osc {
+            voice.bank.set_freq(0, osc);
+        }
         voice.alias[0] = alias_weight(osc_hz as f32);
 
         // To the bank.
@@ -2195,9 +2593,18 @@ impl Harmless {
     }
 
     /// Render one chunk of a voice into the stereo sum.
-    fn render_voice(&self, voice: &mut Voice, left: &mut [f32], right: &mut [f32]) {
+    fn render_voice(&self, voice: &mut Voice, left: &mut [f32], right: &mut [f32], trem: bool) {
         let d = &*self.d;
         let len = left.len();
+        // The host's gains for the block, from the note's levels as the
+        // block starts (`FUN_00784a10` asks `ComputeLRVol`, host slot 31):
+        // a new voice starts at them, a sounding one ramps to them.
+        let vol =
+            d.main_volume * (voice.velocity_gain(self.on(37)) + voice.slide[1]) * d.unison_gain;
+        let aim = pan_law(voice.pan + voice.slide[0] + voice.pan_offset, vol);
+        if voice.first {
+            voice.gains = aim;
+        }
         voice.mono[..len].fill(0.0);
         let mut done = 0;
         while done < len {
@@ -2215,27 +2622,62 @@ impl Harmless {
             done += run;
         }
         self.envelope(voice, len);
-        let vol = d.main_volume
-            * voice.velocity_gain(self.on(37))
-            * if d.unison > 1 { d.unison_gain } else { 1.0 };
-        let pan = (voice.pan + voice.pan_offset).clamp(-1.0, 1.0);
-        let aim = pan_law(pan, vol);
-        let step = [
-            (aim[0] - voice.gains[0]) / len as f32,
-            (aim[1] - voice.gains[1]) / len as f32,
-        ];
-        for i in 0..len {
-            voice.gains[0] += step[0];
-            voice.gains[1] += step[1];
-            let s = voice.mono[i] * voice.env_buf[i];
-            left[i] += s * voice.gains[0];
-            right[i] += s * voice.gains[1];
+        for (x, e) in voice.mono[..len].iter_mut().zip(&voice.env_buf[..len]) {
+            *x *= *e;
         }
-        voice.gains = aim;
+        // `FUN_00604960`: each side's gain glides to its aim by no more
+        // than the host's cap a frame, in FL's lanes.
+        let (start_l, step_l) = parts::glide(&mut voice.gains[0], aim[0], d.ramp_cap, len);
+        let (start_r, step_r) = parts::glide(&mut voice.gains[1], aim[1], d.ramp_cap, len);
+        let mut ramp_l = Ramp::new(start_l, step_l, len);
+        let mut ramp_r = Ramp::new(start_r, step_r, len);
+        // The tremolo on the voice (`FUN_00784a10`, tail): a new voice
+        // fades it in over 0.1 s, `(1 - r) + r * trem`, r rising from
+        // 1 / (frames + 1) a frame to 1.
+        let fading = trem && voice.trem_fade >= 1;
+        let fade_start = 1.0 - voice.trem_fade as f32 * d.tremolo_fade_step;
+        if fading {
+            voice.trem_fade -= len as i32;
+        }
+        let still = step_l == 0.0 && step_r == 0.0;
+        if still && start_l == 0.0 && start_r == 0.0 {
+            return self.end_voice(voice, len);
+        }
+        for i in 0..len {
+            let (gl, gr) = if still {
+                (start_l, start_r)
+            } else {
+                (ramp_l.next(i), ramp_r.next(i))
+            };
+            let mut sl = voice.mono[i] * gl;
+            let mut sr = voice.mono[i] * gr;
+            if trem {
+                let (tl, tr) = (self.trem[2 * i], self.trem[2 * i + 1]);
+                if fading {
+                    let r = ((f64::from(fade_start) + f64::from(d.tremolo_fade_step) * i as f64)
+                        as f32)
+                        .min(1.0);
+                    sl *= (1.0 - r) + r * tl;
+                    sr *= (1.0 - r) + r * tr;
+                } else {
+                    sl *= tl;
+                    sr *= tr;
+                }
+            }
+            left[i] += sl;
+            right[i] += sr;
+        }
+        self.end_voice(voice, len);
+    }
+
+    /// Whether a voice is over after its block.
+    fn end_voice(&self, voice: &mut Voice, len: usize) {
         // A voice past its attack whose envelope is under -80 dB is over
-        // (`FUN_00783ac0` from the voice renderer).
+        // (`FUN_00783ac0` from the voice renderer), but for the note that
+        // answers for the notes: legato may hand it on yet.
         let last = voice.env_buf[len - 1];
-        if voice.state == 10 || (voice.state >= 3 && last.abs() < END_LEVEL) {
+        let lead = self.slots[usize::from(voice.group)].lead == Some(voice.id);
+        if voice.state == 10 || (voice.state >= 3 && !lead && last.abs() < END_LEVEL) {
             voice.active = false;
         }
     }
@@ -2285,20 +2727,61 @@ impl Harmless {
         }
     }
 
-    /// The stereo tremolo, chorus, delay, reverb and compression.
+    /// The stereo tremolo's gains for a block (`Gen_Render`, ahead of the
+    /// voices), when there are voices for it: a tone of magnitude 1.25 at
+    /// 2.5 Hz from the sample counter, `|cos| - 1` on the left and
+    /// `|sin| - 1` on the right, times the depth as it glides to the wheel's by
+    /// the host's cap (`FUN_00604a90`), plus 1. With no voices the depth
+    /// jumps to the wheel's.
+    fn tremolo(&mut self, len: usize, voices: usize) -> bool {
+        let d = &*self.d;
+        if d.tremolo == 0.0 && self.trem_depth == 0.0 {
+            return false;
+        }
+        if voices < 1 {
+            self.trem_depth = d.tremolo;
+            return false;
+        }
+        let tau = TAU as f32;
+        let mut phase =
+            (frac(f64::from(self.sample_count as f32 * d.tremolo_rate)) * f64::from(tau)) as f32;
+        if phase >= tau {
+            phase -= tau;
+        }
+        let w = TAU * f64::from(d.tremolo_rate);
+        let trem = &mut self.trem[..2 * len];
+        for i in 0..len {
+            let a = f64::from(phase) + w * i as f64;
+            trem[2 * i] = (1.25 * a.cos()).abs() as f32 + -1.0;
+            trem[2 * i + 1] = (1.25 * a.sin()).abs() as f32 + -1.0;
+        }
+        let (start, step) = parts::glide(&mut self.trem_depth, d.tremolo, d.ramp_cap, len);
+        if step == 0.0 {
+            if start == 0.0 {
+                trem.fill(0.0);
+            } else if start != 1.0 {
+                for x in trem.iter_mut() {
+                    *x *= start;
+                }
+            }
+        } else {
+            let mut ramp = Ramp::new(start, step, len);
+            for i in 0..len {
+                let g = ramp.next(i);
+                trem[2 * i] *= g;
+                trem[2 * i + 1] *= g;
+            }
+        }
+        for x in trem.iter_mut() {
+            *x += 1.0;
+        }
+        true
+    }
+
+    /// The chorus, delay, reverb and compression.
     fn effects(&mut self, voices: usize, left: &mut [f32], right: &mut [f32]) {
         let len = left.len();
         let d = &*self.d;
-        if d.tremolo > 0.0 {
-            for i in 0..len {
-                let t = (self.sample_count + i as u64) as f64 * d.tremolo_rate;
-                let a = t * TAU;
-                let gl = 1.0 + d.tremolo * ((1.25 * a.cos().abs()).min(1.0) as f32 - 1.0);
-                let gr = 1.0 + d.tremolo * ((1.25 * a.sin().abs()).min(1.0) as f32 - 1.0);
-                left[i] *= gl;
-                right[i] *= gr;
-            }
-        }
         let fx = &mut *self.fx;
         // The voices keep the classes awake: with none left, the
         // countdown runs out a block at a time.
@@ -2362,6 +2845,48 @@ impl Harmless {
     }
 }
 
+/// A gain FL's SSE kernels ramp across a block (`FUN_00611760`,
+/// `FUN_00611550`): the even frames and the odd ones each in a lane of
+/// their own that moves two steps a pair, eight frames to a round, and
+/// the frames past the last round one step at a time from the even lane.
+struct Ramp {
+    even: f32,
+    odd: f32,
+    twice: f32,
+    step: f32,
+    rounds: usize,
+}
+
+impl Ramp {
+    fn new(start: f32, step: f32, len: usize) -> Self {
+        Ramp {
+            even: start + 0.0,
+            odd: start + step,
+            twice: step + step,
+            step,
+            rounds: len / 8 * 8,
+        }
+    }
+
+    /// The gain of `frame`, asked for in order from 0.
+    fn next(&mut self, frame: usize) -> f32 {
+        if frame < self.rounds {
+            if frame & 1 == 0 {
+                self.even
+            } else {
+                let odd = self.odd;
+                self.even += self.twice;
+                self.odd += self.twice;
+                odd
+            }
+        } else {
+            let even = self.even;
+            self.even += self.step;
+            even
+        }
+    }
+}
+
 impl Voice {
     fn velocity_gain(&self, to_volume: bool) -> f32 {
         if to_volume { self.velocity } else { 1.0 }
@@ -2371,6 +2896,28 @@ impl Voice {
 /// A partial's weight by its frequency: nothing under 16 Hz or over 17
 /// kHz, squared fades from 16 to 32 Hz and from 16 to 17 kHz
 /// (`FUN_007453c0` and the loop after it in the voice).
+/// A curve at `x * scale + offset`, the first or last point outside it
+/// (`FUN_0077c540`): between the two points either side, or with
+/// `nearest` the point below (`FUN_0077c470`).
+fn clamped(table: &ShapeTable, nearest: bool, x: f32, scale: f32, offset: f32) -> f32 {
+    if !nearest {
+        return table.clamped(x, scale, offset);
+    }
+    let at = (x * scale + offset).max(0.0).min((table.len() - 1) as f32);
+    table.get(at as usize)
+}
+
+/// A curve at `x * scale + offset` read round and round (`FUN_0077c760`):
+/// between the two points either side, or with `nearest` the point toward
+/// 0 (`FUN_0077c690`).
+fn wrapped(table: &ShapeTable, nearest: bool, x: f32, scale: f32, offset: f32) -> f32 {
+    if !nearest {
+        return table.wrapped(x, scale, offset);
+    }
+    let i = ((x * scale + offset) as i32) & (table.len() as i32 - 1);
+    table.get(i as usize)
+}
+
 fn alias_weight(hz: f32) -> f32 {
     if hz > 16_000.0 {
         if hz > 17_000.0 {
@@ -2444,6 +2991,11 @@ impl Generator for Harmless {
     fn set_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
         self.state = State::parse(bytes)?;
         self.load();
+        // `PortaBox` on forgets the last note of every group
+        // (`FUN_00788030`).
+        if self.on(43) {
+            self.forget_last();
+        }
         Ok(())
     }
 
@@ -2471,25 +3023,93 @@ impl Generator for Harmless {
 
     fn note_on(&mut self, note: NoteOn) {
         if note.slide {
-            // FL bends what sounds; here the slide note bends nothing.
+            // FL's host bends what sounds, with `set_note_pitch`, and
+            // starts no voice.
             return;
         }
         self.start(note);
     }
 
+    /// `Voice_Release` (`FUN_00783910`): a held note goes; the note that
+    /// sounds hands its voices to the newest held note if there is one,
+    /// with its release velocity's glide time, and lets them go if not.
     fn note_off(&mut self, voice: u32) {
-        let pluck_on_release = self.on(35);
+        if let Some(i) = self.held[..self.held_len]
+            .iter()
+            .position(|h| h.id == voice)
+        {
+            self.held.copy_within(i + 1..self.held_len, i);
+            self.held_len -= 1;
+            return;
+        }
+        // A filter note's record goes; the cutoff it left stays.
+        if let Some(i) = self.filters[..self.filters_len]
+            .iter()
+            .position(|f| f.id == voice)
+        {
+            self.filters.copy_within(i + 1..self.filters_len, i);
+            self.filters_len -= 1;
+            return;
+        }
+        if let Some(group) = self.slots.iter().position(|s| s.lead == Some(voice)) {
+            self.slots[group].lead = None;
+            let of_group = |i: &usize| usize::from(self.held[*i].group) == group;
+            let newest = (0..self.held_len)
+                .filter(of_group)
+                .max_by_key(|&i| self.held[i].age);
+            let lead_age = self.slots[group].lead_age;
+            let gone = self
+                .voices
+                .iter()
+                .find(|v| v.active && v.id == voice)
+                .map(|v| v.note(lead_age));
+            if let (Some(i), Some(mut gone)) = (newest, gone) {
+                let mut next = self.held[i];
+                self.held.copy_within(i + 1..self.held_len, i);
+                self.held_len -= 1;
+                if self.on(46) {
+                    let s = (1.0 - f64::from(gone.release.min(1.0)) * 0.85) as f32;
+                    gone.porta_scale = s * s;
+                } else {
+                    gone.porta_scale = 1.0;
+                }
+                next.porta_scale = gone.porta_scale;
+                self.hand_on(&gone, next);
+                self.slots[group].lead_age = next.age;
+                return;
+            }
+        }
         let d = &*self.d;
         for v in self.voices.iter_mut().filter(|v| v.active && v.id == voice) {
-            Harmless::release(v, d, pluck_on_release);
+            Harmless::release(v, d);
+        }
+    }
+
+    /// `FUN_00784a10` reads the host's `FinalLevels` into the voice at the
+    /// top of every control tick, so the voices of the note take the pitch
+    /// on their next one. A note held under legato keeps it for when it
+    /// sounds again.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for v in self.voices.iter_mut().filter(|v| v.active && v.id == voice) {
+            v.pitch = pitch;
+        }
+        let records = self.held[..self.held_len].iter_mut();
+        for held in records.chain(&mut self.filters[..self.filters_len]) {
+            if held.id == voice {
+                held.pitch = pitch;
+            }
         }
     }
 
     fn all_notes_off(&mut self) {
-        let pluck_on_release = self.on(35);
+        self.held_len = 0;
+        self.filters_len = 0;
+        for slot in &mut self.slots {
+            slot.lead = None;
+        }
         let d = &*self.d;
         for v in self.voices.iter_mut().filter(|v| v.active) {
-            Harmless::release(v, d, pluck_on_release);
+            Harmless::release(v, d);
         }
     }
 
@@ -2503,9 +3123,14 @@ impl Generator for Harmless {
             l[..len].fill(0.0);
             r[..len].fill(0.0);
             let mut voices = std::mem::take(&mut self.voices);
-            let sounding = voices.iter().filter(|v| v.active).count();
+            // FL's voice list: what sounds, the held notes and the filter
+            // notes.
+            let sounding =
+                voices.iter().filter(|v| v.active).count() + self.held_len + self.filters_len;
+            self.follow_filter_note();
+            let trem = self.tremolo(len, sounding);
             for voice in voices.iter_mut().filter(|v| v.active) {
-                self.render_voice(voice, &mut l[..len], &mut r[..len]);
+                self.render_voice(voice, &mut l[..len], &mut r[..len], trem);
             }
             self.voices = voices;
             self.effects(sounding, &mut l[..len], &mut r[..len]);
@@ -2541,6 +3166,9 @@ impl Generator for Harmless {
         }
         self.state.params[index] = value;
         self.derive();
+        if index == 43 && value > 0 {
+            self.forget_last();
+        }
         if index == 98
             && let Some(maximus) = &mut self.compression
         {
@@ -2552,6 +3180,10 @@ impl Generator for Harmless {
         for voice in &mut self.voices {
             voice.active = false;
         }
+        self.held_len = 0;
+        self.slots = [Slot::default(); GROUPS];
+        self.filters_len = 0;
+        self.filter_offset = 0.0;
         self.load();
     }
 
@@ -2584,19 +3216,10 @@ impl Generator for Harmless {
     }
 
     fn fidelity(&self) -> Fidelity {
-        let p = &self.state.params;
         if self.missing_compression {
             Fidelity::Approximate("Harmless without its compression preset")
-        } else if p[25] > 0 {
-            Fidelity::Approximate("Harmless tremolo")
-        } else if p[44] > 0 || self.uses_porta() {
-            Fidelity::Approximate("Harmless mono or portamento")
-        } else if (p[71] > 0 && self.state.selectors[2] == 9)
-            || (p[59] > 0 && self.state.selectors[1] == 8)
-        {
-            Fidelity::Approximate("Harmless frequency-shift phaser or noise resonance")
         } else {
-            Fidelity::Approximate("Harmless voice levels and pan")
+            Fidelity::Exact
         }
     }
 }
@@ -2617,6 +3240,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -2645,6 +3269,10 @@ mod tests {
     }
 
     #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        crate::testing::follows_note_pitch(|| Box::new(Harmless::default()), 44_100.0);
+    }
+    #[test]
     fn the_level_curves_meet_at_their_ends() {
         assert_eq!(level(0.0), 0.0);
         assert_eq!(level(1.0), 1.0);
@@ -2654,6 +3282,67 @@ mod tests {
         // The main volume at its default is 3/4.
         let plugin = Harmless::default();
         assert!((plugin.d.main_volume - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn below_quality_2_a_curve_is_read_at_the_point_below() {
+        let table = ShapeTable::new(8, 0.0, 1.0, 0.0, |i| i as f64 * 10.0);
+        // Between points 2 and 3, a quarter of the way.
+        assert_eq!(clamped(&table, false, 2.25, 1.0, 0.0), 22.5);
+        assert_eq!(clamped(&table, true, 2.25, 1.0, 0.0), 20.0);
+        assert_eq!(clamped(&table, true, 2.99, 1.0, 0.0), 20.0);
+        // The ends outside.
+        assert_eq!(clamped(&table, true, -3.0, 1.0, 0.0), 0.0);
+        assert_eq!(clamped(&table, true, 30.0, 1.0, 0.0), 70.0);
+        // Round and round: 10.5 is point 2, and -1.5 truncates to -1,
+        // which is point 7.
+        assert_eq!(wrapped(&table, true, 10.5, 1.0, 0.0), 20.0);
+        assert_eq!(wrapped(&table, true, -1.5, 1.0, 0.0), 70.0);
+        assert_eq!(wrapped(&table, false, 10.5, 1.0, 0.0), 25.0);
+    }
+
+    #[test]
+    fn the_host_gains_ramp_in_lanes() {
+        let gains: Vec<f32> = {
+            let mut ramp = Ramp::new(1.0, 0.1, 11);
+            (0..11).map(|i| ramp.next(i)).collect()
+        };
+        // Eight frames in two lanes, each moving two steps a pair.
+        let (mut even, mut odd) = (1.0f32, 1.0 + 0.1f32);
+        for pair in 0..4 {
+            assert_eq!(gains[2 * pair], even);
+            assert_eq!(gains[2 * pair + 1], odd);
+            even += 0.1 + 0.1;
+            odd += 0.1 + 0.1;
+        }
+        // The rest from the even lane, a step at a time.
+        for gain in &gains[8..] {
+            assert_eq!(*gain, even);
+            even += 0.1;
+        }
+    }
+
+    #[test]
+    fn a_voice_starts_at_its_host_gains_and_then_glides_to_them() {
+        let mut plugin = Harmless::default();
+        plugin.set_sample_rate(44_100.0);
+        let mut n = note(60);
+        n.pan = -0.5;
+        plugin.note_on(n);
+        render(&mut plugin, 256);
+        let vol = plugin.d.main_volume * plugin.d.unison_gain;
+        let voice = plugin.voices.iter().find(|v| v.active).unwrap();
+        assert_eq!(voice.gains, pan_law(-0.5, vol));
+        // The main volume up to full: the gains move no more than
+        // 0.001 * 44100 / rate a frame.
+        plugin.set_param(36, 2000.0);
+        let before = plugin.voices.iter().find(|v| v.active).unwrap().gains;
+        render(&mut plugin, 256);
+        let after = plugin.voices.iter().find(|v| v.active).unwrap().gains;
+        for side in 0..2 {
+            let moved = after[side] - before[side];
+            assert!((moved - 0.001 * 256.0).abs() < 1e-5, "{moved}");
+        }
     }
 
     #[test]
@@ -2812,6 +3501,328 @@ mod tests {
         let end = &l[l.len() - 1000..];
         assert!(end.iter().all(|v| v.abs() < 1e-4));
         assert!(plugin.voices.iter().all(|v| !v.active));
+    }
+
+    fn with_state(params: &[(usize, i32)]) -> Harmless {
+        let mut plugin = Harmless::default();
+        plugin.set_sample_rate(44_100.0);
+        plugin
+            .set_state(&state_of(params, DEFAULT_SELECTORS))
+            .unwrap();
+        plugin
+    }
+
+    fn keyed(id: u32, key: i16) -> NoteOn {
+        NoteOn {
+            voice: id,
+            ..note(key)
+        }
+    }
+
+    fn sounding(plugin: &Harmless) -> Vec<&Voice> {
+        plugin.voices.iter().filter(|v| v.active).collect()
+    }
+
+    #[test]
+    fn the_tremolo_swings_each_side_from_nothing_to_a_quarter_over() {
+        let mut plugin = with_state(&[(25, 1000)]);
+        // No voices: the depth goes straight to the wheel's.
+        assert!(!plugin.tremolo(256, 0));
+        assert_eq!(plugin.trem_depth, 1.0);
+        // A turn of the 2.5 Hz tone: 1.25 |cos| on the left, 1.25 |sin|
+        // on the right.
+        assert!(plugin.tremolo(CHUNK, 1));
+        assert_eq!(plugin.trem[0], 1.25);
+        assert!(plugin.trem[1].abs() < 1e-6);
+        let w = TAU * 2.5 / 44_100.0;
+        for i in 0..CHUNK {
+            let a = w * i as f64;
+            assert!((f64::from(plugin.trem[2 * i]) - 1.25 * a.cos().abs()).abs() < 1e-6);
+            assert!((f64::from(plugin.trem[2 * i + 1]) - 1.25 * a.sin().abs()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_tremolo_depth_glides_while_voices_sound() {
+        let mut plugin = with_state(&[(25, 500)]);
+        plugin.trem_depth = 0.0;
+        assert!(plugin.tremolo(256, 1));
+        // At most 0.001 a frame at 44.1 kHz.
+        assert!((plugin.trem_depth - 0.256).abs() < 1e-5);
+        // At sample 0 the left starts at 1 + depth (1.25 - 1) = 1, as the
+        // depth starts at 0.
+        assert_eq!(plugin.trem[0], 1.0);
+    }
+
+    #[test]
+    fn a_new_voice_fades_the_tremolo_in_over_a_tenth_of_a_second() {
+        let mut plugin = with_state(&[(25, 1000)]);
+        assert_eq!(plugin.d.tremolo_fade, 4410);
+        assert_eq!(plugin.d.tremolo_fade_step, (1.0f64 / 4411.0) as f32);
+        plugin.note_on(note(60));
+        render(&mut plugin, 512);
+        let voice = sounding(&plugin)[0];
+        assert_eq!(voice.trem_fade, 4410 - 512);
+        render(&mut plugin, 4096);
+        assert!(sounding(&plugin)[0].trem_fade < 1);
+    }
+
+    fn with_selectors(params: &[(usize, i32)], selectors: [i32; 7]) -> Harmless {
+        let mut plugin = Harmless::default();
+        plugin.set_sample_rate(44_100.0);
+        plugin.set_state(&state_of(params, selectors)).unwrap();
+        plugin
+    }
+
+    #[test]
+    fn the_noise_resonance_silences_partials_and_holds_its_draw() {
+        let mut selectors = DEFAULT_SELECTORS;
+        selectors[1] = 8;
+        let mut plugin = with_selectors(&[(59, 1000), (61, 0)], selectors);
+        // The middle of the wheel holds (201^0.5 - 1) 2.49 + 2.0 ms.
+        let hold = (201f64.sqrt() - 1.0) * 2.490_022_675_736_961_2 + 1.995_464_852_607_709_7;
+        assert!((plugin.d.noise_len - hold).abs() < 1e-5);
+        assert!((plugin.d.noise_rate * hold * 44.1 / 88.0 - 1.0).abs() < 1e-6);
+        plugin.note_on(note(60));
+        render(&mut plugin, 1);
+        let voice = sounding(&plugin)[0];
+        let seed = voice.noise_seed;
+        // At full resonance t = 9999 / hold: few partials are left, and
+        // those at sqrt(t + 1) times their level.
+        let n = voice.count;
+        let silent = voice.levels[4..n].iter().filter(|l| **l == 0.0).count();
+        assert!(silent * 10 > (n - 4) * 9, "{silent} of {}", n - 4);
+        // The draw holds for the hold's ticks, then moves on.
+        let ticks = (1.0 / plugin.d.noise_rate) as usize;
+        render(&mut plugin, 88 * (ticks - 1));
+        assert_eq!(sounding(&plugin)[0].noise_seed, seed);
+        render(&mut plugin, 88 * 2);
+        assert_ne!(sounding(&plugin)[0].noise_seed, seed);
+    }
+
+    #[test]
+    fn the_frequency_shift_phaser_bends_the_partials_a_quarter_octave_rms() {
+        let mut selectors = DEFAULT_SELECTORS;
+        selectors[2] = 9;
+        let mut plugin = with_selectors(&[(71, 1000)], selectors);
+        plugin.note_on(note(60));
+        render(&mut plugin, 1);
+        let voice = sounding(&plugin)[0];
+        let mut bent = 0;
+        for k in 4..voice.count {
+            let plain = f64::from(voice.hz[k]) / 44_100.0;
+            let octaves = (voice.bank.freq(k) / plain).log2();
+            // The curve is a sine of RMS 1: at most sqrt 2 / 4 octave.
+            assert!(octaves.abs() <= 2f64.sqrt() / 4.0 + 1e-4, "{k}: {octaves}");
+            if octaves.abs() > 1e-3 {
+                bent += 1;
+            }
+        }
+        assert!(bent > 0);
+    }
+
+    #[test]
+    fn portamento_falls_to_a_hundredth_in_its_time() {
+        let mut plugin = with_state(&[(43, 1), (45, 400)]);
+        let ticks = plugin.d.porta;
+        // 44100 (41^0.4 - 1) / (88 * 26.67) ticks.
+        let want = (44_100.0 * (41f64.powf(0.4) - 1.0) / (88.0 * 80.0 / 3.0)) as f32;
+        assert!((ticks - want).abs() < 1e-3, "{ticks}");
+        plugin.note_on(keyed(1, 60));
+        render(&mut plugin, 512);
+        plugin.note_on(keyed(2, 67));
+        let voice = sounding(&plugin).into_iter().find(|v| v.id == 2).unwrap();
+        assert_eq!(voice.slide[2], -700.0);
+        let coef = voice.slide_coef;
+        assert!((f64::from(coef).powf(f64::from(ticks)) - 0.01).abs() < 1e-6);
+        // A tick moves it on by the factor, before the pitch is read.
+        render(&mut plugin, 1);
+        let voice = sounding(&plugin).into_iter().find(|v| v.id == 2).unwrap();
+        assert_eq!(voice.slide[2], -700.0 * coef);
+    }
+
+    #[test]
+    fn portamento_glides_an_octave_at_most_and_a_bit() {
+        for (key, want) in [(73, -100.0), (84, -1200.0), (48, 1200.0), (61, -100.0)] {
+            let mut plugin = with_state(&[(43, 1), (45, 400)]);
+            plugin.note_on(keyed(1, 60));
+            plugin.note_on(keyed(2, key));
+            let voice = sounding(&plugin).into_iter().find(|v| v.id == 2).unwrap();
+            assert_eq!(voice.slide[2], want, "key {key}");
+        }
+    }
+
+    #[test]
+    fn a_negative_glide_time_goes_in_a_straight_line() {
+        let mut plugin = with_state(&[(43, 1), (45, -400)]);
+        let n = 1 - plugin.d.porta.round_ties_even() as i32;
+        plugin.note_on(keyed(1, 60));
+        plugin.note_on(keyed(2, 62));
+        let voice = sounding(&plugin).into_iter().find(|v| v.id == 2).unwrap();
+        assert_eq!(voice.slide_ticks, n);
+        render(&mut plugin, 88 * n as usize);
+        let voice = sounding(&plugin).into_iter().find(|v| v.id == 2).unwrap();
+        assert_eq!(voice.slide_ticks, 0);
+        assert!(voice.slide[2].abs() < 1e-3, "{}", voice.slide[2]);
+    }
+
+    #[test]
+    fn legato_hands_the_voice_on_and_back() {
+        let mut plugin = with_state(&[(44, 1), (45, 400), (65, 3)]);
+        plugin.note_on(keyed(1, 60));
+        render(&mut plugin, 1024);
+        // A second note takes the three voices over, gliding from the first.
+        plugin.note_on(keyed(2, 67));
+        let voices = sounding(&plugin);
+        assert_eq!(voices.len(), 3);
+        assert!(voices.iter().all(|v| v.id == 2 && v.slide[2] == -700.0));
+        render(&mut plugin, 1024);
+        // Its release gives them back to the first, still held.
+        plugin.note_off(2);
+        let voices = sounding(&plugin);
+        assert_eq!(voices.len(), 3);
+        assert!(voices.iter().all(|v| v.id == 1 && v.state < 6));
+        // From where the glide had got to, so less than the fifth.
+        assert!(
+            (300.0..700.0).contains(&voices[0].slide[2]),
+            "{}",
+            voices[0].slide[2]
+        );
+        // Which then lets go.
+        plugin.note_off(1);
+        assert!(sounding(&plugin).iter().all(|v| v.state == 6));
+        // A note after the release starts its own voices.
+        plugin.note_on(keyed(3, 64));
+        assert_eq!(sounding(&plugin).iter().filter(|v| v.id == 3).count(), 3);
+    }
+
+    fn coloured(id: u32, key: i16, color: u8) -> NoteOn {
+        NoteOn {
+            color,
+            ..keyed(id, key)
+        }
+    }
+
+    #[test]
+    fn legato_hands_voices_on_within_a_colour_only() {
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 64, 3));
+        // Each colour has its own group: neither took the other over.
+        let ids: Vec<u32> = sounding(&plugin).iter().map(|v| v.id).collect();
+        assert_eq!(ids, [1, 2]);
+        plugin.note_on(coloured(3, 67, 3));
+        let ids: Vec<u32> = sounding(&plugin).iter().map(|v| v.id).collect();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(plugin.held[..plugin.held_len][0].id, 2);
+        // Letting go of the first colour's note leaves the other group be.
+        plugin.note_off(1);
+        plugin.note_off(3);
+        let voices = sounding(&plugin);
+        assert!(
+            voices
+                .iter()
+                .any(|v| v.id == 2 && v.state < 6 && v.group == 3)
+        );
+        assert!(voices.iter().any(|v| v.id == 1 && v.state == 6));
+    }
+
+    #[test]
+    fn the_14th_and_15th_colours_turn_legato_and_portamento_round() {
+        // MonoBox off: a note of the 14th colour plays legato over the
+        // first colour's note.
+        let mut plugin = with_state(&[]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 64, MONO_COLOR));
+        let ids: Vec<u32> = sounding(&plugin).iter().map(|v| v.id).collect();
+        assert_eq!(ids, [2]);
+        // MonoBox on: it does not, and starts its own voices.
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 64, MONO_COLOR));
+        assert_eq!(sounding(&plugin).len(), 2);
+        // PortaBox off: a note of the 15th colour glides from the first
+        // colour's last note.
+        let mut plugin = with_state(&[(45, 400)]);
+        plugin.note_on(coloured(1, 60, 0));
+        plugin.note_on(coloured(2, 67, PORTA_COLOR));
+        let glide = sounding(&plugin).iter().find(|v| v.id == 2).unwrap().slide[2];
+        assert_eq!(glide, -700.0);
+        plugin.note_on(coloured(3, 64, 0));
+        let glide = sounding(&plugin).iter().find(|v| v.id == 3).unwrap().slide[2];
+        assert_eq!(glide, 0.0);
+    }
+
+    #[test]
+    fn a_filter_note_moves_the_cutoff_to_its_pitch_and_leaves_it_there() {
+        let mut plugin = with_state(&[]);
+        plugin.note_on(keyed(1, 60));
+        render(&mut plugin, 1024);
+        let open = sounding(&plugin)[0].cutoff;
+        assert_eq!(open, plugin.d.fcut);
+        // Key 60 two octaves up is C7, 2093 Hz, from the middle of the
+        // range.
+        plugin.note_on(coloured(2, 60, FILTER_COLOR));
+        assert_eq!(sounding(&plugin).len(), 1);
+        render(&mut plugin, 44_100);
+        let d = &*plugin.d;
+        let middle = (d.fmin + d.fmax) * 0.5;
+        let offset = f64::from(2_093.004_5_f32.log2() - middle);
+        assert!((f64::from(plugin.filter_offset) - offset).abs() < 1e-4);
+        let cutoff = sounding(&plugin)[0].cutoff;
+        assert!(
+            (cutoff - (d.fcut + plugin.filter_offset)).abs() < 1e-3,
+            "{cutoff}"
+        );
+        // The host moves the filter note an octave up, and so the cutoff.
+        let before = plugin.filter_offset;
+        plugin.set_note_pitch(2, 1200.0);
+        render(&mut plugin, 256);
+        assert!((plugin.filter_offset - before - 1.0).abs() < 1e-5);
+        // Its end leaves the cutoff where it is.
+        plugin.note_off(2);
+        render(&mut plugin, 256);
+        assert!((plugin.filter_offset - before - 1.0).abs() < 1e-5);
+        assert_eq!(plugin.filters_len, 0);
+    }
+
+    #[test]
+    fn a_note_takes_the_pitch_the_host_moves_it_to_on_its_next_tick() {
+        let mut plugin = with_state(&[]);
+        plugin.note_on(keyed(1, 60));
+        render(&mut plugin, 256);
+        let before = sounding(&plugin)[0].f0_hz;
+        plugin.set_note_pitch(1, 1200.0);
+        plugin.set_note_pitch(7, 0.0);
+        render(&mut plugin, 256);
+        let after = sounding(&plugin)[0].f0_hz;
+        assert!((after / before - 2.0).abs() < 1e-5, "{before} {after}");
+
+        // A note held under another by legato keeps the pitch for when it
+        // sounds again.
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(keyed(1, 60));
+        plugin.note_on(keyed(2, 64));
+        plugin.set_note_pitch(1, -500.0);
+        plugin.set_note_pitch(2, 1200.0);
+        assert!(sounding(&plugin).iter().all(|v| v.pitch == 1200.0));
+        plugin.note_off(2);
+        assert!(
+            sounding(&plugin)
+                .iter()
+                .all(|v| v.id == 1 && v.pitch == -500.0)
+        );
+    }
+
+    #[test]
+    fn a_held_note_let_go_under_legato_is_forgotten() {
+        let mut plugin = with_state(&[(44, 1)]);
+        plugin.note_on(keyed(1, 60));
+        plugin.note_on(keyed(2, 64));
+        plugin.note_off(1);
+        assert_eq!(plugin.held_len, 0);
+        plugin.note_off(2);
+        assert!(sounding(&plugin).iter().all(|v| v.id == 2 && v.state == 6));
     }
 
     /// The left side of a note of 0.1 s with these parameters, and without
