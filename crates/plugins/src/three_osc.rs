@@ -81,8 +81,9 @@
 //!
 //! A state with the HQ flag reads tables made for the pitch instead: each
 //! shape cut down to the harmonics that fit, a table every quarter octave,
-//! read between two points. The doc has not confirmed how FL's engine
-//! makes them, so [`Generator::fidelity`] says so.
+//! read between two points. They are made as FL's engine makes them, with
+//! its float KissFFT, and are its tables to the bit; the sine, the noise and
+//! the shapes under 22 Hz are worked out at the phase as the engine does.
 //!
 //! What is not FL's:
 //!
@@ -436,35 +437,181 @@ pub(crate) fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
     }
 }
 
+/// The KissFFT the HQ engine builds its tables with, in floats: the plan
+/// `FUN_1800029d0` makes (radix 4 first, then 2, 3 and the odd numbers) and
+/// the recursion `FUN_1800027c0` with its radix 2 and 4 butterflies. The
+/// engine runs four lanes side by side, each on its own, so one lane is
+/// the same to the bit.
+struct Kiss {
+    inverse: bool,
+    /// Each stage's radix and the length under it.
+    factors: Vec<(usize, usize)>,
+    twiddles: Vec<[f32; 2]>,
+}
+
+type Complex = [f32; 2];
+
+fn cmul(a: Complex, b: Complex) -> Complex {
+    [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
+}
+
+fn csub(a: Complex, b: Complex) -> Complex {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn cadd(a: Complex, b: Complex) -> Complex {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+impl Kiss {
+    fn new(len: usize, inverse: bool) -> Kiss {
+        let step = 1.0 / len as f64;
+        let twiddles = (0..len)
+            .map(|i| {
+                let phase = i as f64 * -TAU * step;
+                let phase = if inverse { -phase } else { phase };
+                [phase.cos() as f32, phase.sin() as f32]
+            })
+            .collect();
+        let floor_sqrt = (len as f64).sqrt().floor();
+        let (mut factors, mut n, mut p) = (Vec::new(), len, 4);
+        loop {
+            while n % p != 0 {
+                p = match p {
+                    4 => 2,
+                    2 => 3,
+                    _ => p + 2,
+                };
+                if p as f64 > floor_sqrt {
+                    p = n;
+                }
+            }
+            n /= p;
+            factors.push((p, n));
+            if n <= 1 {
+                break;
+            }
+        }
+        Kiss {
+            inverse,
+            factors,
+            twiddles,
+        }
+    }
+
+    fn transform(&self, input: &[Complex]) -> Vec<Complex> {
+        let mut out = vec![[0.0; 2]; input.len()];
+        self.work(&mut out, input, 0, 1, 0);
+        out
+    }
+
+    fn work(
+        &self,
+        out: &mut [Complex],
+        input: &[Complex],
+        from: usize,
+        stride: usize,
+        stage: usize,
+    ) {
+        let (p, m) = self.factors[stage];
+        if m == 1 {
+            for (k, point) in out.iter_mut().take(p).enumerate() {
+                *point = input[from + k * stride];
+            }
+        } else {
+            for k in 0..p {
+                let part = &mut out[k * m..(k + 1) * m];
+                self.work(part, input, from + k * stride, stride * p, stage + 1);
+            }
+        }
+        match p {
+            2 => self.butterfly_2(out, stride, m),
+            4 => self.butterfly_4(out, stride, m),
+            _ => unreachable!("the HQ tables are a power of two long"),
+        }
+    }
+
+    fn butterfly_2(&self, out: &mut [Complex], stride: usize, m: usize) {
+        for k in 0..m {
+            let t = cmul(out[m + k], self.twiddles[k * stride]);
+            out[m + k] = csub(out[k], t);
+            out[k] = cadd(out[k], t);
+        }
+    }
+
+    fn butterfly_4(&self, out: &mut [Complex], stride: usize, m: usize) {
+        let tw = &self.twiddles;
+        for k in 0..m {
+            let s0 = cmul(out[k + m], tw[k * stride]);
+            let s1 = cmul(out[k + 2 * m], tw[2 * k * stride]);
+            let s2 = cmul(out[k + 3 * m], tw[3 * k * stride]);
+            let s5 = csub(out[k], s1);
+            out[k] = cadd(out[k], s1);
+            let s3 = cadd(s0, s2);
+            let s4 = csub(s0, s2);
+            out[k + 2 * m] = csub(out[k], s3);
+            out[k] = cadd(out[k], s3);
+            if self.inverse {
+                out[k + m] = [s5[0] - s4[1], s5[1] + s4[0]];
+                out[k + 3 * m] = [s5[0] + s4[1], s5[1] - s4[0]];
+            } else {
+                out[k + m] = [s5[0] + s4[1], s5[1] - s4[0]];
+                out[k + 3 * m] = [s5[0] - s4[1], s5[1] + s4[0]];
+            }
+        }
+    }
+}
+
 impl MipTables {
+    /// `FUN_180001310` and `FUN_180002d90` with 4 levels to the octave and
+    /// 16 points to each of the shape's 2048: the shape drawn straight
+    /// between its points, cut to fewer harmonics a level at a time
+    /// (`FUN_180001be0`) and turned back, all in floats as the engine has
+    /// them.
     fn new() -> Self {
+        const COARSE: usize = 2048;
+        const UP: usize = MIP_POINTS / COARSE;
+        let forward = Kiss::new(MIP_POINTS, false);
+        let inverse = Kiss::new(MIP_POINTS, true);
+        let scale = 1.0 / MIP_POINTS as f32;
+        let fewer = 2f64.powf(-1.0 / 4.0);
         let mut levels = Vec::with_capacity(4 * MIP_LEVELS);
         for shape in 1..=4 {
-            // 2048 points of the shape, with straight lines between them.
-            let coarse: Vec<f32> = (0..2048)
-                .map(|i| shape_at(shape, (f64::from(i) / 2048.0) as f32))
+            let coarse: Vec<f32> = (0..COARSE)
+                .map(|i| shape_at(shape, (i as f64 * 0.000_488_281_25) as f32))
                 .collect();
-            let mut re: Vec<f64> = (0..MIP_POINTS)
-                .map(|i| {
-                    let (a, b) = (coarse[i / 16], coarse[(i / 16 + 1) % 2048]);
-                    f64::from(a) + f64::from(b - a) * (i % 16) as f64 / 16.0
+            let mut along = 0.0f64;
+            let points: Vec<Complex> = (0..MIP_POINTS)
+                .map(|_| {
+                    let at = along as i32 as usize;
+                    let next = if at + 1 < COARSE { at + 1 } else { 0 };
+                    let frac = along as f32 - at as f32;
+                    along += 1.0 / UP as f64;
+                    [(1.0 - frac) * coarse[at] + frac * coarse[next], 0.0]
                 })
                 .collect();
-            let mut im = vec![0.0; MIP_POINTS];
-            fft(&mut re, &mut im, false);
-            for level in 0..MIP_LEVELS {
-                // The first 1024 * 2^(-level / 4) harmonics.
-                let kept = (1024.0 * (-(level as f64) / 4.0).exp2()) as usize;
-                let (mut cut_re, mut cut_im) = (re.clone(), im.clone());
-                cut_re[kept + 1..MIP_POINTS - kept].fill(0.0);
-                cut_im[kept + 1..MIP_POINTS - kept].fill(0.0);
-                fft(&mut cut_re, &mut cut_im, true);
-                let mut table: Vec<f32> = cut_re
-                    .iter()
-                    .map(|value| (value / MIP_POINTS as f64) as f32)
-                    .collect();
-                table.extend_from_within(..2);
-                levels.push(table);
+            let spectrum = forward.transform(&points);
+            // Four levels to a pass of the engine, each with its own count
+            // of harmonics kept, 1024 at the first, `2^-1/4` fewer at each.
+            let mut kept = 1024.0f64;
+            for _ in 0..MIP_LEVELS / 4 {
+                let mut counts = [0.0f64; 4];
+                for count in &mut counts {
+                    *count = kept;
+                    kept *= fewer;
+                }
+                for count in counts {
+                    let count = (count as i32).max(1) as usize;
+                    let mut cut = spectrum.clone();
+                    cut[count + 1..MIP_POINTS - count].fill([0.0; 2]);
+                    let mut table: Vec<f32> = inverse
+                        .transform(&cut)
+                        .iter()
+                        .map(|point| scale * point[0])
+                        .collect();
+                    table.extend_from_within(..2);
+                    levels.push(table);
+                }
             }
         }
         MipTables { levels }
@@ -479,6 +626,15 @@ impl MipTables {
     fn level(&self, shape: usize, level: usize) -> &[f32] {
         &self.levels[(shape - 1) * MIP_LEVELS + level]
     }
+}
+
+/// One turn of a 32-bit phase.
+const TURN: f64 = 1.0 / 4_294_967_296.0;
+
+/// How far through its turn a phase is, as the HQ engine works it out:
+/// in doubles, then a float.
+fn along(phase: u32) -> f32 {
+    (f64::from(phase) * TURN) as f32
 }
 
 /// Delphi's `Random(range)`, which FL draws a note's phases and a noise
@@ -1041,8 +1197,9 @@ struct Derived {
     rate: f32,
     /// `44100 / rate`.
     s: f32,
-    /// One over the rate, as the HQ engine has it.
-    period: f32,
+    /// One over the rate in whole Hz, in doubles, as the HQ engine keeps
+    /// it from its dispatch 2.
+    period: f64,
 }
 
 /// The 10 ms a note fades out by at this rate: half a turn of a cosine,
@@ -1093,7 +1250,7 @@ impl Derived {
             resonance: tab.resonance as f32 * (1.0 / 256.0),
             rate: plugin.rate,
             s: (44_100.0 / f64::from(plugin.rate)) as f32,
-            period: 1.0 / plugin.rate,
+            period: 1.0 / plugin.rate as i64 as f64,
         }
     }
 }
@@ -1188,14 +1345,17 @@ impl Voice {
             0 => Source::Sine,
             5 => Source::Noise,
             shape => {
-                let turns = step as f32 * (1.0 / 4_294_967_296.0);
-                if f64::from(turns) < 5e-4 {
+                // `FUN_180001660`: the turns a sample, the frequency over
+                // MIDI note 0's, and 4 log2 of it less 5 kept to the levels.
+                let turns = f64::from(step) * TURN;
+                if turns < 5e-4 {
                     return Source::Shape(shape);
                 }
-                let hz = f64::from(turns / derived.period);
-                let level = (hz / 8.1758).log2() * 4.0 - 5.0;
-                let top = (MIP_LEVELS - 2) as f64;
-                Source::Mip(shape, level.clamp(0.0, top) as usize)
+                let over = (0.122_309_197_651_663_4 / derived.period) * turns;
+                let level = (over.log10() * 13.287_712_379_549_449 - 5.0) as f32;
+                let top = (MIP_LEVELS - 2) as f32;
+                let level = if 0.0 <= level { level.min(top) } else { 0.0 };
+                Source::Mip(shape, level as usize)
             }
         }
     }
@@ -1260,21 +1420,21 @@ impl Voice {
         match source {
             Source::Silent => 0.0,
             Source::Table(shape) => HostTables::get().shapes[shape][(phase >> 18) as usize],
-            Source::Sine => (phase as f32 * (TAU / 4_294_967_296.0) as f32).sin(),
+            Source::Sine => (along(phase) * TAU as f32).sin(),
             Source::Noise => {
                 *noise = noise.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
                 *noise as i32 as f32 * (1.0 / 2_147_483_648.0)
             }
-            Source::Shape(shape) => shape_at(shape, phase as f32 * (1.0 / 4_294_967_296.0)),
+            Source::Shape(shape) => shape_at(shape, along(phase)),
             Source::Mip(shape, level) => {
                 let Some(mips) = mips else {
                     return 0.0;
                 };
                 let table = mips.level(shape, level);
-                let at = phase as f32 * (1.0 / 4_294_967_296.0) * MIP_POINTS as f32;
-                let point = (at as usize).min(MIP_POINTS);
-                let along = at - point as f32;
-                table[point] + (table[point + 1] - table[point]) * along
+                let at = along(phase) * MIP_POINTS as f32;
+                let point = at as usize;
+                let frac = at - point as f32;
+                (1.0 - frac) * table[point] + frac * table[point + 1]
             }
         }
     }
@@ -1304,9 +1464,16 @@ impl Voice {
                     if source == Source::Silent {
                         continue;
                     }
-                    let sample = Voice::read(source, phase, mips, noise) * osc.gains[side];
+                    let value = Voice::read(source, phase, mips, noise);
+                    let sample = value * osc.gains[side];
                     if derived.am && k == 2 {
-                        *sum -= *sum * sample;
+                        // The HQ engine takes the gain last.
+                        let engine = !matches!(source, Source::Table(_));
+                        *sum -= if engine {
+                            *sum * value * osc.gains[side]
+                        } else {
+                            *sum * sample
+                        };
                     } else {
                         *sum += sample;
                     }
@@ -1643,9 +1810,7 @@ impl Generator for ThreeOsc {
 
     fn fidelity(&self) -> Fidelity {
         let heard = |osc: &Osc| osc.custom && osc.level.to_bits() != 0;
-        if self.hq {
-            Fidelity::Approximate("3x Osc HQ tables")
-        } else if self.derived.oscs.iter().any(heard) {
+        if self.derived.oscs.iter().any(heard) {
             Fidelity::Approximate("3x Osc custom shape")
         } else {
             Fidelity::Exact
@@ -2570,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn hq_reads_tables_cut_down_to_the_pitch_and_says_it_is_not_confirmed() {
+    fn hq_reads_tables_cut_down_to_the_pitch() {
         // A saw three octaves up, at 4186 Hz. Its sixth harmonic is over
         // half the rate and comes back down at 18984 Hz.
         let saw = |hq: u8| {
@@ -2582,7 +2747,7 @@ mod tests {
         };
         let (mut plain, mut hq) = (saw(0), saw(1));
         assert_eq!(plain.fidelity(), Fidelity::Exact);
-        assert_eq!(hq.fidelity(), Fidelity::Approximate("3x Osc HQ tables"));
+        assert_eq!(hq.fidelity(), Fidelity::Exact);
         assert_eq!(hq.flags(), ([false; 3], false, true));
         let base = turns(3600.0);
         let len = whole(base, 40_000);
@@ -2625,6 +2790,45 @@ mod tests {
             (first - 4.0 / PI).abs() < 0.01 && third < 1e-6,
             "{first} {third}"
         );
+    }
+
+    #[test]
+    fn the_hq_tables_are_the_engine_s_to_the_bit() {
+        // Points of FL's own tables, dumped from `FUN_180001310` of
+        // `engine_x64.dll` run under an emulator
+        // (`tools/plugstate/osc3_emu.py`): shape, level, point and bits.
+        let mips = MipTables::get();
+        let points = [
+            (1, 0, 1000, 0x3df9_ffc8),
+            (2, 7, 8191, 0x3f7f_8682),
+            (3, 0, 0, 0xbf46_4898),
+            (3, 20, 5000, 0xbf2f_d678),
+            (4, 43, 123, 0x3af5_2c00),
+            (4, 12, 30_000, 0xbf81_29e2),
+            (2, 43, 32_769, 0x3b0f_ff56),
+        ];
+        for (shape, level, point, bits) in points {
+            let value = mips.level(shape, level)[point];
+            assert_eq!(value.to_bits(), bits, "{shape} {level} {point}: {value}");
+        }
+        // The float transform is a Fourier transform: a cosine of 3 turns
+        // comes out at bins 3 and -3, half the length each.
+        let kiss = Kiss::new(1024, false);
+        assert_eq!(kiss.factors, [(4, 256), (4, 64), (4, 16), (4, 4), (4, 1)]);
+        assert_eq!(Kiss::new(32_768, true).factors.last(), Some(&(2, 1)));
+        let input: Vec<Complex> = (0..1024)
+            .map(|i| [(TAU * 3.0 * i as f64 / 1024.0).cos() as f32, 0.0])
+            .collect();
+        let out = kiss.transform(&input);
+        for (bin, value) in out.iter().enumerate() {
+            let expected = if bin == 3 || bin == 1021 { 512.0 } else { 0.0 };
+            assert!(
+                (value[0] - expected).abs() < 1e-3 && value[1].abs() < 1e-3,
+                "{bin}"
+            );
+        }
+        let back = Kiss::new(1024, true).transform(&out);
+        assert!((back[5][0] / 1024.0 - input[5][0]).abs() < 1e-6);
     }
 
     #[test]
@@ -2760,6 +2964,6 @@ mod tests {
             [(44, 1), (84, 82), (88, 70), (92, 121), (93, 2), (460, 57)]
         );
         assert_eq!(fidelity.values().sum::<i32>(), 333);
-        assert_eq!(fidelity.get("3x Osc HQ tables"), Some(&13));
+        assert_eq!(fidelity.get("3x Osc HQ tables"), None);
     }
 }
