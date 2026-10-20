@@ -4675,6 +4675,102 @@ fn a_parameter_of_a_plugin_that_only_draws_is_played_by_setting_nothing() {
     assert_eq!(linked(&out), (2, 1, 1));
 }
 
+/// The loudest a buffer gets.
+fn loudest(buffer: &[f32]) -> f32 {
+    buffer.iter().fold(0.0, |most, v| most.max(v.abs()))
+}
+
+/// The 219 of a new channel, with this mod X, mod Y and filter type.
+fn filter_levels(mod_x: u32, mod_y: u32, kind: i32) -> Levels {
+    Levels {
+        pan: 6400,
+        volume: 10_000,
+        unknown_8: [0; 4],
+        mod_x,
+        mod_y,
+        unknown_20: kind.to_le_bytes(),
+        len: 24,
+    }
+}
+
+#[test]
+fn a_clip_on_a_sampler_s_mod_x_closes_its_filter() {
+    let dir = Dir::new("automation-mod-x");
+    dir.sine(2 * 96_000);
+    let plain = render(&tone(BAR), &dir);
+    // Mod X wide open for two beats, then at a fifth: 51 of 256.
+    let shut = [Point::new(0.0, 1.0), hold(2.0, 0.2), Point::new(2.0, 0.2)];
+    let filtered = |kind: i32, control: u32| {
+        let mut project = tone(BAR);
+        project.channels[0].levels = Some(filter_levels(256, 0, kind));
+        let clip = add_automation(&mut project, &shut, FULL);
+        bind(&mut project, clip, control);
+        place(&mut project, clip, 0, BAR);
+        project
+    };
+    let out = render(&filtered(0, 2), &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    // Wide open, the Fast LP leaves the tone as it is.
+    assert!(out.left[..48_000] == plain.left[..48_000]);
+    assert_eq!(out.left, out.right);
+    // At a fifth it is a low-pass at about 30 Hz, which leaves a 100 Hz
+    // tone at under a third.
+    let last = 72_000..96_000;
+    let (before, after) = (loudest(&plain.left[last.clone()]), loudest(&out.left[last]));
+    assert!(
+        after < 0.35 * before && after > 0.15 * before,
+        "{after} of {before}"
+    );
+
+    // The high-pass at the same cutoff takes even more of it away, and
+    // wide open nearly all of it.
+    let out = render(&filtered(3, 2), &dir);
+    assert!(loudest(&out.left[24_000..48_000]) < 0.01);
+    assert!(loudest(&out.left[72_000..96_000]) < before);
+
+    // The offset of mod X moves it the same way. Its range is -256 to
+    // 256, so this clip holds it at 0 and then at -205, which leaves the
+    // cutoff where the clip on mod X put it.
+    let offset = [Point::new(0.0, 0.5), hold(2.0, 0.1), Point::new(2.0, 0.1)];
+    let mut moved = tone(BAR);
+    moved.channels[0].levels = Some(filter_levels(256, 0, 0));
+    let clip = add_automation(&mut moved, &offset, FULL);
+    bind(&mut moved, clip, 0x13);
+    place(&mut moved, clip, 0, BAR);
+    let out = render(&moved, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    assert!(out.left == render(&filtered(0, 2), &dir).left);
+
+    // A channel whose filter no clip drives plays as it did, whatever its
+    // mod X and Y.
+    let mut set = tone(BAR);
+    set.channels[0].levels = Some(filter_levels(51, 128, 0));
+    let out = render(&set, &dir);
+    assert!(out.left == plain.left);
+}
+
+#[test]
+fn a_filtered_voice_comes_out_the_same_in_blocks_of_any_size() {
+    let dir = Dir::new("automation-mod-x-blocks");
+    dir.sine(2 * 96_000);
+    let sweep = [Point::new(0.0, 1.0), Point::new(4.0, 0.1)];
+    let mut project = tone(BAR);
+    project.channels[0].levels = Some(filter_levels(256, 96, 0));
+    let clip = add_automation(&mut project, &sweep, FULL);
+    bind(&mut project, clip, 2);
+    place(&mut project, clip, 0, BAR);
+    let out = render(&project, &dir);
+    assert!(loudest(&out.left[90_000..96_000]) < loudest(&out.left[..6000]));
+    let samples = engine::prepare(&project, &dir.0).unwrap();
+    for block in [1, 64, 333, 4096] {
+        let mut engine = Engine::new(&project, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, out.left.len());
+        assert!(sink.left == out.left, "left in blocks of {block}");
+    }
+}
+
 #[test]
 fn a_controller_drives_a_parameter_of_a_hosted_plugin() {
     let dir = Dir::new("controller-param");

@@ -203,7 +203,9 @@ impl Graph {
             let level = levels.vol * curves.volume_adjust_gain(voice::adjust(project, channel));
             let gains = gains(project, channel, level, levels.pan, curves);
             let voice = Voice::new(sample, insert, held, step, gains);
-            let voice = following(voice, channel, levels.vol, levels.pan, &automation, curves);
+            let own = (levels.vol, levels.pan);
+            let mods = (levels.mod_x, levels.mod_y);
+            let voice = following(voice, channel, own, mods, sample_rate, &automation, curves);
             len = len.max(start.saturating_add(voice.frames()).min(limit));
             played.insert(insert);
             let done = start.saturating_add(voice.frames());
@@ -260,7 +262,16 @@ impl Graph {
             let gains = gains(project, channel, level, settings.pan, curves);
             let voice = Voice::new(sample, insert, Some(held), step, gains)
                 .starting_at(offset, settings.reversed);
-            let voice = following(voice, channel, own, settings.pan, &automation, curves);
+            let own = (own, settings.pan);
+            let voice = following(
+                voice,
+                channel,
+                own,
+                (0.0, 0.0),
+                sample_rate,
+                &automation,
+                curves,
+            );
             // Trimmed to past the end of its sample, or no ticks long.
             if voice.finished() {
                 continue;
@@ -389,17 +400,19 @@ fn gains(
 }
 
 /// The voice, set to follow its channel when a clip drives one of the
-/// channel's levels. `level` is the voice's own, without the channel's
-/// volume multiplier.
+/// channel's levels. `own` is the voice's level, without the channel's
+/// volume multiplier, and its pan, and `mods` its mod X and mod Y, for the
+/// channel's filter at output rate `rate`.
 fn following(
     voice: Voice,
     channel: &Channel,
-    level: f32,
-    pan: f32,
+    own: (f32, f32),
+    mods: (f32, f32),
+    rate: u32,
     automation: &Automation,
     curves: &dyn Curves,
 ) -> Voice {
-    match automation.following(channel.index, level, pan, curves) {
+    match automation.following(channel.index, own, mods, rate, curves) {
         Some(follow) => voice.following(follow),
         None => voice,
     }
