@@ -60,8 +60,9 @@ const OUT: usize = 8;
 /// The most articulators a part has, and how many each kind has.
 const ARTICULATORS: usize = 8;
 const COUNTS: [usize; 3] = [6, 8, 2];
-/// A wavetable's samples a cycle, and one more to read past the end.
-const TABLE: usize = 2048;
+/// A wavetable's samples a cycle, and one more to read past the end:
+/// `2^14` (`0x848980(14, 12)` sets `0x911b90`).
+const TABLE: usize = 16_384;
 /// The harmonics an operator draws.
 const HARMONICS: usize = 256;
 /// A Mod X or Mod Y map is baked into this many steps.
@@ -499,19 +500,20 @@ impl Articulator {
     }
 
     /// Work the value out for one control tick. `places` are where Mod X
-    /// and Mod Y are in their tables.
-    fn tick(&self, run: &mut ArtRun, places: [usize; 2], rates: [f64; 2]) {
+    /// and Mod Y are in their tables; `dt` is 0 at a voice's first tick
+    /// and 1 after (`0x872290`: `0x8736d4`, `0x8736d8`).
+    fn tick(&self, run: &mut ArtRun, places: [usize; 2], rates: [f64; 2], dt: f64) {
         let mut value = run.fixed;
         if self.live() {
             let mut moving = self.base;
             if self.envelope.active() {
                 let rate = rates[usize::from(self.envelope.tempo)];
-                self.envelope.advance(&mut run.run, 1.0, rate);
+                self.envelope.advance(&mut run.run, dt, rate);
                 moving += run.run.out * self.amount;
             }
             if self.lfo.active() {
                 let rate = rates[usize::from(self.lfo.tempo())];
-                self.lfo.advance(&mut run.lfo, 1.0, rate);
+                self.lfo.advance(&mut run.lfo, dt, rate);
                 if self.additive {
                     moving += run.lfo.out * self.lfo_amount;
                 } else {
@@ -555,6 +557,9 @@ struct Operator {
     table: Vec<f32>,
     free_run: bool,
     plucked: bool,
+    /// The block's eight switches: half, half silent, abs, free run,
+    /// declick, centre, plucked, band limit.
+    flags: [u8; 8],
     /// The harmonics filter wheel, where 128 leaves every harmonic.
     filter: i32,
     articulators: Vec<Articulator>,
@@ -1035,6 +1040,8 @@ struct State {
     mod_y: i32,
     /// Mod X and Mod Y glide to their wheels (`ModSmoothBtn`, u8 0x440).
     mod_smooth: bool,
+    /// The control tick is 8 samples and not 96 (`DQEnvBtn`, i32 0x430).
+    envelope_hq: bool,
     /// The waveshapers read between their steps (u8 0x5f18; FL also does
     /// while it renders to a file).
     hq_shaper: bool,
@@ -1083,6 +1090,7 @@ impl State {
             table: Vec::new(),
             free_run: false,
             plucked: false,
+            flags: [0; 8],
             filter: 128,
             articulators,
         };
@@ -1132,6 +1140,7 @@ impl State {
             mod_x: 256,
             mod_y: 256,
             mod_smooth: true,
+            envelope_hq: false,
             hq_shaper: false,
             fm: [[0.0; OPERATORS]; OPERATORS],
             rm: [[0.0; OPERATORS]; OPERATORS],
@@ -1216,7 +1225,10 @@ impl State {
         state.mod_x = reader.i32()?;
         state.mod_y = reader.i32()?;
         let _smoothing = reader.f32()?;
-        reader.bytes(0x440 - 0x430)?;
+        // 0x430 / 0x434: the envelopes' high quality while playing and
+        // while rendering; 0x438 / 0x43c: the oversampling.
+        state.envelope_hq = reader.i32()? != 0;
+        reader.bytes(0x440 - 0x434)?;
         let flags = reader.bytes(4)?;
         state.mod_smooth = flags[0] != 0;
         reader.bytes(8)?;
@@ -1379,6 +1391,7 @@ impl State {
                 let half = [flags[0] != 0, flags[1] != 0];
                 operator.free_run = flags[3] != 0;
                 operator.plucked = flags[6] != 0;
+                operator.flags.copy_from_slice(flags);
                 operator.filter = wheels[4];
                 operator.table = build_table(&levels, &phases, wheels, half, flags[2] != 0);
             } else if kind == 1 {
@@ -1781,7 +1794,9 @@ struct Voice {
     over: bool,
     /// The next tick is the first.
     first: bool,
-    ticked: bool,
+    /// The frames left of the voice's control tick: every voice counts
+    /// its own from its start (`voice+0x14`).
+    to_tick: usize,
     seed: u32,
 }
 
@@ -2113,7 +2128,7 @@ impl Voice {
             fade: 1.0,
             over: false,
             first: true,
-            ticked: true,
+            to_tick: 0,
             seed: *seed,
         }
     }
@@ -2137,6 +2152,7 @@ impl Voice {
         let len = len.max(1) as f32;
         let snap = self.first;
         self.first = false;
+        let dt = if snap { 0.0 } else { 1.0 };
         // The main pitch retunes the operators (`0x872290` calls `0x872210`
         // when the note's pitch and it come to another sum).
         let pitch = self.key_pitch + state.main_pitch;
@@ -2163,7 +2179,7 @@ impl Voice {
             }
             for (index, articulator) in state.articulators(part).iter().enumerate() {
                 let run = &mut self.articulators[part * ARTICULATORS + index];
-                articulator.tick(run, self.places, timing.rates);
+                articulator.tick(run, self.places, timing.rates, dt);
             }
         }
         let value =
@@ -2270,6 +2286,35 @@ impl Voice {
 
     /// Render `len` frames into `scratch`, a block of [`CHUNK`] a row, and
     /// add them to the output.
+    /// Play the frames the buses hold: a control tick wherever the voice's
+    /// own count runs out, the frames between rendered. Returns whether
+    /// the voice is over.
+    fn play(
+        &mut self,
+        state: &State,
+        timing: Timing,
+        scratch: &mut [f32],
+        buses: &mut [&mut [f32]; 4],
+    ) -> bool {
+        let len = buses[0].len();
+        let mut at = 0;
+        while at < len {
+            if self.to_tick == 0 {
+                self.to_tick = timing.tick as usize;
+                self.tick(state, timing, self.to_tick);
+                // A slave lasts as long as its master.
+                if self.over && self.unison.role != Role::Slave {
+                    return true;
+                }
+            }
+            let run = (len - at).min(self.to_tick);
+            self.render(state, timing, scratch, (buses, at, run));
+            self.to_tick -= run;
+            at += run;
+        }
+        false
+    }
+
     /// Render the next frames into `scratch`, a block of [`CHUNK`] a row,
     /// and add them to the buses: dry left and right, send left and right,
     /// as many frames as they hold.
@@ -2278,9 +2323,9 @@ impl Voice {
         state: &State,
         timing: Timing,
         scratch: &mut [f32],
-        buses: &mut [&mut [f32]; 4],
+        (buses, at, len): (&mut [&mut [f32]; 4], usize, usize),
     ) {
-        let len = buses[0].len().min(CHUNK);
+        let len = len.min(CHUNK);
         let fading = self.released && !state.any_envelope();
         for i in 0..len {
             for op in 0..OPERATORS {
@@ -2341,7 +2386,7 @@ impl Voice {
                 let gain = self.unison.sum;
                 for op in 0..OPERATORS {
                     if state.active[op] {
-                        let into = &mut sum[op * CHUNK..op * CHUNK + len];
+                        let into = &mut sum[op * CHUNK + at..op * CHUNK + at + len];
                         for (into, out) in into.iter_mut().zip(&rows[op * CHUNK..]) {
                             *into += out * gain;
                         }
@@ -2353,7 +2398,7 @@ impl Voice {
                 let gain = self.unison.sum;
                 for op in 0..OPERATORS {
                     if state.active[op] {
-                        let from = &mut sum[op * CHUNK..op * CHUNK + len];
+                        let from = &mut sum[op * CHUNK + at..op * CHUNK + at + len];
                         for (out, from) in rows[op * CHUNK..].iter_mut().zip(from.iter_mut()) {
                             *out = *out * gain + *from;
                             *from = 0.0;
@@ -2408,11 +2453,11 @@ impl Voice {
             fade = self.fade;
             for i in 0..len {
                 let sample = scratch[row * CHUNK + i] * fade;
-                buses[0][i] += sample * gains[0];
-                buses[1][i] += sample * gains[1];
+                buses[0][at + i] += sample * gains[0];
+                buses[1][at + i] += sample * gains[1];
                 if sends {
-                    buses[2][i] += sample * gains[2];
-                    buses[3][i] += sample * gains[3];
+                    buses[2][at + i] += sample * gains[2];
+                    buses[3][at + i] += sample * gains[3];
                 }
                 for (gain, step) in gains.iter_mut().zip(&steps) {
                     *gain += step;
@@ -2441,8 +2486,6 @@ pub struct Sytrus {
     notes: u32,
     /// The chorus, delays, reverb and EQ after the voices.
     fx: fx::Effects,
-    to_tick: usize,
-    tick_part: f64,
     scratch: Vec<f32>,
     seed: u32,
 }
@@ -2457,8 +2500,6 @@ impl Default for Sytrus {
             voices: Vec::with_capacity(ROOM),
             notes: 0,
             fx: fx::Effects::default(),
-            to_tick: 0,
-            tick_part: 0.0,
             scratch: vec![0.0; (ROWS + OPERATORS) * CHUNK],
             seed: 0x1234_5678,
         }
@@ -2493,8 +2534,13 @@ impl Sytrus {
         }
     }
 
+    /// The control tick in frames (`0x8657b0`): 96 samples at 44.1 kHz,
+    /// or 8 with the envelopes' high quality switch (u8 0x430 while
+    /// playing; `0x8fc9c4`), at the rate, in fours.
     fn tick_len(&self) -> f64 {
-        (f64::from(self.rate) * 60.0 / (self.tempo * self.ppq)).max(1.0)
+        let at = if self.state.envelope_hq { 8.0 } else { 96.0 };
+        let frames = at * f64::from(self.rate.round() as i32) / 44_100.0;
+        ((frames / 4.0).round_ties_even() * 4.0).max(4.0)
     }
 
     fn timing(&self) -> Timing {
@@ -2600,32 +2646,16 @@ impl Generator for Sytrus {
         let timing = self.timing();
         let mut at = 0;
         while at < len {
-            if self.to_tick == 0 {
-                self.tick_part += timing.tick;
-                self.to_tick = (self.tick_part as usize).max(1);
-                self.tick_part -= self.to_tick as f64;
-                for voice in &mut self.voices {
-                    voice.ticked = true;
-                }
-            }
-            let run = (len - at).min(self.to_tick).min(CHUNK);
-            let (state, scratch, to_tick) = (&self.state, &mut self.scratch[..], self.to_tick);
+            let run = (len - at).min(CHUNK);
+            let (state, scratch) = (&self.state, &mut self.scratch[..]);
             let block = at..at + run;
             let mut ended = false;
             let sounding = self.voices.len();
             let mut buses = self.fx.buses(run);
             self.voices.retain_mut(|voice| {
-                if voice.ticked {
-                    voice.tick(state, timing, to_tick);
-                    voice.ticked = false;
-                }
-                // A slave lasts as long as its master.
-                if voice.over && voice.unison.role != Role::Slave {
-                    ended |= voice.unison.role == Role::Master;
-                    return false;
-                }
-                voice.render(state, timing, scratch, &mut buses);
-                true
+                let over = voice.play(state, timing, scratch, &mut buses);
+                ended |= over && voice.unison.role == Role::Master;
+                !over
             });
             if ended {
                 self.drop_orphans();
@@ -2633,7 +2663,6 @@ impl Generator for Sytrus {
             let (l, r) = (&mut left[block.clone()], &mut right[block]);
             self.fx.run(sounding, self.state.send_on, l, r);
             at += run;
-            self.to_tick -= run;
         }
     }
 
@@ -2674,7 +2703,6 @@ impl Generator for Sytrus {
 
     fn reset(&mut self) {
         self.voices.clear();
-        (self.to_tick, self.tick_part) = (0, 0.0);
         self.fx.reset(&self.state.fx, &self.state.wheels());
     }
 
