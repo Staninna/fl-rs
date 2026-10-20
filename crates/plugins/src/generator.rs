@@ -170,6 +170,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::directwave::NAME, || {
         Box::new(crate::directwave::DirectWave::default())
     }),
+    (crate::drumaxx::NAME, || {
+        Box::new(crate::drumaxx::Drumaxx::default())
+    }),
     (crate::drumpad::NAME, || {
         Box::new(crate::drumpad::Drumpad::default())
     }),

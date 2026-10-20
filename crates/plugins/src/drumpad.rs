@@ -122,7 +122,7 @@ struct Key {
 
 /// The noise seed FL's voice number `n` starts with: a generator of its
 /// own run on 1000 steps a voice from 0 (`FUN_18001f1a0`).
-fn seed(voice: usize) -> u32 {
+pub(crate) fn seed(voice: usize) -> u32 {
     let mut state = 0u32;
     for _ in 0..1000 * (voice + 1) {
         state = state.wrapping_mul(0x1c3c_718d).wrapping_sub(0x0af2_c25b);
