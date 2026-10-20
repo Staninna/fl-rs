@@ -259,3 +259,19 @@ mask (`0xf81eb0`):
 on as any formula's, kept inside 0 and 1. Corpus: the 32 links of
 `Surround mix.flp` from a Peak Controller to the sends of inserts 1 to 16
 to inserts 17 and 18, `Tension(Input,10)` and `Tension(1-Input,10)`.
+
+## Targets that change nothing FL plays (crates/engine/src/automation.rs, `unheard`)
+
+A clip or a controller link on one of these is played by setting nothing:
+
+- A parameter of a ZGameEditor Visualizer the engine hosts. Its
+  parameters move its pictures; a hosted state runs only layers read to
+  make no sound (`docs/plugins/zgameeditor-visualizer.md`), so no
+  parameter changes the output, which is the input. The same for Fruity
+  NoteBook 2, which FL never asks for sound. A Visualizer state the engine
+  does not host keeps its links unsupported. Corpus: 52 clip bindings and
+  7 Peak Controller links in the first 10 seconds of `Astes - Raubana -
+  LIFE`, `JuiceBass - SeamlessR - Menagerie` and the Sacco projects, and
+  2 NoteBook 2 bindings in `Astes - Bien Duro`.
+- A control of an automation clip's LFO when that clip's LFO is off
+  (`docs/rec-channel.md`).
