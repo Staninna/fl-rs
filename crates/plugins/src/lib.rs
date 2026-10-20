@@ -14,7 +14,7 @@
 //! So far: [`balance::Balance`], [`blood_overdrive::BloodOverdrive`],
 //! [`chorus::Chorus`], [`compressor::Compressor`],
 //! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
-//! [`delay_bank::DelayBank`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
+//! [`delay_bank::DelayBank`], [`emphasis::Emphasis`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
 //! [`flangus::Flangus`],
 //! [`limiter::Limiter`], [`love_philter::LovePhilter`],
 //! [`maximus::Maximus`],
@@ -49,6 +49,8 @@ pub mod drumpad;
 mod drumpad_voice;
 pub mod dx10;
 pub mod effector;
+pub mod emphasis;
+mod emphasis_dsp;
 pub mod equo;
 pub mod fast_dist;
 pub mod fast_lp;
@@ -331,6 +333,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_bank::DelayBank::default()))
     } else if is(effector::NAME) {
         Some(Box::new(effector::Effector::default()))
+    } else if is(emphasis::NAME) {
+        Some(Box::new(emphasis::Emphasis::default()))
     } else if is(equo::NAME) {
         Some(Box::new(equo::Equo::default()))
     } else if is(fast_dist::NAME) {
@@ -640,6 +644,8 @@ mod tests {
         // where the doc has 27.
         for (plugin, len, uses) in [
             ("effector", 316, 27),
+            ("emphasis", 64, 4),
+            ("emphasis", 67, 1),
             ("equo", 4143, 10),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
@@ -711,7 +717,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 37);
+        assert_eq!(lengths.count(), 39);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

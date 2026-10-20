@@ -503,6 +503,43 @@ fn the_flangus_overdrive_and_spreader_render_tests_play_through_the_plugin() {
     }
 }
 
+/// FL's render test for Emphasis plays a loop through one instance of the
+/// limiter: it is hosted, and the output has sound, no NaN and stays under
+/// the ceiling of its state, -0.08 dB. The state is in Versatile mode,
+/// which follows the input once a block, and the plugin says so.
+#[test]
+fn the_emphasis_render_test_plays_through_the_limiter() {
+    let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
+        eprintln!("FL_RS_CORPUS unset, the Emphasis render test skipped");
+        return;
+    };
+    let opts = RenderOptions {
+        sample_rate: 44_100,
+        sample_root: root.clone(),
+        max_seconds: 10.0,
+        plugin_dir: None,
+    };
+    let plugin = "Emphasis";
+    let path = root.join(format!("System/Render tests/{plugin}.flp"));
+    let file = flp::Project::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let project = model::from_flp(&file);
+    let out = engine::render(&project, &opts).unwrap();
+    let peak = peak(&out, plugin);
+    eprintln!(
+        "{plugin}: peak {peak:.4}, hosted {}, approximated {:?}",
+        out.hosted_slots, out.approximated_slots
+    );
+    assert!(peak > 0.05 && peak <= 0.992, "{plugin}: peak {peak}");
+    assert!(out.hosted_slots >= 1, "{plugin}: no slot hosted");
+    let passed = out
+        .unhosted_slots
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(plugin));
+    assert!(!passed, "{plugin} passed through: {:?}", out.unhosted_slots);
+    let said: Vec<&str> = out.approximated_slots.keys().copied().collect();
+    assert!(said.iter().all(|s| s.contains("Emphasis")), "{said:?}");
+}
+
 /// FL's render test for Sytrus plays notes through one instance of the
 /// synth: the channel is hosted, the output has sound and no NaN, and the
 /// plugin says its operators stand in for FL's.
