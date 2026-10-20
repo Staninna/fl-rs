@@ -562,6 +562,6 @@ mod tests {
                 assert_eq!(refused, Err(StateError::Unhosted), "{file}");
             }
         }
-        assert_eq!(hosted, 23);
+        assert_eq!(hosted, 24);
     }
 }

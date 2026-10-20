@@ -43,6 +43,7 @@ pub mod compressor;
 pub mod control_surface;
 pub mod convolver;
 pub mod db_meter;
+pub mod delay;
 pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
@@ -88,12 +89,15 @@ pub mod pitch_shifter;
 pub mod pitcher;
 pub mod port;
 pub mod razer_chroma;
+pub mod reeverb;
 pub mod reeverb_2;
 mod sampler;
+pub mod send;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
 pub mod spreader;
+pub mod squeeze;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod sytrus;
@@ -347,6 +351,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(compressor::Compressor::default()))
     } else if is(convolver::NAME) {
         Some(Box::new(convolver::Convolver::default()))
+    } else if is(delay::NAME) {
+        Some(Box::new(delay::Delay::default()))
     } else if is(delay_2::NAME) {
         Some(Box::new(delay_2::Delay2::default()))
     } else if is(delay_3::NAME) {
@@ -393,14 +399,20 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(pitch_shifter::PitchShifter::default()))
     } else if is(pitcher::NAME) {
         Some(Box::new(pitcher::Pitcher::default()))
+    } else if is(reeverb::NAME) {
+        Some(Box::new(reeverb::Reeverb::default()))
     } else if is(reeverb_2::NAME) {
         Some(Box::new(reeverb_2::Reeverb2::default()))
+    } else if is(send::NAME) {
+        Some(Box::new(send::Send::default()))
     } else if is(soft_clipper::NAME) {
         Some(Box::new(soft_clipper::SoftClipper::default()))
     } else if is(soundgoodizer::NAME) {
         Some(Box::new(soundgoodizer::Soundgoodizer::default()))
     } else if is(spreader::NAME) {
         Some(Box::new(spreader::Spreader::default()))
+    } else if is(squeeze::NAME) {
+        Some(Box::new(squeeze::Squeeze::default()))
     } else if is(stereo_enhancer::NAME) {
         Some(Box::new(stereo_enhancer::StereoEnhancer::default()))
     } else if is(stereo_shaper::NAME) {
@@ -527,7 +539,8 @@ mod tests {
         assert!(by_name("Fruity fast dist").is_some());
         assert!(by_name("FRUITY BALANCE").is_some());
         assert!(by_name("fruity reeverb 2").is_some());
-        assert!(by_name("Fruity Reeverb").is_none());
+        assert!(by_name("Fruity Reeverb").is_some());
+        assert!(by_name("Fruity Reeverb 3").is_none());
         assert!(by_name("Fruity Balance ").is_none());
         assert!(by_name("").is_none());
     }
@@ -682,6 +695,7 @@ mod tests {
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
             ("fruity compressor", 36, 35),
+            ("fruity delay", 28, 1),
             ("fruity delay 2", 32, 62),
             ("fruity delay 3", 108, 110),
             ("fruity delay bank", 792, 41),
@@ -700,9 +714,12 @@ mod tests {
             ("fruity parametric eq 2", 350, 199),
             ("fruity parametric eq 2", 354, 590),
             ("fruity peak controller", 42, 36),
+            ("fruity reeverb", 44, 7),
             ("fruity reeverb 2", 58, 62),
             ("fruity reeverb 2", 66, 271),
+            ("fruity send", 16, 2),
             ("fruity soft clipper", 8, 28),
+            ("fruity squeeze", 52, 2),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
             ("frequency splitter", 113, 17),
@@ -757,7 +774,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 37);
+        assert_eq!(lengths.count(), 41);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
