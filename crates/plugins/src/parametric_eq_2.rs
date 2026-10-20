@@ -44,20 +44,23 @@
 //! the cookbook's, fitted to the analog curve up to Nyquist, at the
 //! project's rate (`crate::parametric_eq_2_engine`).
 //!
-//! One thing a state can ask for is stood in for, and
-//! [`Effect::fidelity`] says when a state has it: linear phase runs the
-//! same filters as they are, the same gains with another phase and no
-//! delay.
+//! Linear phase hands the curve of every band to FL's engine convolver
+//! ([`crate::linear_phase`]) and runs the sound through that instead of
+//! the filters: the bands' gains on `N / 2 + 1` bins, worked out from
+//! their coefficients (`FUN_006eddc0`), made into a zero-phase filter and
+//! run `3 N / 4` frames late. A new curve fades in over the window the
+//! state picks.
 //!
 //! The parameter smoothing of version 7 on is not here either: a moved
 //! parameter counts at once, as it does in FL with the smoothing off, and
 //! every state FL's own projects hold has it off.
 
+use crate::linear_phase::{LinearPhase, WINDOWS, fft_size};
 use crate::parametric_eq_2_engine::{self, Decimator, Matched, RESAMPLER_LATENCY, TAPS, half_band};
 use crate::parts::Matrix;
-use crate::{Effect, Fidelity, StateError, knob_value, read_state, state_version};
+use crate::{Effect, StateError, knob_value, read_state, state_version};
 use dsp::biquad::{Biquad64, Coefficients64, bandwidth_alpha, shelf_beta};
-use std::f64::consts::{FRAC_1_SQRT_2, LN_2, PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, LN_2, LOG10_E, PI, TAU};
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Fruity Parametric EQ 2";
@@ -97,6 +100,8 @@ const DEFAULTS: [i32; PARAMS] = [
 
 /// Where the tail of the state starts, and what is in it at a fixed place.
 const TAIL: usize = 4 + 8 * PARAMS;
+const LINEAR_STEP: usize = TAIL + 17;
+const LINEAR_WINDOW: usize = TAIL + 21;
 const BITS: usize = TAIL + 25;
 const ENABLED: usize = TAIL + 26;
 
@@ -528,6 +533,16 @@ pub struct ParametricEq2 {
     hq: bool,
     mode: u8,
     linear_phase: bool,
+    /// The linear phase FFT size step (`0x36c`) and crossfade window
+    /// (`0x374`).
+    linear_step: i32,
+    linear_window: i32,
+    /// The engine's convolver (`0x20c0`), and the curve it is sent.
+    context: LinearPhase,
+    kernel: Vec<f32>,
+    /// A parameter, the state or the rate has changed since the convolver
+    /// was last sent a curve (`0x378`).
+    dirty: bool,
     /// Whether the engine's resampler is asked for in place of the
     /// plugin's own.
     engine_resampler: bool,
@@ -564,6 +579,11 @@ impl Default for ParametricEq2 {
             hq: true,
             mode: 1,
             linear_phase: false,
+            linear_step: 2,
+            linear_window: 0,
+            context: LinearPhase::default(),
+            kernel: Vec::new(),
+            dirty: true,
             engine_resampler: false,
             enabled: 0x7f,
             rate: 44_100,
@@ -654,11 +674,6 @@ impl ParametricEq2 {
         self.enabled >> band & 1 == 1
     }
 
-    /// Whether any band changes the sound for good.
-    fn shapes(&self) -> bool {
-        (0..BANDS).any(|band| self.is_on(band) && self.bands[band].tail < 0)
-    }
-
     /// Empty every filter and both resamplers.
     fn clear(&mut self) {
         for band in &mut self.bands {
@@ -708,6 +723,141 @@ impl ParametricEq2 {
             }
         }
     }
+
+    /// The convolver as FL makes it, at the FFT size the state and the
+    /// rate ask for (op 0, then op 2 as the first curve goes out), with
+    /// a curve to send. Off the audio thread: this allocates.
+    fn prepare_linear(&mut self) {
+        self.dirty = true;
+        if !self.linear_phase {
+            return;
+        }
+        let n = fft_size(self.linear_step, self.rate);
+        self.context.set_size(n);
+        self.context.restart();
+        self.kernel.resize(n / 2 + 1, 0.0);
+    }
+
+    /// Whether a band snaps the bin next to its centre onto it: a band
+    /// pass, a notch or a peak narrower than `0x2000` on its wheel (the
+    /// flag `ProcessParam` sets at `+0x225` of the band's window copy,
+    /// `0x006efbc8`).
+    fn narrow(&self, band: usize) -> bool {
+        matches!(self.params[KIND + band], BAND_PASS | NOTCH | PEAK)
+            && self.params[WIDTH + band] < 0x2000
+    }
+
+    /// `FUN_006eddc0`: the gain of every band that is on and not typed
+    /// off on each of the `N / 2 + 1` bins, from the coefficients the
+    /// bands run with, in dB through FL's quick `2^(dB / 6)`. A bin at a
+    /// tenth of a Hz or less is taken at a tenth, one over `0.4999` of
+    /// the rate has no gain, and the last bin is the one before it.
+    fn build_kernel(&mut self) {
+        let n = self.context.size();
+        let half = n / 2;
+        if half == 0 || self.kernel.len() <= half {
+            return;
+        }
+        let bin_hz = self.rate as f32 / n as f32;
+        // The host's `(1 / SR) * 2 pi` and `float(0.4999 SR)`.
+        let step = (1.0 / f64::from(self.rate)) * TAU;
+        let top = (f64::from(self.rate) * 0.4999) as f32;
+        let centres: [Option<f32>; BANDS] =
+            std::array::from_fn(|b| self.narrow(b).then(|| hertz(self.params[FREQ + b])));
+        let mut previous = 0.0f32;
+        for k in 0..=half {
+            let mut hz = (k as f32 * bin_hz).max(0.1);
+            let mut db = 0.0f32;
+            if hz <= top {
+                // The first narrow band whose centre lies past the last
+                // bin and up to this one moves this bin onto it.
+                let snap = centres
+                    .iter()
+                    .flatten()
+                    .find(|c| **c > previous && hz >= **c);
+                if let Some(centre) = snap {
+                    hz = *centre;
+                }
+                previous = hz;
+                let w = (f64::from(hz) * step) as f32;
+                let (sin1, cos1) = f64::from(w).sin_cos();
+                let (sin2, cos2) = f64::from(w * 2.0).sin_cos();
+                let mut product = 1.0f32;
+                for b in 0..BANDS {
+                    if !self.is_on(b) || self.params[KIND + b] == OFF {
+                        continue;
+                    }
+                    let band = &self.bands[b];
+                    let mut gain = 1.0f32;
+                    for c in &band.filters[..band.count] {
+                        let num_re = c.b0 * cos2 + c.b1 * cos1 + c.b2;
+                        let num_im = c.b1 * sin1 + c.b0 * sin2;
+                        let den_re = cos2 + c.a1 * cos1 + c.a2;
+                        let den_im = c.a1 * sin1 + sin2;
+                        let num = num_re * num_re + num_im * num_im;
+                        let den = den_re * den_re + den_im * den_im;
+                        gain = ((f64::from(gain) * num) / den) as f32;
+                    }
+                    product *= gain;
+                }
+                // `Log10` is `Ln` times `log10 e` in FL. A NaN stays one,
+                // as it does past FL's two compares.
+                let level = (f64::from(product).ln() * LOG10_E * (10.0 / 18.0)) as f32;
+                db = level.clamp(-1000.0, 1000.0);
+            }
+            self.kernel[k] = kernel_gain(db);
+        }
+        self.kernel[half] = self.kernel[half - 1];
+    }
+
+    /// The linear phase path of `Eff_Render`: a curve goes out when one is
+    /// due and the last crossfade is over (ops 0xe, 5, 6, 2, 3), then
+    /// every frame goes through the convolver (op 4).
+    fn convolve(&mut self, left: &mut [f32], right: &mut [f32]) {
+        if self.dirty && self.context.settled() {
+            self.dirty = false;
+            self.build_kernel();
+            let window = WINDOWS[self.linear_window.clamp(0, 3) as usize];
+            self.context.set_rate(self.rate, window);
+            self.context.set_kernel(&self.kernel);
+        }
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            [*l, *r] = self.context.frame([*l, *r]);
+        }
+    }
+}
+
+/// The kernel builder's gain for a level held at a eighteenth of its dB
+/// (`0x006ee16a`): 0 under -100 dB, else `2^(dB / 6)`, by `Power` over
+/// 100 dB and by the exponent and a cubic on the fraction in between, its
+/// reciprocal for a cut. FL's 6 dB to a doubling is a touch more than
+/// 20 log10 2, so a band's gain here is `|H|` to the power of 1.0034.
+fn kernel_gain(level: f32) -> f32 {
+    let db = level * 18.0;
+    if db < -100.0 {
+        return 0.0;
+    }
+    let x = db * (1.0 / 6.0f32);
+    if db > 100.0 {
+        return (f64::from(x) * 2f64.ln()).exp() as f32;
+    }
+    // `2^i` by its float bits, times the cubic on what is left.
+    let power = |x: f32| {
+        let whole = f64::from(x) as i64 as i32;
+        let part = f64::from(x - whole as f32);
+        let cubic = ((part * 0.079_064_658_211 + 0.224_328_091_473) * part + 0.696_598_502_57)
+            * part
+            + 0.999_862_219_597;
+        let scale = f32::from_bits(((whole + 0x7f) << 23) as u32);
+        (f64::from(scale) * cubic) as f32
+    };
+    if x > 0.0 {
+        power(x)
+    } else if f64::from(x) < 0.0 {
+        1.0 / power(-x)
+    } else {
+        1.0
+    }
 }
 
 impl Effect for ParametricEq2 {
@@ -745,12 +895,19 @@ impl Effect for ParametricEq2 {
         };
         self.linear_phase = bits & 1 == 1;
         self.engine_resampler = bits & 2 == 2;
+        // Before version 4 the size step is 2 and the window the first.
+        (self.linear_step, self.linear_window) = if version >= 4 {
+            (word(LINEAR_STEP), word(LINEAR_WINDOW))
+        } else {
+            (2, 0)
+        };
         self.enabled = enabled;
         self.params = params;
         let main = main_gain(params[MAIN]);
         self.main.jump([main, main, 0.0, 0.0]);
         self.design_all();
         self.clear();
+        self.prepare_linear();
         Ok(())
     }
 
@@ -761,6 +918,7 @@ impl Effect for ParametricEq2 {
             self.rate = hz.round() as i32;
             self.design_all();
             self.clear();
+            self.prepare_linear();
         }
     }
 
@@ -791,6 +949,10 @@ impl Effect for ParametricEq2 {
             self.woken = false;
         }
         self.main.apply(left, right);
+        if self.linear_phase {
+            self.convolve(left, right);
+            return;
+        }
         if !self.oversampled() {
             self.run(left, right);
             self.count(len);
@@ -839,6 +1001,8 @@ impl Effect for ParametricEq2 {
             return;
         }
         self.params[index] = value;
+        // Any parameter has the curve sent anew (`0x006ef8fa`).
+        self.dirty = true;
         if index == MAIN {
             let main = main_gain(value);
             self.main.aim([main, main, 0.0, 0.0]);
@@ -851,22 +1015,12 @@ impl Effect for ParametricEq2 {
         self.design(band);
     }
 
-    /// With no band that changes the sound, linear phase has nothing to
-    /// differ in.
-    fn fidelity(&self) -> Fidelity {
-        if self.linear_phase && self.shapes() {
-            Fidelity::Approximate("linear phase runs as the same filters with their own phase")
-        } else {
-            Fidelity::Exact
-        }
-    }
-
-    /// 44 frames with the engine's resampler, which FL tells its host,
-    /// and 0 otherwise. FL's convolver is `3N/4` frames late with linear
-    /// phase on, and FL tells its host so. The filters that stand in for
-    /// it here are not late, so a host has nothing to make up for.
+    /// `3 N / 4` frames with linear phase, 44 with the engine's
+    /// resampler, and 0 otherwise, as FL tells its host (`FUN_006eddc0`).
     fn latency(&self) -> usize {
-        if self.by_engine() {
+        if self.linear_phase {
+            fft_size(self.linear_step, self.rate) * 3 / 4
+        } else if self.by_engine() {
             RESAMPLER_LATENCY
         } else {
             0
@@ -877,6 +1031,8 @@ impl Effect for ParametricEq2 {
     /// level and puts the plugin to sleep.
     fn reset(&mut self) {
         self.clear();
+        // Op 0xd: the convolver forgets what it heard.
+        self.context.clear();
         self.main.settle();
         self.awake = ASLEEP;
     }
@@ -885,6 +1041,7 @@ impl Effect for ParametricEq2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Fidelity;
     use crate::testing::{bits, corpus, partial, presets, projects, response, sine, state};
 
     /// HQ off, HQ at twice the rate and HQ with the matched filters, as
@@ -1355,50 +1512,126 @@ mod tests {
     }
 
     #[test]
-    fn what_is_stood_in_for_is_said() {
+    fn every_mode_is_fl_s() {
         let flat = DEFAULTS;
         let peak = one_band(PEAK, 1_000.0, 600, 25412, 0);
-        let note = |plugin: &ParametricEq2| match plugin.fidelity() {
-            Fidelity::Exact => "",
-            Fidelity::Approximate(note) => note,
-        };
-        // The cookbook filters, at the rate or at twice it, are FL's.
-        for flags in [PLAIN, TWICE, 2] {
-            assert_eq!(eq(&peak, flags).fidelity(), Fidelity::Exact, "{flags}");
+        for flags in [PLAIN, TWICE, 2, MATCHED] {
+            for bits in [0x40, 0x41, 0x42] {
+                let plugin = with(&saved(8, &peak, flags, bits, 0x7f));
+                assert_eq!(plugin.fidelity(), Fidelity::Exact, "{flags} {bits}");
+            }
         }
-        // So are the engine's matched ones.
-        assert_eq!(eq(&peak, MATCHED).fidelity(), Fidelity::Exact);
-        assert_eq!(eq(&flat, MATCHED).fidelity(), Fidelity::Exact);
-        // Linear phase is not, where a band does something.
-        let linear =
-            |params: &[i32; PARAMS], flags: i32| with(&saved(8, params, flags, 0x41, 0x7f));
-        assert!(note(&linear(&peak, PLAIN)).contains("linear phase"));
-        assert!(note(&linear(&peak, MATCHED)).contains("linear phase"));
-        assert_eq!(linear(&flat, PLAIN).fidelity(), Fidelity::Exact);
-        // The engine's resampler is asked for by its bit, and it only
-        // runs with HQ at twice the rate. It is FL's.
-        let engine =
-            |params: &[i32; PARAMS], flags: i32| with(&saved(8, params, flags, 0x42, 0x7f));
-        assert_eq!(engine(&flat, TWICE).fidelity(), Fidelity::Exact);
-        assert_eq!(engine(&peak, TWICE).fidelity(), Fidelity::Exact);
-        assert_eq!(engine(&peak, PLAIN).fidelity(), Fidelity::Exact);
-        assert_eq!(engine(&peak, MATCHED).fidelity(), Fidelity::Exact);
-        // A moved level changes what is said.
-        let mut plugin = with(&saved(8, &flat, PLAIN, 0x41, 0x7f));
-        plugin.set_param(2, 150.0);
-        assert!(note(&plugin).contains("linear phase"));
-        let off = saved(8, &peak, PLAIN, 0x41, 0x7e);
-        assert_eq!(with(&off).fidelity(), Fidelity::Exact);
-
-        // The stand-in sounds as the filters it is made of do.
-        let want = measured(&mut eq(&peak, PLAIN), 2_000);
-        assert_eq!(measured(&mut linear(&peak, PLAIN), 2_000), want);
-        let want = measured(&mut eq(&peak, MATCHED), 2_000);
-        assert_eq!(measured(&mut linear(&peak, MATCHED), 2_000), want);
+        assert_eq!(
+            with(&saved(8, &flat, PLAIN, 0x41, 0x7f)).fidelity(),
+            Fidelity::Exact
+        );
         // The two resamplers pass 2 kHz alike, to a hundredth of a dB.
         let twice = measured(&mut eq(&peak, TWICE), 2_000);
-        let by_engine = measured(&mut engine(&peak, TWICE), 2_000);
+        let by_engine = measured(&mut with(&saved(8, &peak, TWICE, 0x42, 0x7f)), 2_000);
         assert!((by_engine - twice).abs() < 0.01, "{by_engine} and {twice}");
+    }
+
+    /// FL's quick `2^(dB / 6)` of the kernel builder, from a level held
+    /// at an eighteenth of its dB.
+    #[test]
+    fn the_kernel_gain_doubles_every_6_db() {
+        assert_eq!(kernel_gain(0.0), 1.0);
+        // The cubic is FL's: 0.99986 at the whole numbers.
+        assert_eq!(kernel_gain(6.0 / 18.0), (2.0 * 0.999_862_219_597f64) as f32);
+        assert_eq!(
+            kernel_gain(-6.0 / 18.0),
+            1.0 / (2.0 * 0.999_862_219_597f64) as f32
+        );
+        for db in [-90.0f32, -17.3, -3.0, 0.5, 4.2, 12.0, 60.0] {
+            let want = 2f32.powf(db / 6.0);
+            let got = kernel_gain(db / 18.0);
+            assert!((got / want - 1.0).abs() < 2e-4, "{db}: {got} {want}");
+        }
+        assert_eq!(kernel_gain(-101.0 / 18.0), 0.0);
+        assert_eq!(kernel_gain(-1000.0), 0.0);
+        assert!((kernel_gain(120.0 / 18.0) / 2f32.powf(20.0) - 1.0).abs() < 1e-5);
+    }
+
+    /// With linear phase a band's curve goes through the engine's
+    /// convolver: its gain is the filters' (in FL's `2^(dB / 6)`), and
+    /// the sound comes out `3 N / 4` late, which FL tells its host.
+    #[test]
+    fn linear_phase_is_the_filters_gain_three_quarters_of_its_fft_late() {
+        let peak = one_band(PEAK, 1_000.0, 600, 25412, 0);
+        let mut linear = with(&saved(8, &peak, PLAIN, 0x41, 0x7f));
+        assert_eq!(linear.latency(), 1536);
+        let mut iir = eq(&peak, PLAIN);
+        for hz in [300, 1_000, 2_000, 5_000] {
+            let want = measured(&mut iir, hz);
+            let got = measured(&mut linear, hz);
+            // `2^(dB / 6)` is 1.0034 times the dB of `10^(dB / 20)`.
+            assert!((got - want * 1.0034).abs() < 0.02, "{hz}: {got} {want}");
+        }
+        // A click, at 48 kHz: the FFT is 2048, so 1536 frames late.
+        let mut flat = with(&saved(8, &DEFAULTS, PLAIN, 0x41, 0x7f));
+        flat.set_sample_rate(48_000.0);
+        assert_eq!(flat.latency(), 1536);
+        let mut left = vec![0.0f32; 12_000];
+        left[9_000] = 1.0;
+        let mut right = left.clone();
+        for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+            flat.process(l, r);
+        }
+        let at = left
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()));
+        assert_eq!(at.map(|(k, _)| k), Some(9_000 + 1536));
+        assert!((left[9_000 + 1536] - 1.0).abs() < 1e-3);
+        assert!(left == right);
+        // It never sleeps: the convolver hears the silence too.
+        assert_ne!(flat.awake, ASLEEP);
+    }
+
+    /// A new curve fades in over the window the state picks, and is sent
+    /// once the last fade is over.
+    #[test]
+    fn a_moved_band_fades_in_over_the_window() {
+        let peak = one_band(PEAK, 1_000.0, 0, 25412, 0);
+        // Window 2: a hundredth of a second, 441 frames.
+        let mut bytes = saved(8, &peak, PLAIN, 0x41, 0x7f);
+        bytes[LINEAR_WINDOW..LINEAR_WINDOW + 4].copy_from_slice(&2i32.to_le_bytes());
+        let mut plugin = with(&bytes);
+        let at_0db = measured(&mut plugin, 1_000);
+        assert!(at_0db.abs() < 0.01, "{at_0db}");
+        plugin.set_param(0, 1200.0);
+        assert!(plugin.dirty);
+        let boosted = measured(&mut plugin, 1_000);
+        assert!((boosted - 12.0 * 1.0034).abs() < 0.05, "{boosted}");
+        assert!(!plugin.dirty && plugin.context.settled());
+    }
+
+    /// The bins next to a narrow band pass, notch or peak move onto its
+    /// centre, so its dip or its top is in the curve.
+    #[test]
+    fn a_narrow_band_snaps_a_bin_onto_its_centre() {
+        let notch = one_band(NOTCH, 1_000.0, 0, 1000, 0);
+        let mut plugin = with(&saved(8, &notch, PLAIN, 0x41, 0x7f));
+        assert!(plugin.narrow(0) && !eq(&DEFAULTS, PLAIN).narrow(1));
+        plugin.build_kernel();
+        // Bins of 44100 / 2048 Hz: the one past 1000 Hz is taken at
+        // 1000 Hz, where the notch has nothing left.
+        let bin = (1_000.0 * 2048.0 / 44_100.0f64).ceil() as usize;
+        assert!(plugin.kernel[bin] < 1e-3, "{}", plugin.kernel[bin]);
+        assert!(plugin.kernel[bin - 1] > 0.1 && plugin.kernel[bin + 1] > 0.1);
+        // Wider, it is not snapped, and the bin sees the notch's side.
+        let wide = one_band(NOTCH, 1_000.0, 0, 0x2000, 0);
+        let mut plugin = with(&saved(8, &wide, PLAIN, 0x41, 0x7f));
+        plugin.build_kernel();
+        assert!(plugin.kernel[bin] > 1e-3);
+        // Over 0.4999 of the rate the gain is 1, and the last bin is the
+        // one before it.
+        let cut = one_band(HIGH_PASS, 15_000.0, 0, 36068, 0);
+        let mut plugin = with(&saved(8, &cut, PLAIN, 0x41, 0x7f));
+        plugin.build_kernel();
+        assert_eq!(plugin.kernel[1024], plugin.kernel[1023]);
+        assert_eq!(plugin.kernel[1023], 1.0);
+        assert!(plugin.kernel[1] < 1e-3);
     }
 
     #[test]
@@ -1761,11 +1994,10 @@ mod tests {
             *counts.entry((asks, exact)).or_insert(0) += 1;
             total += 1;
         }
-        // 1130 of the 1138 are FL's own filters, and the 8 with linear
-        // phase are stood in for.
+        // All 1138 are FL's own, the 8 with linear phase too.
         let want = [
             (("engine resampler", true), 204),
-            (("linear phase", false), 8),
+            (("linear phase", true), 8),
             (("matched", true), 61),
             (("the rate", true), 274),
             (("twice the rate", true), 591),

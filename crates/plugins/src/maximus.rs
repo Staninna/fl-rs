@@ -75,7 +75,7 @@
 //! which no shipped state has.
 
 use crate::limiter::{Highest, Mean, coef, gain};
-use crate::linear_phase::LinearPhase;
+use crate::linear_phase::{LinearPhase, WINDOWS, fft_size};
 use crate::menvelope::{Class, MEnvelope, Reader};
 use crate::parametric_eq_2::HalfBand;
 use crate::parts::Matrix;
@@ -199,10 +199,6 @@ const STAGES: usize = 8;
 
 /// A block with no sample above this is silence.
 const QUIET: f32 = 1e-6;
-
-/// The linear-phase crossfade's seconds for the speed menu (`0x330`):
-/// normal, fast, faster, ultra.
-const WINDOWS: [f32; 4] = [0.1, 0.25, 0.01, 0.02];
 
 /// The highest oversampling order run as FL runs it: eight times. The
 /// corpus and the presets ask for 0 or 1.
@@ -440,19 +436,6 @@ fn wheel_frames(value: i32, rate: f64) -> f64 {
     let x = f64::from(value as f32 * 1e-4f32);
     let ms = f64::from(((x * 501f64.ln()).exp() - 1.0) as f32) * 2.0;
     ms * 0.001 * rate
-}
-
-/// The linear-phase FFT size (`FUN_00847730`): `512 << precision`, halved
-/// under 44.1 kHz, else doubled for each octave of rate over it rounded
-/// half up, at most 65536.
-fn fft_size(precision: i32, rate: i32) -> usize {
-    let size = 0x200i32.wrapping_shl(precision as u32 & 0x1f);
-    if rate < 44_100 {
-        return (size / 2).max(0) as usize;
-    }
-    let octaves = (f64::from(rate) * 2.267_573_696_145_124_8e-5).ln() * (1.0 / 2f64.ln()) + 0.5;
-    let n = i64::from(size.wrapping_shl(octaves as i64 as u32 & 0x1f));
-    n.clamp(0, 0x1_0000) as usize
 }
 
 /// The linear-phase curves' quick log2 (`FUN_008477b0`): the exponent and
