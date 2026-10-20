@@ -425,9 +425,10 @@ const PATHS: [[f64; 3]; 2] = [
 ];
 
 /// One side of FL's 2x resampler in one direction: two paths of three
-/// allpasses at the lower rate.
+/// allpasses at the lower rate. Maximus's oversampler is the same one
+/// (`TPolyphase`, the same 13 doubles), a frame at a time.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct HalfBand {
+pub(crate) struct HalfBand {
     paths: [[Allpass; 3]; 2],
 }
 
@@ -438,7 +439,7 @@ impl HalfBand {
     }
 
     /// Two samples in `wide` for each one in `input`.
-    fn up(&mut self, input: &[f32], wide: &mut [f32]) {
+    pub(crate) fn up(&mut self, input: &[f32], wide: &mut [f32]) {
         for (x, pair) in input.iter().zip(wide.as_chunks_mut::<2>().0) {
             let x = f64::from(*x);
             *pair = [self.path(1, x) as f32, self.path(0, x) as f32];
@@ -447,7 +448,7 @@ impl HalfBand {
     }
 
     /// One sample in `out` for each two in `wide`.
-    fn down(&mut self, wide: &[f32], out: &mut [f32]) {
+    pub(crate) fn down(&mut self, wide: &[f32], out: &mut [f32]) {
         for (pair, y) in wide.as_chunks::<2>().0.iter().zip(out) {
             let first = self.path(0, f64::from(pair[0]));
             let second = self.path(1, f64::from(pair[1]));
@@ -456,7 +457,22 @@ impl HalfBand {
         self.flush();
     }
 
-    fn flush(&mut self) {
+    /// The two samples at twice the rate for one sample, as `up` gives
+    /// them.
+    pub(crate) fn up_one(&mut self, x: f32) -> [f32; 2] {
+        let x = f64::from(x);
+        [self.path(1, x) as f32, self.path(0, x) as f32]
+    }
+
+    /// The sample at the lower rate for two at twice it, as `down` gives
+    /// it.
+    pub(crate) fn down_one(&mut self, pair: [f32; 2]) -> f32 {
+        let first = self.path(0, f64::from(pair[0]));
+        let second = self.path(1, f64::from(pair[1]));
+        ((second + first) * 0.5) as f32
+    }
+
+    pub(crate) fn flush(&mut self) {
         for stage in self.paths.as_flattened_mut() {
             for state in [&mut stage.before, &mut stage.out] {
                 if state.is_subnormal() {
