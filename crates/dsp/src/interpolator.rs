@@ -104,28 +104,50 @@ impl Interpolator {
     /// The frame of `src` at `index + frac`, `frac` in 0 to 1. Taps outside
     /// `src` read its nearest end; an empty `src` reads 0.
     pub fn frame(&self, src: &[f32], index: i64, frac: f64) -> f32 {
-        let n = self.points as i64;
-        let last = src.len() as i64 - 1;
-        if last < 0 {
-            return 0.0;
-        }
-        let first = index - n + 1;
-        if first >= 0 && index + n <= last {
-            let from = first as usize;
-            return self.sum(&src[from..from + 2 * n as usize], frac);
-        }
-        let mut held = [0f32; 2 * MOST as usize];
-        for (k, v) in held[..2 * n as usize].iter_mut().enumerate() {
-            *v = src[(first + k as i64).clamp(0, last) as usize];
-        }
-        self.sum(&held[..2 * n as usize], frac)
+        self.read([src], index, frac)[0]
     }
 
-    /// The kernel over `taps`, which are the `points` frames up to and with
-    /// the place's own and the `points` after it (the nested loops of
-    /// `FUN_0061c1f0` and `FUN_0061c690`, one side at a time: FL's stereo
-    /// kernel does both sides with the same numbers in the same order).
-    fn sum(&self, taps: &[f32], frac: f64) -> f32 {
+    /// The frame of each of `sides` at `index + frac`, as [`frame`] reads
+    /// one: FL's stereo kernel weighs both sides with the same numbers, and
+    /// sums each in the order its mono kernel does. The sides are as long
+    /// as the first.
+    ///
+    /// [`frame`]: Interpolator::frame
+    pub fn read<const C: usize>(&self, sides: [&[f32]; C], index: i64, frac: f64) -> [f32; C] {
+        let mut out = [0f32; C];
+        let Some(first_side) = sides.first() else {
+            return out;
+        };
+        let n = self.points as i64;
+        let last = first_side.len() as i64 - 1;
+        if last < 0 {
+            return out;
+        }
+        let taps = 2 * n as usize;
+        let mut weights = [0f32; 2 * MOST as usize];
+        self.weights(frac, &mut weights[..taps]);
+        let weights = &weights[..taps];
+        let first = index - n + 1;
+        let mut held = [0f32; 2 * MOST as usize];
+        for (side, out) in sides.iter().zip(&mut out) {
+            *out = if first >= 0 && index + n <= last {
+                let from = first as usize;
+                sum(weights, &side[from..from + taps])
+            } else {
+                for (k, v) in held[..taps].iter_mut().enumerate() {
+                    *v = side[(first + k as i64).clamp(0, last) as usize];
+                }
+                sum(weights, &held[..taps])
+            };
+        }
+        out
+    }
+
+    /// The weight of each of the `2 points` taps round a place `frac` past
+    /// the one at `points - 1` (the nested loops of `FUN_0061c1f0` and
+    /// `FUN_0061c690`): `sin(w d) * 1 / (pi d) * lean(c)`, multiplied in
+    /// that order, as FL does before it multiplies by the tap.
+    fn weights(&self, frac: f64, weights: &mut [f32]) {
         let f = frac.max(LEAST);
         // The four angles, their sines in double precision, and one step
         // of each recurrence before it goes to single precision.
@@ -154,9 +176,8 @@ impl Interpolator {
         let (cutoff_turn, window_turn) = (self.cutoff_turn as f32, self.window_turn as f32);
         let lean = |c: f32| 0.64 * c * c + c + 0.36;
 
-        let n = self.points as usize;
-        let (mut ahead, mut back) = (0f32, 0f32);
-        for k in 0..n / 2 {
+        let at = self.points as usize - 1;
+        for k in 0..self.points as usize / 2 {
             let (r_ahead, r_back, r_ahead2, r_back2) =
                 (1.0 / d_ahead, 1.0 / d_back, 1.0 / d_ahead2, 1.0 / d_back2);
             let s_ahead3 = s_ahead2 * cutoff_turn - s_ahead;
@@ -167,13 +188,10 @@ impl Interpolator {
             d_back += tau;
             d_ahead2 -= tau;
             d_back2 += tau;
-            let at = n - 1;
-            ahead = ahead
-                + s_ahead * r_ahead * lean(w_ahead) * taps[at + 1 + 2 * k]
-                + s_ahead2 * r_ahead2 * lean(w_ahead2) * taps[at + 2 + 2 * k];
-            back = back
-                + s_back * r_back * lean(w_back) * taps[at - 2 * k]
-                + s_back2 * r_back2 * lean(w_back2) * taps[at - 1 - 2 * k];
+            weights[at + 1 + 2 * k] = s_ahead * r_ahead * lean(w_ahead);
+            weights[at + 2 + 2 * k] = s_ahead2 * r_ahead2 * lean(w_ahead2);
+            weights[at - 2 * k] = s_back * r_back * lean(w_back);
+            weights[at - 1 - 2 * k] = s_back2 * r_back2 * lean(w_back2);
             w_ahead2 = w_ahead3 * window_turn - w_ahead2;
             w_back2 = w_back3 * window_turn - w_back2;
             w_ahead = w_ahead3;
@@ -183,8 +201,22 @@ impl Interpolator {
             s_ahead = s_ahead3;
             s_back = s_back3;
         }
-        (back + ahead) * 0.5
     }
+}
+
+/// One side's sum: two taps ahead and two back at a time, outward from the
+/// place, the ones ahead and the ones back each in a sum of their own.
+fn sum(weights: &[f32], taps: &[f32]) -> f32 {
+    let n = taps.len() / 2;
+    let at = n - 1;
+    let (mut ahead, mut back) = (0f32, 0f32);
+    for k in 0..n / 2 {
+        let (a, a2) = (at + 1 + 2 * k, at + 2 + 2 * k);
+        let (b, b2) = (at - 2 * k, at - 1 - 2 * k);
+        ahead = ahead + weights[a] * taps[a] + weights[a2] * taps[a2];
+        back = back + weights[b] * taps[b] + weights[b2] * taps[b2];
+    }
+    (back + ahead) * 0.5
 }
 
 /// `src` at `ratio` times its rate, as FL's sample class resamples itself
@@ -344,6 +376,18 @@ mod tests {
         assert!(level(&high) < 0.01, "{}", level(&high));
         let low = resample(&tone(1000.0, 44_100.0, 8820), 0.5, 256);
         assert!((level(&low) - 0.5f64.sqrt()).abs() < 0.01);
+    }
+
+    #[test]
+    fn both_sides_read_as_each_alone() {
+        let (left, right) = (noise(300), noise(301)[1..].to_vec());
+        let mut it = Interpolator::new(16);
+        it.set_speed(1.3);
+        for (index, frac) in [(0, 0.5), (150, 0.25), (299, 0.9)] {
+            let [l, r] = it.read([&left, &right], index, frac);
+            assert_eq!(l, it.frame(&left, index, frac));
+            assert_eq!(r, it.frame(&right, index, frac));
+        }
     }
 
     #[test]
