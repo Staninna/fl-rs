@@ -54,6 +54,7 @@ pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
 pub mod directwave;
+pub mod drumaxx;
 pub mod drumpad;
 mod drumpad_voice;
 pub mod drumsynth_live;

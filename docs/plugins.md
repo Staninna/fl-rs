@@ -2,7 +2,7 @@
 
 Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a render-test project exists for it in `Data/System/Render tests/`, and how many of the 165 shipped projects use it (by event 201 name). Sizes are the x64 DLL. Status column is ours; empty means not started.
 
-Corpus render at `14d46e2`: 114 of 165 shipped projects have sound with the stock plugins built so far, and 57 of 165 play in full. 1081 of 1101 effect slots on inserts that sound reaches are hosted, and 186 of 215 generator channels with notes play.
+Corpus render at `fd911a4`: 119 of 165 shipped projects have sound with the stock plugins built so far, and 62 of 165 play in full. 1091 of 1111 effect slots on inserts that sound reaches are hosted, and 192 of 215 generator channels with notes play.
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
@@ -105,7 +105,7 @@ Corpus render at `14d46e2`: 114 of 165 shipped projects have sound with the stoc
 | Effect | Razer Chroma | 3952 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` reads the block for the keyboard lights and copies it with `ippsCopy_64s`; the lights are left out), docs/plugins/razer-chroma.md |
 | Effect | Vintage Phaser | 3880 |  | 1 | implemented in crates/plugins (the engine_x64.dll phaser, both engines, the upsampler, halfbands, hiss, gate and delay, the same to the bit as the DLL run under an emulator but for an ULP of the sine LFO's sinf; approximated: the hiss seeds, which are those of the first engine FL loads, and tempo sync, which follows the host's ticks), docs/plugins/vintage-phaser.md |
 | Generator | BeepMap | 4186 | yes | 1 | implemented in crates/plugins (state, the picture inside it, the three scales, blue, grainy, loop and widen, the column ramps and the host sine as read; the instrument tab only at the defaults every shipped state has, a picture over the row limit shrunk by averaging, 16-bit colours widened as guessed, phases from a seed of the instance's own), docs/plugins/beepmap.md |
-| Generator | Drumaxx | 4319 | yes | 1 | |
+| Generator | Drumaxx | 4319 | yes | 1 | implemented in crates/plugins (the DMS3 to DMS5 state with its patterns, cut groups and output tracks, the 720 parameters, the 16 pads as Drumpad's voice with each pad's 128 membrane lines kept apart as FL keeps them, the pad gain, pan, mute and solo, cut groups, the key-to-pad and key-to-pattern map, the pattern sequencer with its swing, the 8-band EQ, the limiter and the master volume exact, and every shipped state plays exact; approximated: pads routed to another mixer track play on the plugin's own output, a new plugin starts from Drumpad's defaults where FL loads its dmkit resource, each instance's noise starting where FL's first does, DMS1 and DMS2 states turned down), docs/plugins/drumaxx.md |
 | Generator | Fruity DrumSynth Live | 1062 | yes | 1 | implemented in crates/plugins (state versions 2..4, the 120 patches by key, morph, voice modes, both oscillators, waves read from the engine DLL's resource, harmonics, re-trigger, tone filter, release and the noise generator with its seed exact; approximated: the gain ramp of a cut voice, FL's channel volume counted once where FL counts it twice, FL's block order of the one noise generator, sends to a mixer track not built (none in the corpus), 256 voices at most), docs/plugins/fruity-drumsynth-live.md |
 | Generator | Fruity Keyboard Controller | 3923 |  | 1 | |
 | Generator | Fruity Voltage Controller | 3992 | yes | 1 | |
