@@ -4569,6 +4569,40 @@ fn a_tension_formula_bends_what_a_controller_opens_a_send_by() {
 }
 
 #[test]
+fn an_insert_s_control_whose_id_names_a_slot_is_the_insert_s() {
+    let dir = Dir::new("automation-slot-bits");
+    let fade = [Point::new(0.0, 0.8), Point::new(4.0, 0.0)];
+    let faded = |target: u32| {
+        let mut project = with_mixer(project(&[(1, &four_beats())], &[item(0, 1)]));
+        let clip = add_automation(&mut project, &fade, FULL);
+        bind(&mut project, clip, target);
+        place(&mut project, clip, 0, BAR);
+        project
+    };
+    // FL's dispatcher takes the slot of a mixer ID for a slot's own
+    // controls alone, so insert 1's volume through slot 9, which holds
+    // nothing, is insert 1's volume.
+    let plain = render(&faded(insert_control(1, VOLUME)), &dir);
+    let slotted = render(&faded(slot_control(1, 9, VOLUME)), &dir);
+    assert_eq!(
+        (slotted.automation_clips, slotted.unsupported_targets),
+        (1, 0)
+    );
+    assert_eq!(slotted.slot_targets, 0);
+    assert!(slotted.left == plain.left && slotted.right == plain.right);
+    assert_eq!(plain.left[0], 1.0);
+    assert!(plain.left[48_000] < 0.5);
+    // And so is a band of its EQ.
+    let mut eq = faded(slot_control(1, 3, EQ_FREQUENCY));
+    set(&mut eq, 1, EQ_GAIN, 1200);
+    let mut flat = faded(insert_control(1, EQ_FREQUENCY));
+    set(&mut flat, 1, EQ_GAIN, 1200);
+    let (eq, flat) = (render(&eq, &dir), render(&flat, &dir));
+    assert_eq!((eq.automation_clips, eq.unsupported_targets), (1, 0));
+    assert!(eq.left == flat.left);
+}
+
+#[test]
 fn a_controller_drives_a_parameter_of_a_hosted_plugin() {
     let dir = Dir::new("controller-param");
     // The peak of the kick on PanOMatic's volume on the tone's insert,
