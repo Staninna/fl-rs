@@ -40,6 +40,7 @@ pub mod blood_overdrive;
 pub mod boobass;
 pub mod chorus;
 pub mod compressor;
+pub mod control_surface;
 pub mod convolver;
 pub mod db_meter;
 pub mod delay_2;
@@ -106,6 +107,7 @@ pub mod vocodex;
 pub mod wave_candy;
 pub mod waveshaper;
 pub mod wrapper;
+pub mod xy_controller;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
@@ -411,6 +413,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(waveshaper::WaveShaper::default()))
     } else if PASS_THROUGH.iter().any(|known| is(known)) {
         Some(Box::new(pass_through::PassThrough::new()))
+    } else if is(control_surface::NAME) {
+        let left_out = control_surface::LEFT_OUT;
+        Some(Box::new(pass_through::PassThrough::controller(left_out)))
+    } else if is(xy_controller::NAME) {
+        let left_out = xy_controller::LEFT_OUT;
+        Some(Box::new(pass_through::PassThrough::controller(left_out)))
     } else if is(wrapper::NAME) {
         Some(Box::new(wrapper::Wrapper::default()))
     } else {
@@ -741,7 +749,11 @@ mod tests {
             "fruity wrapper",
         ];
         // Any state does for an effect that leaves the sound alone.
-        let passes = |plugin: &str| PASS_THROUGH.iter().any(|n| n.eq_ignore_ascii_case(plugin));
+        let controllers = [control_surface::NAME, xy_controller::NAME];
+        let passes = |plugin: &str| {
+            let mut passing = PASS_THROUGH.iter().chain(&controllers);
+            passing.any(|n| n.eq_ignore_ascii_case(plugin))
+        };
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));

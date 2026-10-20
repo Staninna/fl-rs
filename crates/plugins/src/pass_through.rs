@@ -83,6 +83,8 @@ mod tests {
             crate::html_notebook::NAME,
             crate::db_meter::NAME,
             crate::razer_chroma::NAME,
+            crate::control_surface::NAME,
+            crate::xy_controller::NAME,
         ] {
             let mut plugin = crate::by_name(name).unwrap();
             plugin.set_state(&[1, 2, 3]).unwrap();
@@ -105,5 +107,16 @@ mod tests {
         assert!(exact(crate::db_meter::NAME));
         let controller = PassThrough::controller("its outputs");
         assert_eq!(controller.fidelity(), Fidelity::Approximate("its outputs"));
+        // Their links are left out, and say so.
+        for (name, said) in [
+            (
+                crate::control_surface::NAME,
+                crate::control_surface::LEFT_OUT,
+            ),
+            (crate::xy_controller::NAME, crate::xy_controller::LEFT_OUT),
+        ] {
+            let fidelity = crate::by_name(name).unwrap().fidelity();
+            assert_eq!(fidelity, Fidelity::Approximate(said));
+        }
     }
 }
