@@ -555,3 +555,42 @@ fn the_sytrus_render_test_plays_through_the_generator() {
         out.approximated_generators
     );
 }
+
+/// FL's render test for Frequency Shifter plays a 3x Osc through the
+/// shifter in its tempo range: the plugin is hosted, says it does what FL's
+/// does, and the output has sound and no NaN.
+#[test]
+fn the_frequency_shifter_render_test_plays_through_the_plugin() {
+    let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
+        eprintln!("FL_RS_CORPUS unset, the Frequency Shifter render test skipped");
+        return;
+    };
+    let plugin = "Frequency Shifter";
+    let opts = RenderOptions {
+        sample_rate: 48_000,
+        sample_root: root.clone(),
+        max_seconds: 10.0,
+        plugin_dir: None,
+    };
+    let path = root.join(format!("System/Render tests/{plugin}.flp"));
+    let file = flp::Project::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let project = model::from_flp(&file);
+    let out = engine::render(&project, &opts).unwrap();
+    let peak = peak(&out, plugin);
+    eprintln!(
+        "{plugin}: peak {peak:.3}, hosted {}, approximated {:?}",
+        out.hosted_slots, out.approximated_slots
+    );
+    assert!(peak > 0.05 && peak <= 4.0, "{plugin}: peak {peak}");
+    assert!(out.hosted_slots >= 1, "{plugin}: no slot hosted");
+    let passed = out
+        .unhosted_slots
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(plugin));
+    assert!(!passed, "{plugin} passed through: {:?}", out.unhosted_slots);
+    assert!(
+        out.approximated_slots.is_empty(),
+        "{:?}",
+        out.approximated_slots
+    );
+}

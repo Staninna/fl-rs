@@ -67,6 +67,7 @@ pub mod flanger;
 pub mod flangus;
 pub mod fpc;
 pub mod free_filter;
+pub mod frequency_shifter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
 mod generator;
@@ -400,6 +401,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
         Some(Box::new(flangus::Flangus::default()))
+    } else if is(frequency_shifter::NAME) {
+        Some(Box::new(frequency_shifter::FrequencyShifter::default()))
     } else if is(frequency_splitter::NAME) {
         Some(Box::new(frequency_splitter::FrequencySplitter::default()))
     } else if is(gross_beat::NAME) {
@@ -723,6 +726,7 @@ mod tests {
         for (plugin, len, uses) in [
             ("effector", 316, 27),
             ("equo", 4143, 10),
+            ("frequency shifter", 52, 5),
             ("fruity bass boost", 12, 2),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
@@ -811,7 +815,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 47);
+        assert_eq!(lengths.count(), 48);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
