@@ -333,12 +333,35 @@ pub(crate) struct Run {
     rise: f32,
     /// The envelope's value now.
     pub(crate) out: f32,
+    /// What this voice's attack and decay segments are stretched by, on
+    /// top of the knobs: Sytrus's unison spreads them (`0x86af20`).
+    stretch: [f32; 2],
 }
 
 impl Run {
+    /// Stretch this run's attack and decay segments, as Sytrus scales a
+    /// unison voice's copy of the knobs. This allocates nothing.
+    pub(crate) fn stretch(&mut self, attack: f32, decay: f32) {
+        self.stretch = [attack, decay];
+    }
+
     /// Whether the run has played the envelope out.
     pub(crate) fn over(&self) -> bool {
         self.stage >= OVER
+    }
+
+    /// Put the run at its last stage where it is, as Sytrus does to the
+    /// voices it cuts (`0x86d770`).
+    pub(crate) fn end(&mut self) {
+        self.stage = OVER;
+        self.held = OVER;
+    }
+}
+
+impl LfoRun {
+    /// Put the LFO's level at its last stage where it is (`0x86d770`).
+    pub(crate) fn end(&mut self) {
+        self.level.end();
     }
 }
 
@@ -398,6 +421,7 @@ impl Track {
             from: 0.0,
             rise: 0.0,
             out: 0.0,
+            stretch: [1.0; 2],
         };
         let (Some(first), true) = (self.lengths.first(), self.active) else {
             return run;
@@ -515,7 +539,11 @@ impl Track {
                 break;
             }
             let released = run.stage >= RELEASE && self.loop_end >= 0;
-            let scale = self.scales[usize::from(run.stage > 2) + 2 * usize::from(released)];
+            let knob = usize::from(run.stage > 2) + 2 * usize::from(released);
+            let mut scale = self.scales[knob];
+            if knob < 2 {
+                scale *= run.stretch[knob];
+            }
             let length = f64::from(self.lengths[run.point]) * f64::from(scale);
             if length <= 0.0 {
                 run.step = 1.0;

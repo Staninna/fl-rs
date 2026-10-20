@@ -397,7 +397,7 @@ struct MipTables {
 
 /// A fast Fourier transform in place, of a length that is a power of two.
 /// `inverse` turns it round and leaves the scale to the caller.
-fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
+pub(crate) fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let len = re.len();
     let mut j = 0;
     for i in 1..len {
