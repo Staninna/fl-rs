@@ -896,7 +896,7 @@ mod tests {
         };
         // An install that also has `Patches/Plugin database` has one more.
         let mut saved = testing::every_preset(&root, NAME);
-        assert!(((12)..=13).contains(&saved.len()), "{}", saved.len());
+        assert!((12..=13).contains(&saved.len()), "{}", saved.len());
         let ours = |saved: &testing::Saved| saved.plugin.eq_ignore_ascii_case(NAME);
         let projects = testing::projects(&root).into_iter().filter(ours);
         saved.extend(projects);
