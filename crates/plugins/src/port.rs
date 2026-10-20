@@ -59,6 +59,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::pitch_shifter::NAME, Port::Gaps),
     (crate::pitcher::NAME, Port::Gaps),
     (crate::reeverb_2::NAME, Port::Exact),
+    (crate::send::NAME, Port::Gaps),
     (crate::slicex::NAME, Port::Approximate),
     (crate::soft_clipper::NAME, Port::Exact),
     (crate::soundgoodizer::NAME, Port::Gaps),

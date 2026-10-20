@@ -98,7 +98,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity HTML NoteBook | 3835 |  | 1 | |
 | Effect | Fruity Reeverb | 3627 | yes | 1 | |
 | Effect | Fruity Scratcher | 4172 | yes | 1 | |
-| Effect | Fruity Send | 3621 | yes | 1 | |
+| Effect | Fruity Send | 3621 | yes | 1 | implemented in crates/plugins (pan matrix, knob curves and the send to the chosen insert through the host's output buffer, as Stereo Shaper's difference goes; the ramp's per-sample step clamp is not read, the send ramps over one block), docs/plugins/fruity-send.md |
 | Effect | Fruity Squeeze | 3736 | yes | 1 | |
 | Effect | Fruity Vocoder | 3725 | yes | 1 | |
 | Effect | Fruity dB Meter | 3576 |  | 1 | |
