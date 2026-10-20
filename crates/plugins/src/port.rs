@@ -41,6 +41,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::drumpad::NAME, Port::Gaps),
     (crate::dx10::NAME, Port::Gaps),
     (crate::effector::NAME, Port::Gaps),
+    (crate::emphasis::NAME, Port::Gaps),
     (crate::equo::NAME, Port::Gaps),
     (crate::fast_dist::NAME, Port::Exact),
     (crate::fast_lp::NAME, Port::Exact),
