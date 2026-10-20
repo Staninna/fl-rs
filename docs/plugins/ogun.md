@@ -195,7 +195,8 @@ loading of versions 0 to 12, every corpus state to the last byte.
 
 Approximated, as for Autogun (autogun.md section 6): nothing is
 null-tested against FL. IPP's `exp` is plain `exp`. A timbre seed 2 of 0
-counts from 0 here and not from FL's process-wide counter. Qualities 2 to
+counts from 0 here; FL starts the counter from the clock (`Randomize`) when
+the plugin is made, so its own notes differ from run to run. Qualities 2 to
 4 keep the 6-point interpolator, so quality 4 lacks its longer one, and
 they leave out the output oversampling filter. Portamento and
 velocity-to-envelope mode 2 are left out. 16 voices.
