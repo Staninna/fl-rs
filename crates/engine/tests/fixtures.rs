@@ -2653,6 +2653,228 @@ fn a_clip_on_a_channel_s_pitch_moves_a_generator_s_notes_as_they_start() {
     }
 }
 
+/// What TestSine puts out for `notes`, each a key and the frames it is held
+/// for from frame 0, when the pitch of note `i` is moved to `pitch` cents
+/// from key 60 on frame `at` for every `(at, i, pitch)` of `moves`.
+fn moved_sines(notes: &[(i16, usize)], moves: &[(usize, u32, f32)], len: usize) -> Vec<f32> {
+    let mut sine = TestSine::default();
+    for (voice, &(key, _)) in notes.iter().enumerate() {
+        let voice = voice as u32;
+        sine.note_on(plugins::NoteOn {
+            voice,
+            key,
+            ..plugins::NoteOn::default()
+        });
+    }
+    // Note offs are moves to NaN.
+    let offs = notes.iter().enumerate();
+    let offs = offs.map(|(voice, &(_, held))| (held, voice as u32, f32::NAN));
+    let mut events: Vec<_> = moves.iter().copied().chain(offs).collect();
+    events.sort_by_key(|&(at, _, _)| at);
+    let (mut left, mut right) = (vec![0.0; len], vec![0.0; len]);
+    let mut done = 0;
+    for (at, voice, pitch) in events {
+        sine.process(&mut left[done..at], &mut right[done..at]);
+        done = at;
+        if pitch.is_nan() {
+            sine.note_off(voice);
+        } else {
+            sine.set_note_pitch(voice, pitch);
+        }
+    }
+    sine.process(&mut left[done..], &mut right[done..]);
+    left
+}
+
+/// A slide note for channel 1.
+fn slide_note(position: i32, length: i32, key: i16) -> Note {
+    Note {
+        tag: 0x4008,
+        ..sine_note(position, length, key)
+    }
+}
+
+#[test]
+fn a_slide_note_bends_the_held_note_to_its_key_a_tick_at_a_time() {
+    let dir = Dir::new("generator-slide");
+    // Key 69 held for the bar, and from beat 1 a slide up an octave over
+    // 47 ticks: 48 steps of 25 cents, the first on the slide's own tick.
+    let song = sine_song(&[sine_note(0, BAR, 69), slide_note(BEAT, 47, 81)]);
+    let out = render(&song, &dir);
+    assert_eq!((out.notes, out.hosted_generators), (2, 1));
+    let moves: Vec<_> = (0..48)
+        .map(|k| (24_000 + 250 * k, 0, 900.0 + 25.0 * (k + 1) as f32))
+        .collect();
+    let want = moved_sines(&[(69, 96_000)], &moves, out.left.len());
+    assert!(out.left == want, "the slide");
+    // It stays at the slide's key.
+    let last = 24_000 + 250 * 47;
+    assert!(out.left[last + 1000] != sine_frame(69, last + 1000));
+
+    // A slide that comes while another runs starts from where that one
+    // has got to: half way up, then back to 69 in one tick.
+    let song = sine_song(&[
+        sine_note(0, BAR, 69),
+        slide_note(BEAT, 95, 81),
+        slide_note(BEAT + 48, 0, 69),
+    ]);
+    let out = render(&song, &dir);
+    let mut moves: Vec<_> = (0..48)
+        .map(|k| (24_000 + 250 * k, 0, 900.0 + 12.5 * (k + 1) as f32))
+        .collect();
+    moves.push((36_000, 0, 900.0));
+    let want = moved_sines(&[(69, 96_000)], &moves, out.left.len());
+    assert!(out.left == want, "the slide cut short");
+
+    // A slide note with no note held moves nothing and sounds nothing.
+    let song = sine_song(&[slide_note(0, 10, 81), sine_note(BEAT, BEAT, 69)]);
+    let out = render(&song, &dir);
+    assert!(out.left[..24_000].iter().all(|v| *v == 0.0));
+    assert_eq!(out.left[24_100], sine_frame(69, 100));
+}
+
+#[test]
+fn a_slide_note_on_a_sampler_channel_moves_the_speed_of_the_held_voice() {
+    let dir = Dir::new("sampler-slide");
+    dir.ramp();
+    // The ramp held for a beat, and on tick 1 a slide an octave up in one
+    // tick: from sample 250 on it reads every other frame.
+    let mut song = ramp_note();
+    song.patterns[0].notes[0].length = BEAT;
+    let slide = Note {
+        tag: 0x4008,
+        key: 72,
+        ..note(1)
+    };
+    song.patterns[0].notes.push(slide);
+    let out = render(&song, &dir);
+    assert_eq!((out.notes, out.voices), (2, 1));
+    for i in 0..250 {
+        assert_eq!(out.left[i], ramp(i), "sample {i}");
+    }
+    for i in 250..625 {
+        assert_eq!(out.left[i], ramp(250 + 2 * (i - 250)), "sample {i}");
+    }
+    assert!(out.left[625..].iter().all(|v| *v == 0.0));
+
+    // Down an octave over two ticks: the voice lasts until it runs off the
+    // sample.
+    song.patterns[0].notes[1] = Note {
+        length: 1,
+        key: 48,
+        ..slide
+    };
+    let out = render(&song, &dir);
+    assert_eq!(out.left[..250], (0..250).map(ramp).collect::<Vec<_>>());
+    let last = out.left.iter().rposition(|v| *v != 0.0).unwrap();
+    assert!(last > 1000, "{last}");
+
+    // A slide note with no note held sounds nothing: here the step
+    // sequencer note is let go of on its first sample.
+    song.patterns[0].notes[0].length = 0;
+    let out = render(&song, &dir);
+    assert_eq!(out.left[..RAMP], (0..RAMP).map(ramp).collect::<Vec<_>>());
+    assert_eq!(out.voices, 1);
+}
+
+#[test]
+fn a_slide_note_bends_the_notes_of_its_colour_and_keeps_a_chord_s_shape() {
+    let dir = Dir::new("generator-slide-colour");
+    // A chord of 60 and 64 in the first colour and 69 in the second. The
+    // slide to 67 in the first colour takes the highest of its notes
+    // there in one tick, and the other along with it: 60 goes to 63.
+    let mut other = sine_note(0, BAR, 69);
+    other.flags = 1;
+    let mut stray = slide_note(2 * BEAT, 0, 50);
+    stray.flags = 2;
+    let song = sine_song(&[
+        sine_note(0, BAR, 60),
+        sine_note(0, BAR, 64),
+        other,
+        slide_note(BEAT, 0, 67),
+        stray,
+    ]);
+    let out = render(&song, &dir);
+    let notes = [(60, 96_000), (64, 96_000), (69, 96_000)];
+    let moves = [(24_000, 0, 300.0), (24_000, 1, 700.0)];
+    let want = moved_sines(&notes, &moves, out.left.len());
+    assert!(out.left == want);
+}
+
+#[test]
+fn a_clip_on_a_channel_s_pitch_moves_a_generator_s_sounding_note() {
+    let dir = Dir::new("automation-generator-held-pitch");
+    // One note held over the clip's step up an octave on beat 1, and a
+    // second that starts after it.
+    let steps = [
+        Point::new(0.0, 0.5),
+        hold(1.0, 0.625),
+        Point::new(3.0, 0.625),
+    ];
+    let mut song = sine_song(&[sine_note(0, 2 * BEAT, 69), sine_note(3 * BEAT, 10, 57)]);
+    let clip = add_automation(&mut song, &steps, FULL);
+    bind(&mut song, clip, (1 << 16) + PITCH);
+    place(&mut song, clip, 0, BAR);
+    let out = render(&song, &dir);
+    let want = moved_sines(&[(69, 48_000)], &[(24_000, 0, 2100.0)], 72_000);
+    assert!(out.left[..72_000] == want, "the held note");
+    for n in (0..2_000).step_by(7) {
+        assert_eq!(out.left[72_000 + n], sine_frame(69, n), "frame {n}");
+    }
+
+    // The same in blocks of any size.
+    let samples = engine::prepare(&song, &dir.0).unwrap();
+    for block in [1, 100, 512, 1000] {
+        let mut engine = Engine::new(&song, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, out.left.len());
+        assert!(sink.left == out.left, "blocks of {block}");
+    }
+}
+
+#[test]
+fn slides_come_out_the_same_in_blocks_of_any_size() {
+    let dir = Dir::new("generator-slide-blocks");
+    let song = sine_song(&[
+        sine_note(1, 200, 69),
+        sine_note(3, 150, 64),
+        slide_note(20, 33, 72),
+        slide_note(40, 3, 60),
+    ]);
+    let offline = render(&song, &dir);
+    let samples = engine::prepare(&song, &dir.0).unwrap();
+    for block in [1, 64, 256, 1000] {
+        let mut engine = Engine::new(&song, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, offline.left.len());
+        assert!(sink.left == offline.left, "blocks of {block}");
+    }
+
+    // And on a sampler channel.
+    dir.ramp();
+    let mut ramp = ramp_note();
+    ramp.patterns[0].notes[0].length = BEAT;
+    for (position, length, key) in [(1, 2, 67), (3, 5, 55)] {
+        ramp.patterns[0].notes.push(Note {
+            tag: 0x4008,
+            length,
+            key,
+            ..note(position)
+        });
+    }
+    let offline = render(&ramp, &dir);
+    let samples = engine::prepare(&ramp, &dir.0).unwrap();
+    for block in [1, 64, 256, 1000] {
+        let mut engine = Engine::new(&ramp, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, offline.left.len());
+        assert!(sink.left == offline.left, "sampler in blocks of {block}");
+    }
+}
+
 #[test]
 fn a_channel_s_pan_offset_adds_to_its_pan_and_a_clip_moves_it() {
     let dir = Dir::new("automation-pan-offset");
