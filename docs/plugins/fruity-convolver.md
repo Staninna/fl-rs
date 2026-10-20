@@ -206,7 +206,7 @@ if IR not empty:
     apply the 4 layer envelopes to the IR (FUN_00867c40)                                                 // the editor's volume/pan/... layers
     crop to the first region of the sample if it has one (FUN_00629c20 / FUN_0062c150)
     if 0x414 != 0: FUN_0087b670(IR, 0x414)                                                              // self-convolution, amount 0..1 (not decompiled)
-    resample IR to SR * 0x418 (FUN_0062b090, mode 9)                                                     // the stretch
+    resample IR to SR * 0x418 (FUN_0062b090, mode 9: the 256-point sinc, docs/plugins/fl-interpolator.md) // the stretch
     if eq is a flat line at level y (FUN_00793a00):  IR *= level(y * k) with (11^x - 1)/10 (k = _DAT_0087bcc8)
     else:                                            FUN_0087b2b0(IR, eq, stretch)                      // FFT EQ over the IR (TFFTFilter; not decompiled)
     trim trailing samples with |x| < 2^-24 on both channels (0x8cfb1c)
@@ -332,3 +332,4 @@ Found while implementing `crates/plugins/src/convolver.rs` from the DLL and the 
 8. Layers (`FUN_00867c40`): three of the four envelopes drive pan, volume and separation through `FUN_00622470` per sample.
 9. Separation in `FUN_00622470`: a positive value is `(5^s - 1) / 4` of the way to mono.
 10. There is no partition latency in the binary. `0x514` is only sent to the host (`FHD_SetLatency`) and shown in the GUI; the engine's block delay is absorbed by the impulse's own lead.
+11. The resampling (mode 9 of `FUN_0062aad0`) is FL's interpolator at 256 points a side: a sinc under a Hann window leaned by `0.36 + 0.64 c`, low-passed to `pi / speed` when shrinking, with the end frames held past the impulse's ends (`docs/plugins/fl-interpolator.md`).
