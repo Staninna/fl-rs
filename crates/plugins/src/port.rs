@@ -59,6 +59,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::frequency_splitter::NAME, Port::Gaps),
     (crate::fruit_kick::NAME, Port::Gaps),
     (crate::fruity_slicer::NAME, Port::Gaps),
+    (crate::fruity_slicer_2::NAME, Port::Gaps),
     (crate::gms::NAME, Port::Gaps),
     (crate::gross_beat::NAME, Port::Gaps),
     (crate::harmless::NAME, Port::Gaps),
