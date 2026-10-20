@@ -111,6 +111,7 @@ mod generator;
 mod graph;
 mod levels;
 mod mix;
+mod pool;
 mod sample;
 mod sequence;
 mod transport;
