@@ -150,6 +150,16 @@ impl Follower {
             }
         }
     }
+
+    /// What Fruity Center's kernel does after every block instead: a part
+    /// of the state nearer 0 than `floor` becomes 0.
+    pub(crate) fn clear_below(&mut self, floor: f64) {
+        for state in [&mut self.y, &mut self.v] {
+            if state.abs() < floor {
+                *state = 0.0;
+            }
+        }
+    }
 }
 
 /// How many frames the offset wheel of Delay 2 or Stereo Enhancer holds one
