@@ -1412,7 +1412,7 @@ and unison; with steps 9 to 13 the shared FX cover most states; steps 14 to
 |---|---|---|
 | 1 | parser | built: all 100 corpus states and 328 presets parse to the last byte, 128 enabled parts |
 | 2 | bank, tick, ramping, declicker | built. The bank keeps its recursion from block to block and resyncs on a new frequency, on waking, or every 8192 samples (FL: `round(8192 f)`); partials are summed eight at a time. Per-partial ramp coefficients, the -96 dB drop threshold at average precision, the 10 ms release fade. The attack declicker is not built (declick 0 in the whole corpus) |
-| 3 | pitch, ratios, partial count, global EQ, taper | built |
+| 3 | pitch, ratios, partial count, global EQ, taper | built. A note's pitch follows the host's (`Generator::set_note_pitch`, for slide notes and a clip on the channel's pitch) from its voices' next tick, a note held under a legato voice included |
 | 4 | timbres, mix, start phases, harmonic phase | built, with the blend modes and phase randomness |
 | 5 | voice lifecycle, pan, FX / dry, part mix, volumes | built. MaxPoly is not read; a full pool of 128 voices steals the oldest, released ones first |
 | 6 | articulators | built on `menvelope.rs`'s `Lfo` (with its centre at 0.5) and a Harmor envelope runner in `harmor_art.rs`: per-voice scales, global scales, the attack jump, sustain offset and the release carried over from where the run is. Approximated: the per-point sustain weights (taken as 1 from the decay marker to the loop end), shared runs (flag 2) run per voice, arpeggiator points are not read, the LFO's speed articulator also speeds its level envelope, the global LFO phase (articulator 40) is not applied |

@@ -335,6 +335,45 @@ whose cents move the filter (`0x338`, `0x6dc` in `Gen_Render`). Colour 13
 turns `MonoBox` round for its note and colour 14 `PortaBox`; with the box
 off such a note uses group 0.
 
+`TriggerVoice` in order (`FUN_00782940`, read again for the colours):
+
+```
+c = GetVoiceParam(tag, 2 = FPV_GetColor) & 0xf
+if c == 15:                                  // a filter note
+    record of type 1, no age (+0x30 = MAX); this+0x338 = it; return
+mono = (MonoBox > 0) != (c == 13)
+if mono:
+    if MonoBox == 0: c = 0                   // the 14th colour turns legato on, in group 0
+    if slot[c].voice: record of type 2 (group c); FUN_00787ef0(slot[c].voice, 0); return
+voice limit (0xe0): the oldest sounding record goes (FUN_00783ac0)
+porta = (PortaBox > 0) != (c == 14)
+if porta:
+    if PortaBox == 0: c = 0                  // likewise for portamento
+    porta = slot[c].cents != 0x7fffffff
+the unison records, group c (FUN_00782810 copies the frame's c to +0x3c); the first goes in slot[c]
+if porta: FUN_00784630(first, slot[c] + 8, 1, 1)
+FUN_00787ec0(first, slot[c] + 8)             // the group's last levels
+```
+
+So with `MonoBox` on, a note of the 14th colour plays in its own group 13
+without legato, and the same for `PortaBox` and the 15th.
+
+The filter note (`Gen_Render`, `0x78893f` to `0x7889ad`): while `0x338` holds a record,
+every render sets
+
+```
+0x6dc = (log2(440) + ((Final.Pitch * 0.01f + 84) - 57) / 12) - 0x6c4     // 0x7ff530 = ln(440)/ln 2; 84.0f at 0x788fbc, 57.0 at 0x788fc0, 1/12 at 0x788fc8
+0x6c4 = (fmin + fmax) * 0.5                                                // FUN_0077c170, 0x77c2f7: the middle of the filter's range in log2 Hz
+```
+
+and the voice renderer aims its cutoff at `FCut (0x6d0) + 0x6dc`
+(`FUN_00784a10`). A filter note thus puts the cutoff two octaves over its
+own frequency when `FCut` is in the middle of the range, and moves it with
+its pitch. Its release kills the record (`FUN_00783910`, type 1 goes to
+`FUN_00783820`), and the kill (`0x783c1e` calls `FUN_00787e40`) puts the
+newest remaining type 1 record in `0x338`, or none; `0x6dc` keeps the
+last value it was given.
+
 - Legato (`MonoBox` param 44, `0x1d8`): when the group's slot has a
   voice, the new note gets a type 2 record and `FUN_00787ef0(slot voice,
   0)` hands the sound to it: the slot takes the group's newest type 2
@@ -831,18 +870,20 @@ renders in): that sets their sleep and ring sizes, which FL takes from the
 host. The delay has room for its longest time down to 20 BPM, and is only
 made when the state has it on.
 
-Legato and portamento are FL's for notes of the first colour, which is
-every note fl-rs sends (a `NoteOn` carries no colour; every note of the
-corpus is of the first): the colour groups, the colours that turn the
-boxes round and the filter notes of the 16th are not built. A `NoteOn`
-marked porta glides as `PortaBox` does.
+Legato and portamento are FL's, by colour group, with the colours that
+turn the boxes round and the filter notes of the 16th colour, from
+`NoteOn::color`. No note of the corpus on a Harmless channel has a colour
+other than the first. A `NoteOn` marked porta glides as `PortaBox` does.
+A note's pitch follows `Generator::set_note_pitch`, which the host calls
+for slides and for a clip on the channel's pitch: the voices read it at
+their next control tick, as they read `FinalLevels` from the host.
 
 Nothing in the sound is approximated. Where FL itself is random (the
 noise resonance, the LFO's per-note value) the draws are from another
 generator, as FL's are new every run.
 
 Left to the host: slide notes, which FL plays by sliding the host levels
-(`FinalLevels`) of the voices that sound and which fl-rs does not send a
-generator; the order voices are summed in (FL's voice list, here the
-slots), and so the last bit of the sum; the threaded render, which sums
-the same voices.
+(`FinalLevels`) of the voices that sound; fl-rs slides their pitch (not
+their pan, volume or mods) and tells the plugin. The order voices are
+summed in (FL's voice list, here the slots), and so the last bit of the
+sum; the threaded render, which sums the same voices.

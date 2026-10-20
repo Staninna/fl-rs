@@ -2074,6 +2074,14 @@ impl Generator for Sytrus {
         }
     }
 
+    /// The voice's next tick retunes its operators to it, as it does for
+    /// the main pitch.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for sounding in self.voices.iter_mut().filter(|v| v.id == voice) {
+            sounding.key_pitch = pitch;
+        }
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         let timing = self.timing();
@@ -2185,6 +2193,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -2213,6 +2222,10 @@ mod tests {
         (sum / sound.len() as f64).sqrt()
     }
 
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        crate::testing::follows_note_pitch(|| Box::new(Sytrus::default()), 44_100.0);
+    }
     #[test]
     fn a_sine_operator_at_full_level_is_a_sine_at_the_note_s_frequency() {
         let mut sytrus = blank();

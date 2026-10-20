@@ -246,7 +246,11 @@ is 523.25 Hz (the constant is `2^32 * 523.2511`). The host's
 `FinalLevels.Pitch` is `(key - 60) * 100 + fine pitch + channel pitch`
 (`host-voice.md`, section 3), so an oscillator at 0 semitones plays 523.25 Hz
 for C5 (MIDI 60): one octave above a standard instrument, which is what the
-default preset's -12 and -24 on oscillators 2 and 3 lean on.
+default preset's -12 and -24 on oscillators 2 and 3 lean on. The voice
+reads `FinalLevels.Pitch` again every tick (3.1), so a pitch the host moves
+under a sounding note (a slide note, a clip on the channel's pitch) is
+heard from the next tick: `three_osc.rs` takes it from
+`Generator::set_note_pitch`.
 
 Dispatcher (`FUN_00737f90`): 1 FPD_ProcessMode -> `0x1fd = value & 2`; 4
 SetSampleRate -> `0xe4`, engine `dispatch(obj, 2, SR)`; 7 FPD_UseVoiceLevels

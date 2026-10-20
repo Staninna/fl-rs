@@ -734,6 +734,7 @@ mod tests {
             release: 0.5,
             mod_x: 0.0,
             mod_y: 0.0,
+            color: 0,
             slide: false,
             porta: false,
         }

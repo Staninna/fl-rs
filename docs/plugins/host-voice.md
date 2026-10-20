@@ -86,16 +86,19 @@ end, ...)` copies the note into it, `FUN_00d265e0(rec)` computes
 |---|---|
 | 0x38 | i32 fine pitch, cents (note +0x38) |
 | 0x64 / 0x78 | old-format int levels of Init / Final (`FUN_00d26200`: pan * 64, vol, round(pitch), fcut, fres), only when the plugin lacks `FPF_NewVoiceParams` (`rec+0x237 = (Info.Flags & 0x200000) == 0`) |
+| 0x24 | i32 group: the low 32 bits of the channel's address plus the colour (the layer parent's when the note has one); slide notes find their voices by it (section 5) |
+| 0x50..0x60 | the levels a slide or a glide is headed for: pan, vol, pitch (`0x58`, `key * 100` until a slide moves it), fcut, fres (`FUN_00d237e0`, `FUN_00d26460`) |
 | 0x8c, 0x90..0xa0 | slide: remaining ticks and per-tick steps for pan, vol, fcut, fres, pitch (`FUN_00d26460`, applied by `FUN_00d26250`) |
-| 0x1c8, 0x1cc | slide mode and state (`FUN_00d28b00`) |
-| 0x1e0 | f32 pitch offset, cents: `(float)rec+0x38` at trigger; slide notes move it per tick (`FUN_00d26f10` mode 2: `+= rec+0x1e8`, rounded) |
+| 0x1c8, 0x1cc | arpeggiator mode and state (`FUN_00d28b00`, `FUN_00d26f10`; the channel's arpeggiator at `chan+0x2ac`, `+0x6e0`) |
+| 0x1e0 | f32 pitch offset, cents: `(float)rec+0x38` at trigger; the arpeggiator moves it per tick (`FUN_00d26f10` mode 2: `+= rec+0x1e8`, rounded) |
+| 0x23c | 0 held, 1 let go of, 2 killed (`FUN_00d241e0` writes 1, `0x00d243ce` writes 2) |
 | 0x214 / 0x21c | layer parent channel and child index |
 | 0x224 | note flags (note +0x40) |
 | 0x237 | plugin wants the old int levels |
 | 0x240 | velocity linked (`FPV_SetLinkVelocity`) |
 | 0x25c | extra pan (note +0x70), added to Final.Pan when non-zero |
 | 0x260 | channel |
-| 0x26c | colour / MIDI channel |
+| 0x26c | colour / MIDI channel: the note's flags (`note+0x40`, byte 19 of the record) `& 0xf`, set by `FUN_00d293d0` through `FUN_00d237e0`'s sixth argument |
 | 0x270 / 0x274 | start and end tick; 0x7ffffffc and above means open |
 | 0x278..0x288 | `InitLevels`: Pan, Vol, Pitch, FCut, FRes (note +0x24..+0x34) |
 | 0x28c..0x29c | `FinalLevels`: Pan, Vol, Pitch, FCut, FRes |
@@ -218,7 +221,70 @@ Everything else returns 0. Note key, fine pitch, pan, mod X/Y and release
 never pass through this call; the plugin reads them from `TVoiceParams`
 (section 3), and the host refreshes `FinalLevels` once per tick.
 
-## 5. What stays unknown
+## 5. Colours and slide notes
+
+The note record's `+0x40` is byte 19 of the pattern note, whole
+(`FUN_00d29aa0`). `FUN_00d293d0`, which makes a voice of a note record,
+takes `colour = +0x40 & 0xf` and hands it to `FUN_00d237e0`, which stores it
+at `rec+0x26c`; `FPV_GetColor` (section 4) returns it. The same call stores
+the group at `rec+0x24`: `(int)channel + colour`, or the layer parent's
+`(int)` plus the colour. `TVoiceParams` itself has no colour: a plugin
+asks for it, and Harmless does on every `TriggerVoice` (`docs/plugins/harmless.md`).
+
+A slide note is a pattern note whose u32 at @4 has `& 0xf == 8`.
+`FUN_00ff56d0`, the pattern player's note builder, makes its record with
+`+4` = the note's length in ticks (an end tick for other notes) and `+0x1c
+= 0x7fffffff`, and `FUN_00d293d0` sends such a record to `FUN_00d2b660(voices,
+note+0x24 (its levels), group, length)` instead of starting a voice:
+
+```
+FUN_00d2b660(voices, levels, group, length):
+    highest = -1.0                                                   // 0x00d2b7b4
+    for v in voices: if v.group == group && v+0x23c < 1 && !(v+0x224 & 0x40000):
+        highest = max(highest, v+0x58)                               // the held voices' targets
+    any = highest >= 0.0                                             // 0x00d2b7b8
+    if !any: highest = 6000.0                                        // 0x00d2b7bc
+    levels.Pitch -= highest                                          // the slide note's key * 100, less it
+    for v in voices: if v.group == group && v+0x23c <= any:          // held, and let go of when one is held
+        FUN_00d26460(v, levels, length, v+0x58 + levels.Pitch)
+
+FUN_00d26460(v, levels, length, pitch):                              // when chan+0x200 < 1
+    v+0x8c = length + 1                                              // ticks
+    step(x, to) = x == to ? 0 : (to - x) / (length + 1)              // FUN_00d26430, f32
+    v+0x90 = step(Init.Pan, levels.Pan);  v+0x94 = step(Init.Vol, levels.Vol)
+    v+0xa0 = step(Init.Pitch, pitch)
+    v+0x98 = step(Init.FCut, levels.FCut);  v+0x9c = step(Init.FRes, levels.FRes)
+    chan+0x398 + 0x34 * colour = levels with pitch                   // the colour's last levels
+    v+0x50..0x60 = the same                                          // so v+0x58 = pitch
+
+FUN_00d2ab30(v), every tick:                                         // after FUN_00d26f10 (arpeggio)
+    if v+0x8c > 0: v+0x8c -= 1; FUN_00d26250(v)                      // Init += each step that is not 0
+    FUN_00d265e0(v)                                                  // FinalLevels again (section 3)
+```
+
+So a slide moves every voice of the channel and the colour by the same
+cents, the one whose target is highest to the slide note's key, in a
+straight line over the slide note's length plus one tick, and moves their
+pan, volume and mods to the slide note's. A slide that comes while another
+runs starts from where `Init` has got to, for the old target moved by the
+new slide. The slide note's fine pitch plays no part (`InitLevels.Pitch` is
+`key * 100`, and the fine pitch is in `rec+0x1e0`). With no voice of the
+group held nothing moves. `inferred`: that the slide note's tick runs its
+first step, which holds when the sequencer starts the tick's notes before
+it ticks the voices.
+
+The plugin reads the moved `FinalLevels.Pitch` as its voices run, as it
+does a channel pitch that automation moves (`chan+0x1a0`, section 3).
+
+`FUN_00d23db0`, called by `FUN_00d293d0` for every new voice, is the
+host's portamento: when the channel's porta switch (`chan+500 & 2`)
+differs from the note's porta flag (`+0x40 & 0x10`), the colour's last
+levels are known, the slide time `chan+0x6e4` is above 0 and there is no
+arpeggio, the voice starts from the colour's last levels and slides to its
+own over `chan+0x6e4` ticks by `FUN_00d26460`; otherwise its levels become
+the colour's last. Not read further.
+
+## 6. What stays unknown
 
 - The writer of `chan+0x1a0`, and of the pan, cutoff and resonance levels
   next to it. The -6000 is `inferred` from three readers that add it back.
@@ -229,9 +295,12 @@ never pass through this call; the plugin reads them from `TVoiceParams`
 - `FUN_00d2b660` and `FUN_00f0bf70` also use 6000.0 (arpeggiator and MIDI out
   by the look of them); not read.
 
-## Engine implementation notes (crates/engine/src/levels.rs)
+## Engine implementation notes (crates/engine/src/levels.rs, slide.rs, generator.rs)
 
 - Under `FlExact` a note voice has no factor on top of `Final.Vol`, and a clip has the `sqrt(2) / 0.551` of `FUN_00ffa0a0`, so a new note is 8.2 dB under its sample and a clip is at the file's level. `Approximate` plays both at the file's level.
 - Tracking scale is taken as knob/256 per 1.0 of volume or per 6000 cents (a guess). Corpus pan knobs are all 0, so tracking has no corpus check.
 - Under `FlExact` channel volume is `FUN_00fe9d20`'s curve, 229's adjustment included, and an insert's pan feeds its far input into its near side. Which input the part across carries is taken from the shape of `FUN_0127b050`, not read.
 - The sample file's own root note is not decoded; root note and fine tune come off the channel.
+- `plugins::NoteOn::color` is `rec+0x26c`. A slide note starts no voice, on a sampler channel or a plugin channel. `crate::slide` works its steps out from the song, by channel and colour, in f32 as `FUN_00d26460` does; a generator is told each with `Generator::set_note_pitch` on the sample its tick starts on, and a sampler voice plays at the speed the step's cents give from there. The pan, volume and mods a slide also moves are left out, and so is `chan+0x200`, which turns slides off. The layer parent's group is not built (layers do not play).
+- A clip on the channel's pitch moves a sounding generator note on every tick it moves the pitch: the engine reads the clip at each tick's first sample and calls `set_note_pitch` where the value differs from the last it told, so a block ends only on those ticks. A controller that drives the pitch is not followed under a sounding generator note. Sampler voices follow the pitch on the 512-sample grid the other controls are read on.
+- The host's portamento (`FUN_00d23db0`) is not built: a note's porta flag goes to the generator as `NoteOn::porta`.
