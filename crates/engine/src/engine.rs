@@ -444,8 +444,8 @@ impl Engine {
             // plugin before it mixes a tick, which is the same order.
             if graph.mixer.ticking() {
                 while graph.clock.sample(self.next_tick) <= self.position {
-                    let outputs = |insert, slot, outputs: &[f32]| {
-                        automation.drive(insert, slot, outputs);
+                    let outputs = |source, outputs: &[f32]| {
+                        automation.drive(source, outputs);
                     };
                     graph.mixer.tick(self.next_tick, outputs);
                     self.next_tick += 1;

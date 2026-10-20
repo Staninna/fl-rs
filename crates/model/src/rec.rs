@@ -102,6 +102,19 @@ pub struct ControllerOutput {
     pub output: u16,
 }
 
+/// An output of an internal controller on a channel, as
+/// [`ControllerOutput`] is one in an effect slot: Fruity Envelope
+/// Controller and the other generators that drive links. FL's host gives
+/// output `n` the ID of the channel's control `0x8000 + n`, from the
+/// channel's REC base as it does a slot's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChannelOutput {
+    /// The index the channel's 64 has.
+    pub channel: u16,
+    /// The output's place among the plugin's, from 0.
+    pub output: u16,
+}
+
 /// The control number of a slot's first controller output, and of its
 /// plugin's first parameter.
 const PLUGIN: u16 = 0x8000;
@@ -120,6 +133,19 @@ impl RecTarget {
             } => Some(ControllerOutput {
                 insert: index,
                 slot,
+                output: control.checked_sub(PLUGIN)?,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The controller output of a channel's plugin this ID names when it
+    /// is the source of a link: control `0x8000` or above of a channel.
+    /// `None` for any other ID.
+    pub fn channel_output(&self) -> Option<ChannelOutput> {
+        match *self {
+            RecTarget::Channel { index, control } => Some(ChannelOutput {
+                channel: index,
                 output: control.checked_sub(PLUGIN)?,
             }),
             _ => None,
