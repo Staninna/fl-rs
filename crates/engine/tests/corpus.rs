@@ -397,15 +397,10 @@ fn the_love_philter_and_convolver_render_tests_play_through_the_plugin() {
             .keys()
             .any(|name| name.eq_ignore_ascii_case(plugin));
         assert!(!passed, "{plugin} passed through: {:?}", out.unhosted_slots);
-        // At the rate of its impulse Convolver does what FL's does, and at
-        // another it says its resampler is its own. Nothing is missing.
+        // Convolver does what FL's does at the rate of its impulse and at
+        // another, which goes through FL's interpolator. Nothing is missing.
         let said: Vec<&str> = out.approximated_slots.keys().copied().collect();
-        if sample_rate == 48_000 && plugin == "Fruity Convolver" {
-            assert_eq!(said.len(), 1, "{said:?}");
-            assert!(said[0].contains("resampled"), "{said:?}");
-        } else {
-            assert!(said.is_empty(), "{plugin}: {said:?}");
-        }
+        assert!(said.is_empty(), "{plugin}: {said:?}");
     }
 }
 
