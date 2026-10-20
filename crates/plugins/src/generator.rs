@@ -179,6 +179,13 @@ pub trait Generator: Send {
     /// stays silent, and [`Generator::fidelity`] says a file is missing.
     /// This allocates. Nothing happens for a path the state does not name.
     fn set_sample(&mut self, _path: &str, _file: Option<SampleFile<'_>>) {}
+
+    /// The plugins inside this one that are not built and are passed
+    /// through or left silent, by their event 201 names, for a plugin that
+    /// hosts others, as FL's Patcher does. Empty for the others.
+    fn unhosted(&self) -> &[String] {
+        &[]
+    }
 }
 
 /// A decoded sample file for [`Generator::set_sample`]. A mono file has no
@@ -245,6 +252,9 @@ const GENERATORS: &[(&str, Make)] = &[
         Box::new(crate::minisynth::MiniSynth::default())
     }),
     (crate::ogun::NAME, || Box::new(crate::ogun::Ogun::default())),
+    (crate::patcher::NAME, || {
+        Box::new(crate::patcher::PatcherGenerator::default())
+    }),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),

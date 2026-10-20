@@ -108,6 +108,8 @@ pub mod parametric_eq_2;
 mod parametric_eq_2_engine;
 mod parts;
 pub mod pass_through;
+pub mod patcher;
+pub mod patcher_state;
 pub mod peak_controller;
 pub mod phase_inverter;
 pub mod phaser;
@@ -307,7 +309,35 @@ pub trait Effect: Send {
     /// longer than any before it and longer than 4096 frames, and never
     /// otherwise. A plugin that does not say takes no notice.
     fn set_sidechain(&mut self, _index: usize, _left: &[f32], _right: &[f32]) {}
+
+    /// Hand `each` every output the last block filled beside the main one,
+    /// for a host that has numbered outputs, as FL's Patcher has: the
+    /// number the plugin's state gives it (1 for the first) and the left
+    /// and right side, each as long as that block. Two may share a number
+    /// and add up there. This allocates nothing. A plugin that does not
+    /// say has its [`Effect::aux_output`] at [`Effect::sidechain_output`].
+    fn outputs(&self, each: &mut Output<'_>) {
+        if let Some((left, right)) = self.aux_output() {
+            each(self.sidechain_output(), left, right);
+        }
+    }
+
+    /// The host takes every one of [`Effect::outputs`] where its number
+    /// says, as FL's Patcher does, so a plugin no longer counts them as
+    /// left out in [`Effect::fidelity`]. The others take no notice.
+    fn route_outputs(&mut self) {}
+
+    /// The plugins inside this one that are not built and are passed
+    /// through, by their event 201 names, for a plugin that hosts others,
+    /// as FL's Patcher does. Empty for the others.
+    fn unhosted(&self) -> &[String] {
+        &[]
+    }
 }
+
+/// What [`Effect::outputs`] hands each output to: its number and its left
+/// and right side.
+pub type Output<'a> = dyn FnMut(usize, &[f32], &[f32]) + 'a;
 
 /// How near a plugin comes to FL's with the state it has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +520,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(zgameeditor::ZGameEditor))
     } else if is(wrapper::NAME) {
         Some(Box::new(wrapper::Wrapper::default()))
+    } else if is(patcher::NAME) {
+        Some(Box::new(patcher::Patcher::default()))
     } else {
         None
     }
@@ -845,6 +877,8 @@ mod tests {
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
             "zgameeditor visualizer",
+            // Counted in `patcher::tests`.
+            "patcher",
         ];
         // Any state does for an effect that leaves the sound alone.
         let passes = |plugin: &str| PASS_THROUGH.iter().any(|n| n.eq_ignore_ascii_case(plugin));
