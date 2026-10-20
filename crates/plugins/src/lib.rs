@@ -63,6 +63,7 @@ pub mod edison;
 pub mod effector;
 pub mod emphasis;
 mod emphasis_dsp;
+pub mod envelope_controller;
 pub mod equo;
 pub mod fast_dist;
 pub mod fast_lp;
