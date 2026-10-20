@@ -64,7 +64,7 @@ low latency (`FUN_00705270`, `FUN_007052e0`, `FUN_00705230`).
 | 6 | InputGainWheel | 0..10000 | `24 n` dB (`FUN_007043f0(n, 0, 24, 1)`) |
 | 7 | LinkingWheel | 0..10000 | `n` |
 | 8 | EmphAmountWheel | 0..10000 | `n` |
-| 9 | OutputGainWheel (ceiling) | 0..10000 | `FUN_00705110`: `n == 1 ? 0 : 20 log10((exp(n ln 11) - 1) * 0.1)` dB, `-inf` where that gain is not above 0 |
+| 9 | OutputGainWheel (ceiling) | 0..10000 | `FUN_00705110`: `n == 1 ? 0 : 20 log10((exp(n ln 11) - 1) * 0.1)` dB, `-inf` where that gain is not above 0 (an integer compare of its bits) |
 | 10 | LoudnessCompBtn (level matching) | 0..1 | raw |
 | 11 | OversamplingCombo, Off 2x 4x 8x 16x | 0..4 | raw |
 | 12 | EmpHardnessWheel | 0..9 | raw |
@@ -262,7 +262,8 @@ last delay. At 44.1 kHz and the usual settings 2205 + 176 samples.
   NaN, the port takes the ceiling of 2 instead. No corpus state has it on.
 - Left out: the LUFS and RMS meters and the gain-reduction history, which
   only the GUI reads.
-- Not read: `FUN_180172030` (assumed `dst += x h`, the only form that makes
-  the interpolator work), `FUN_005dfeb0` (assumed `log10`, the display shows
-  dB), and the argument order of the dry path's 2x down in `process`
-  (assumed as in `FUN_18016ac90`).
+- Read from the listings where Ghidra lost the arguments:
+  `FUN_180172030` is `dst += x h` (SSE `mulps`/`addps`), `FUN_005dfeb0` is
+  `ln x * 0.4342944819` (`0x007327f8`), and the dry path's 2x halfbands in
+  `process` (`0x180167b30`, `0x180167bc0`) run as `FUN_18016ab60` and
+  `FUN_18016ac90` do.

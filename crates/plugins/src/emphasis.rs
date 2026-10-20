@@ -116,7 +116,8 @@ fn ceiling_db(n: f32) -> f32 {
         ((f64::from(n * ln11).exp() - 1.0) * f64::from(0.1f32)) as f32
     };
     if gain > 0.0 {
-        (f64::from(gain).log10() * 20.0) as f32
+        // FUN_005dfeb0: Delphi's Log10, ln x times 1 / ln 10.
+        (f64::from(gain).ln() * std::f64::consts::LOG10_E * 20.0) as f32
     } else {
         f32::NEG_INFINITY
     }
