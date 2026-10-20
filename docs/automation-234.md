@@ -231,3 +231,12 @@ of the repo.
 - The trim of a playlist item on an automation channel is in beats into the clip. `end - start` equals the item's length in beats for 3,103 of the 3,104 corpus items with a trim (of 5,462 automation items, 71 of them muted).
 - The tempo's range for the value mapping is 10 to 522 BPM, as 10000 and 522000. The 219 of all seven clips that drive the tempo is (1250, 4250), which is exactly 60 and 180 BPM on that range, the two tempos `FUN_01191a50` computes fractions for.
 - Target counts, decoded with the legacy remap: 820 links to an insert, 495 to a channel, 7 to the tempo. 117 of the 1,322 go to a control the engine plays: 34 insert volumes, 1 insert pan, 28 send levels, 7 tempo, 45 channel volumes and 2 channel pans. Of the channel ones, only the 6 volumes on audio clip channels are played, because the other 41 belong to plugin channels.
+
+## Channel controls (docs/rec-channel.md)
+
+What a binding to a channel's control below 0x8000 drives, with the knob
+ranges the dispatcher scales a clip's value onto, is in
+`docs/rec-channel.md`. The engine plays a channel's volume, pan, pitch, pan
+offset and volume multiplier. Links in projects from before 11.5.6 number a
+channel's plugin parameters from 0x2000, and FL's loader moves them to
+0x8000 (`FUN_00f45980`); the model does the same.
