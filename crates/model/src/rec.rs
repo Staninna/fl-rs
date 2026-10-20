@@ -182,6 +182,60 @@ impl RecTarget {
     }
 }
 
+impl crate::Project {
+    /// What the target of a 226 or 227 link addresses in this project:
+    /// [`Project::rec_target`](crate::Project::rec_target) after the
+    /// rewrites FL's loader runs on the links of an old project, see
+    /// [`remap_old_link`].
+    ///
+    /// FL rewrites a link's source the same way only when a flag of its
+    /// own is set (bit 3 of the word at 0x193fc70), which is not read, so
+    /// a source is decoded with [`Project::rec_target`](crate::Project::rec_target).
+    /// An automation clip's source, control 0 of its channel, comes out
+    /// the same either way.
+    pub fn link_target(&self, id: u32) -> RecTarget {
+        RecTarget::decode(remap_old_link(id, self.version()), self.legacy_rec_ids())
+    }
+}
+
+/// The first writer version whose links number plugin parameters from
+/// 0x8000, 11.5.6.
+const PLUGIN_PARAMS_AT_0X8000: u32 = 11_005_006;
+/// The first writer version whose current track is insert 126, 12.9.0.
+const CURRENT_TRACK_126: u32 = 12_009_000;
+
+/// The rewrites FL's loader runs on the IDs of a project's links when the
+/// project's writer `version` is old (the version gates at the end of
+/// `FUN_00f46490`, each rewrite run through `FUN_012cb6c0`, which walks
+/// the links and the other lists of IDs, but not the 225 records):
+///
+/// - Before 11.5.6 (`FUN_00f45980`), a channel control from 0x2000 to
+///   0x3FFF moves up by 0x6000 and a control below 0x1F00 of a legacy mixer
+///   ID up by 0x8000. Plugin parameters started at 0x2000 on a channel and
+///   at 0 in a slot then.
+/// - Before 12.9.0 (`FUN_00f459e0`), a legacy mixer ID on insert 104 moves
+///   to insert 501 with the new base, as [`remap_legacy`] does for 126.
+///
+/// The ones for writers before 8.5.0 are left out. The corpus has no
+/// project that old.
+pub fn remap_old_link(id: u32, version: u32) -> u32 {
+    let mut id = id;
+    let control = id & 0xffff;
+    let legacy = (LEGACY_MIXER..2 * LEGACY_MIXER).contains(&id);
+    if version < PLUGIN_PARAMS_AT_0X8000 {
+        if id < CHANNELS_END && (0x2000..0x4000).contains(&control) {
+            id += 0x6000;
+        } else if legacy && control < 0x1F00 {
+            id += 0x8000;
+        }
+    }
+    if version < CURRENT_TRACK_126 && legacy && (id - LEGACY_MIXER) >> 22 == 104 {
+        let slot = ((id - LEGACY_MIXER) >> 16) & 0x3f;
+        id = MIXER + (((u32::from(LAST_INSERT) << 6) + slot) << 16) + (id & 0xffff);
+    }
+    id
+}
+
 /// The rewrite FL's loader runs on every 225 record of a legacy project
 /// (`FUN_00f45460`): base 0x20000000 becomes 0x70000000, the send controls
 /// move from 0x1F40.. to 0x2000.., and the current track moves from insert
@@ -332,6 +386,49 @@ mod tests {
         ] {
             assert_eq!(range(other), None, "{other:#x}");
         }
+    }
+
+    #[test]
+    fn a_link_from_before_11_5_6_numbers_plugin_parameters_from_0x2000() {
+        let old = 11_000_003;
+        // A channel's plugin parameter 0x12.
+        assert_eq!(remap_old_link(0x001B_2012, old), 0x001B_8012);
+        assert_eq!(remap_old_link(0x001B_3FFF, old), 0x001B_9FFF);
+        // A channel's own controls and its parameters from 0x4000 stay.
+        for id in [0x001B_0004, 0x001B_1FFF, 0x001B_4000, 0x001B_8012] {
+            assert_eq!(remap_old_link(id, old), id, "{id:#x}");
+        }
+        // A slot's parameter 5 on insert 3, slot 2, and a slot's mix level,
+        // which stays.
+        let legacy = |insert: u32, slot: u32, control: u32| {
+            LEGACY_MIXER + (insert << 22) + (slot << 16) + control
+        };
+        assert_eq!(remap_old_link(legacy(3, 2, 5), old), legacy(3, 2, 0x8005));
+        assert_eq!(
+            remap_old_link(legacy(3, 2, 0x1F01), old),
+            legacy(3, 2, 0x1F01)
+        );
+        // From 11.5.6 on nothing moves.
+        assert_eq!(remap_old_link(0x001B_2012, 11_005_006), 0x001B_2012);
+        assert_eq!(remap_old_link(legacy(3, 2, 5), 11_005_006), legacy(3, 2, 5));
+    }
+
+    #[test]
+    fn a_link_from_before_12_9_0_to_insert_104_goes_to_501() {
+        let id = LEGACY_MIXER + (104 << 22) + (3 << 16) + 0x1F01;
+        assert_eq!(remap_old_link(id, 12_008_999), 0xED43_1F01);
+        assert_eq!(
+            RecTarget::decode(remap_old_link(id, 12_008_999), true),
+            RecTarget::Insert {
+                index: 501,
+                slot: Some(3),
+                control: control::SLOT_MIX
+            }
+        );
+        assert_eq!(remap_old_link(id, 12_009_000), id);
+        // A slot's parameter is shifted first, as FL's loader does.
+        let param = LEGACY_MIXER + (104 << 22) + 7;
+        assert_eq!(remap_old_link(param, 11_000_000), 0xED40_8007);
     }
 
     #[test]
