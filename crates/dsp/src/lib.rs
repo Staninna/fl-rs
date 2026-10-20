@@ -11,6 +11,7 @@
 pub mod additive;
 pub mod biquad;
 pub mod curve;
+pub mod interpolator;
 pub mod resample;
 
 /// Decibels to linear gain. `-inf` and below -200 dB give 0.
