@@ -149,6 +149,96 @@ pub const GLOBAL_DEFAULTS: [i32; GLOBAL_PARAMS] = {
     g
 };
 
+/// The range of each global parameter (REC 772..824): the Min and Max of
+/// the control with Tag 10000 + t (t < 17) or 20000 + t - 17, which
+/// `ProcessParam` rescales a 0 to 1 by (`docs/plugins/harmor.md` section
+/// 2.3). A box is 0 or 1, a selector its rows.
+pub const GLOBAL_RANGES: [(i32, i32); GLOBAL_PARAMS] = [
+    // Mod X, Y, Z.
+    (0, 512),
+    (0, 512),
+    (0, 512),
+    // Legato limit, legato, portamento, velocity to glide time.
+    (0, 2400),
+    (0, 1),
+    (0, 1),
+    (0, 1),
+    // Strum mode, time, tension.
+    (0, 3),
+    (0, 1000),
+    (-1000, 1000),
+    // Part mix, main volume, post volume, velocity to volume.
+    (0, 1000),
+    (0, 2000),
+    (0, 2000),
+    (0, 1),
+    // Main pitch, main LFO level, inverted arpeggio.
+    (-2400, 2400),
+    (-1000, 1000),
+    (0, 1),
+    // Distortion: drive, asymmetry, out, mix, cutoff.
+    (0, 1000),
+    (-500, 500),
+    (0, 2000),
+    (-1000, 1000),
+    (500, 1100),
+    // Reverb: enable, low cut, high cut, predelay, room, diffusion, decay,
+    // high damping, colour, volume.
+    (0, 1),
+    (0, 1000),
+    (400, 1050),
+    (-384, 384),
+    (1, 100),
+    (0, 100),
+    (0, 900),
+    (400, 1050),
+    (0, 4),
+    (-1000, 1000),
+    // Chorus: order, depth, speed, delay, spread, cross, wet.
+    (0, 9),
+    (0, 1024),
+    (0, 1024),
+    (0, 128),
+    (0, 128),
+    (-128, 128),
+    (-1000, 1000),
+    // Delay: enable, mode, feedback, time, time offset, volume, pan, low
+    // cut, high cut, feedback filter.
+    (0, 1),
+    (0, 2),
+    (0, 1000),
+    (-384, 384),
+    (-512, 512),
+    (-1000, 1000),
+    (-128, 128),
+    (0, 1000),
+    (400, 1050),
+    (0, 1),
+    // Compression: volume, low, mid, high.
+    (0, 1000),
+    (0, 2000),
+    (0, 2000),
+    (0, 2000),
+];
+
+/// The range of an articulator's quick knob `j` (part parameter `95 + 8 a
+/// + j`): the envelope editor's `EnvAttWheel` .. `EnvRelWheel` and
+/// `LFOSpeedWheel` .. `LFOPWWheel`, Tags 0 to 7.
+pub const KNOB_RANGES: [(i32, i32); 8] = [
+    (0, 256),
+    (0, 256),
+    (-128, 128),
+    (0, 256),
+    (512, 65_536),
+    (-128, 128),
+    (-128, 128),
+    (-112, 112),
+];
+
+/// The range of an articulator's smoothing (part parameters 343..385,
+/// `ArtSmoothWheel`).
+pub const SMOOTHING_RANGE: (i32, i32) = (0, 1001);
+
 /// What `FUN_00896fe0` makes of each articulator: whether it adds (mode 1,
 /// centre 0.5) and whether it multiplies by twice its value (mode 2).
 pub const BIPOLAR: u64 = 0x7d2_7986_f035;
