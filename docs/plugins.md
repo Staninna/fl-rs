@@ -2,7 +2,7 @@
 
 Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a render-test project exists for it in `Data/System/Render tests/`, and how many of the 165 shipped projects use it (by event 201 name). Sizes are the x64 DLL. Status column is ours; empty means not started.
 
-Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stock plugins built so far, and 33 of 165 play in full. 928 of 1028 effect slots on inserts that sound reaches are hosted, and 180 of 215 generator channels with notes play.
+Corpus render at `b3b7b64`: 112 of 165 shipped projects have sound with the stock plugins built so far, and 38 of 165 play in full. 963 of 1028 effect slots on inserts that sound reaches are hosted, and 180 of 215 generator channels with notes play.
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
@@ -25,7 +25,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Love Philter | 5856 | yes | 18 | implemented in crates/plugins (all twelve filters, oversampling, articulators, follower and waveshaper exact; looped sustain and arpeggiator points approximated, none in the corpus), docs/plugins/fruity-love-philter.md |
 | Generator | DirectWave | 1094 | yes | 18 | implemented in crates/plugins (state, zones, groups, the 32.32 linear reader, loop modes, ADSR envelopes, LFOs, the modulation matrix, cookbook filters, limiter, gains and shapers exact; the program's three send effects (one a reverb), program LFOs, zone effects, filter types 6 and 7, stretching and HQ interpolation left out and said; FL's `rand` stream and block sizes not FL's), docs/plugins/directwave.md |
 | Generator | Slicex | 6135 | yes | 18 | implemented in crates/plugins, approximate (state, regions from the WAV's cue, ltxt and tlst chunks, key map, slice volume, pan and pitch, knob volume and pitch exact; articulators, declicker, filter, stretching, reverse, start offset and the layer modes that pick one slice left out; FL's resampler stands in as a Hermite curve), docs/plugins/slicex.md |
-| Effect | Control Surface | 5556 |  | 17 | |
+| Effect | Control Surface | 5556 |  | 17 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its 2048 controller outputs are not driven, so the 174 corpus links from it, in all 17 projects that use it, play nothing, and it says so as approximated; MIDI out left out), docs/plugins/control-surface.md |
 | Effect | Fruity Fast Dist | 3616 | yes | 17 | implemented in crates/plugins, docs/plugins/fruity-fast-dist.md |
 | Effect | Pitcher | 436 | yes | 17 | implemented in crates/plugins (detector, scale correction, delay-line and formant shifters, harmony voices exact up to the last bit of powf, log2f and cos, read from Pitcher_x64.dll itself; MIDI mode and MIDI-driven harmony approximated: no host sends the notes of a MIDI Out channel yet, 2 of 65 corpus states), docs/plugins/pitcher.md |
 | Effect | Fruity Delay 2 | 3644 | yes | 16 | implemented in crates/plugins, docs/plugins/fruity-delay-2.md |
@@ -42,7 +42,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Blood Overdrive | 3640 | yes | 11 | implemented in crates/plugins (exact), docs/plugins/fruity-blood-overdrive.md |
 | Effect | Soundgoodizer | 6257 | yes | 10 | implemented in crates/plugins (a Maximus preset A to D with the amount on LMH mix), docs/plugins/maximus.md section 5.9 |
 | Effect | Vocodex | 5818 | yes | 10 | implemented in crates/plugins (state, the MOD and CAR inputs with two sidechain inputs, L-R encoding, band layout and distribution map, RBJ band filters with 2x oversampling past 11050 Hz, peak and RMS followers, smoothing curves, MIN TIMES, noise gate, unison, pitch shift, pass-throughs, contour, mapping envelopes and the closing Soundgoodizer as read from the DLL; plays FL's HQ render path, draft mode not built; noise generator, curved envelope segments and saturation approximated or left out, none of the last two in the corpus; the carrier synth is this crate's Sytrus), docs/plugins/vocodex.md |
-| Effect | Fruity Chorus | 3656 | yes | 9 | implemented in crates/plugins (exact; LFO phases from Delphi's Random from seed 0; its render test sits inside a Fruity Wrapper, so unit tests only), docs/plugins/fruity-chorus.md |
+| Effect | Fruity Chorus | 3656 | yes | 9 | implemented in crates/plugins (exact; LFO phases from Delphi's Random from seed 0; its render test sits inside a Fruity Wrapper and plays through its swap), docs/plugins/fruity-chorus.md |
 | Effect | Fruity Convolver | 6012 | yes | 9 | implemented in crates/plugins (convolution, levels, separation, normalise and pre-delay exact at the impulse's rate; resampled impulses, drawn layers, self-convolution and EQ curves approximated), docs/plugins/fruity-convolver.md |
 | Effect | Fruity Stereo Enhancer | 3641 | yes | 9 | implemented in crates/plugins, docs/plugins/fruity-stereo-enhancer.md |
 | Effect | Luxeverb | 4239 |  | 9 | implemented in crates/plugins (a shell around the shimmer reverb in Shared/ildsp_x64.dll, read in full: control curves, 16-line network, damping shelves, LFO, matrix, predelay, diffusers, envelope, limiter, peak filter, feedback and feedforward pitch shifters; all 126 corpus and preset states, versions 7 and 8; FL's round-toward-zero arithmetic and the shifters' seed shared across instances are not reproduced; no render test, unit tests only), docs/plugins/luxeverb.md |
@@ -53,8 +53,8 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | EQUO | 3728 | yes | 7 | implemented in crates/plugins (state versions 3 and 4, the curve with morph, shift, mix and master, 31 band passes with the 2x bands, balance law, gain lines, add mode, per-tick smoothing, silence sleep and the 2x allpass resampler exact; the send to another insert is not routed, so send only passes the input on (no corpus state has a send); a loaded state starts settled where FL glides in from flat; ticks counted from tempo and PPQ; the HQ render flag that forces oversampling is never set), docs/plugins/equo.md |
 | Effect | Hyper Chorus | 3846 |  | 7 | implemented in crates/plugins (exact from the C++ engine in Engine_x64.dll: the 4 or 8 modulated lines with Catmull-Rom reads, feedback and movement panning, Q 0.5 filters, high-pass fade, equal-power mix, and the parameter glide that brings a loaded state in from the defaults; differences: f32 rounds to nearest where FL's block rounds toward zero, every instance starts its LFOs where FL's first instance does, a new rate re-applies the parameters; no render test, so unit tests and the 20 corpus states), docs/plugins/hyper-chorus.md |
 | Effect | Pitch Shifter | 4161 | yes | 7 | implemented in crates/plugins (both engines from Shared/ildsp_x64.dll; IPP's FFT and the CRT maths swapped for Rust's, the sync button's load order inferred), docs/plugins/pitch-shifter.md |
-| Effect | Wave Candy | 4247 |  | 7 | |
-| Effect | Fruity NoteBook 2 | 3528 |  | 6 | |
+| Effect | Wave Candy | 4247 |  | 7 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` feeds its display and copies the block with `ippsCopy_64s`; the display is left out), docs/plugins/wave-candy.md |
+| Effect | Fruity NoteBook 2 | 3528 |  | 6 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
 | Generator | Fruity DX10 | 4230 | yes | 6 | implemented in crates/plugins (mda DX10 with a second modulator, all 74 shipped states exact; the instrument tab and the mod X/Y filter not built), docs/plugins/fruity-dx10.md |
 | Generator | Ogun | 6043 | yes | 6 | implemented in crates/plugins on Autogun's code (state versions 0 to 19; approximated as Autogun is), docs/plugins/ogun.md |
 | Effect | Emphasis | 4045 | yes | 5 | |
@@ -70,7 +70,7 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers exact; linear phase window and FFT scaling inferred; bands to other mixer tracks not routed, no shipped state sets one), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | |
 | Effect | Fruity Phaser | 3622 | yes | 3 | |
-| Effect | Fruity X-Y Controller | 3684 |  | 3 | |
+| Effect | Fruity X-Y Controller | 3684 |  | 3 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`; its two controller outputs are not driven, so the 60 corpus links from it in 3 projects play nothing, and it says so as approximated), docs/plugins/fruity-x-y-controller.md |
 | Effect | Low Lifter | 3704 | yes | 3 | |
 | Generator | BassDrum | 3973 | yes | 3 | implemented in crates/plugins (oscillator table and noise sample read from FL's data at runtime), docs/plugins/bassdrum.md |
 | Generator | BooBass | 3599 | yes | 3 | implemented in crates/plugins (samples read from FL's BooBass_Eng_x64.dll at runtime), docs/plugins/boobass.md |
@@ -81,8 +81,8 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Generator | Sakura | 4194 | yes | 3 | |
 | Effect | Fruity Fast LP | 3664 | yes | 2 | implemented in crates/plugins, docs/plugins/fruity-fast-lp.md |
 | Effect | Fruity Free Filter | 3689 | yes | 2 | |
-| Effect | Fruity NoteBook | 3526 |  | 2 | |
-| Effect | Fruity Wrapper | 5856 |  | 2 | |
+| Effect | Fruity NoteBook | 3526 |  | 2 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
+| Effect | Fruity Wrapper | 5856 |  | 2 | implemented in crates/plugins (only what FL's project loader does with it: every corpus wrapper holds the FL 11 to 13 VST build of one of FL's own effects, which `FLEngine_x64.dll` swaps for the effect itself at its defaults and moves to the VST chunk's parameters; that swap is exact, and hosts the wrapped Balance, Chorus, Compressor, Fast LP and Filter, 23 of the 36 corpus states; the wrapped Bass Boost, Center, Flanger, Free Filter, Mute 2, Phase Inverter, Phaser and Reeverb are not built and passed through, and a third-party VST, none in the corpus, is never hosted), docs/plugins/fruity-wrapper.md |
 | Effect | Hardcore | 626 | yes | 2 | |
 | Effect | Transporter | 4072 | yes | 2 | |
 | Generator | Drumpad | 4008 | yes | 2 | implemented in crates/plugins (state, the 38 parameters with their velocity slots, the membrane lines, mallet, LOW, MID, HIGH and SOF filters, hold, lo-fi, the 38 kHz render and its resampler exact, and every shipped state plays exact; approximated: 32 voices where FL has 99, membrane room sized per state, each instance's noise starting where FL's first does, DMP1 and DMP2 states turned down), docs/plugins/drumpad.md |
@@ -95,14 +95,14 @@ Corpus render at `20f0570`: 112 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Bass Boost | 3664 | yes | 1 | |
 | Effect | Fruity Delay | 3685 |  | 1 | |
 | Effect | Fruity Formula Controller | 3779 |  | 1 | |
-| Effect | Fruity HTML NoteBook | 3835 |  | 1 | |
+| Effect | Fruity HTML NoteBook | 3835 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `FPF_NoProcess`, so FL never calls its abstract `Eff_Render`), docs/plugins/fruity-notebook.md |
 | Effect | Fruity Reeverb | 3627 | yes | 1 | |
 | Effect | Fruity Scratcher | 4172 | yes | 1 | |
 | Effect | Fruity Send | 3621 | yes | 1 | |
 | Effect | Fruity Squeeze | 3736 | yes | 1 | |
 | Effect | Fruity Vocoder | 3725 | yes | 1 | |
-| Effect | Fruity dB Meter | 3576 |  | 1 | |
-| Effect | Razer Chroma | 3952 |  | 1 | |
+| Effect | Fruity dB Meter | 3576 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` keeps the peaks and copies the block with `ippsCopy_64s`; the meter is left out), docs/plugins/fruity-db-meter.md |
+| Effect | Razer Chroma | 3952 |  | 1 | implemented in crates/plugins (the sound passes untouched, exact: `Eff_Render` reads the block for the keyboard lights and copies it with `ippsCopy_64s`; the lights are left out), docs/plugins/razer-chroma.md |
 | Effect | Vintage Phaser | 3880 |  | 1 | |
 | Generator | BeepMap | 4186 | yes | 1 | |
 | Generator | Drumaxx | 4319 | yes | 1 | |
