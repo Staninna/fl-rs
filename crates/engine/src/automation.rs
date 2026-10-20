@@ -428,6 +428,13 @@ enum Control {
     /// Of the insert with this loader number.
     InsertVolume(u16),
     InsertPan(u16),
+    InsertSeparation(u16),
+    /// A gain, frequency or width of the insert's EQ, by its control
+    /// number less 0x1FD0.
+    InsertEq {
+        insert: u16,
+        offset: u16,
+    },
     /// The level of the send from one insert to another.
     Send {
         from: u16,
@@ -586,10 +593,9 @@ fn set(control: Control, raw: f64, levels: &mut [Levels], mixer: &mut Mixer, cur
         Control::InsertVolume(insert) => {
             mixer.set_volume(insert, curves.insert_gain(raw as i32));
         }
-        Control::InsertPan(insert) => {
-            let raw = raw as i32;
-            mixer.set_pan(insert, curves.insert_pan(raw), curves.insert_cross(raw));
-        }
+        Control::InsertPan(insert) => mixer.set_pan(insert, raw as i32, curves),
+        Control::InsertSeparation(insert) => mixer.set_separation(insert, raw as i32, curves),
+        Control::InsertEq { insert, offset } => mixer.set_eq(insert, offset, raw as i32),
         Control::Send { from, to } => {
             mixer.set_send(from, to, curves.send_gain(raw as i32));
         }
@@ -904,6 +910,25 @@ impl Automation {
                 let (found, initial) = match control {
                     control::VOLUME => (Control::InsertVolume(index), strip.volume_raw()),
                     control::PAN => (Control::InsertPan(index), strip.pan_raw()),
+                    control::SEPARATION => {
+                        (Control::InsertSeparation(index), strip.separation_raw())
+                    }
+                    eq if (control::EQ_GAIN..control::EQ_WIDTH + 3).contains(&eq) => {
+                        let offset = eq - control::EQ_GAIN;
+                        let band = strip.eq_band((offset & 7) as u8)?;
+                        let initial = match offset >> 3 {
+                            0 => band.gain,
+                            1 => band.frequency,
+                            _ => band.width,
+                        };
+                        (
+                            Control::InsertEq {
+                                insert: index,
+                                offset,
+                            },
+                            initial,
+                        )
+                    }
                     send => {
                         let to = send.checked_sub(control::SEND)?;
                         let send = Control::Send { from: index, to };

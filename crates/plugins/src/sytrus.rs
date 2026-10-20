@@ -12,6 +12,13 @@
 //! filters and no delay, chorus, reverb or EQ after the voices. A state
 //! that asks for one of those says so in [`Generator::fidelity`], and
 //! every state says the operators are approximate.
+//!
+//! A host moves FL's 597 REC parameters, numbered and ranged as
+//! `ProcessParam` has them (section 6 of the doc): the main volume, LFO
+//! level and pitch, the quick ADSR, Mod X and Mod Y, which the voices
+//! glide to, the operators' and filters' wheels and every articulator's
+//! knobs are heard; the unison, chorus, delay, EQ and portamento ones are
+//! kept and read back.
 
 // The kernels index their rows and operators on purpose: the workspace
 // tests build unoptimised, and an index loop is what FL's kernel does.
@@ -82,6 +89,146 @@ const PEAK: i32 = 9;
 const HIGH_SHELF: i32 = 10;
 const COMB: i32 = 11;
 const PHASER: i32 = 12;
+
+/// FL's REC parameters: `ProcessParam` (`0x867930`) takes indexes under
+/// 0x255, and its decoder (`0x868c90`) walks the parts' REC bases.
+const PARAMS: usize = 597;
+/// The first parameter of operator `p` is `20 + 51 p`: three wheels, then
+/// six articulators of eight knobs.
+const OP_PARAM: usize = 20;
+const OP_STRIDE: usize = 51;
+/// The filters' first parameters and their wheels: filter 3 has no "to
+/// next" wheel.
+const FILTER_PARAMS: [usize; FILTERS] = [326, 400, 474];
+const FILTER_WHEELS: [usize; FILTERS] = [10, 10, 9];
+/// The main part's: 9 wheels, three delay units of five, then two
+/// articulators.
+const MAIN_PARAM: usize = 547;
+const MAIN_WHEELS: usize = 24;
+/// From here the decoder reads `k = index - 547` as a late global: 40 to
+/// 48 the EQ, 49 portamento.
+const LATE_PARAM: usize = MAIN_PARAM + 40;
+
+/// What a REC parameter is, as the decoder has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Param {
+    /// One of the first 20, or a late global (40 to 49).
+    Global(usize),
+    /// Wheel `k` of a part.
+    Wheel { part: usize, k: usize },
+    /// Knob `j` of articulator `art` of a part.
+    Knob { part: usize, art: usize, j: usize },
+}
+
+impl Param {
+    fn of(index: usize) -> Option<Param> {
+        if index >= PARAMS {
+            return None;
+        }
+        if index < OP_PARAM {
+            return Some(Param::Global(index));
+        }
+        if index >= LATE_PARAM {
+            return Some(Param::Global(index - MAIN_PARAM));
+        }
+        let part = (0..PARTS).rev().find(|p| param_base(*p).0 <= index)?;
+        let (base, wheels) = param_base(part);
+        let k = index - base;
+        Some(if k < wheels {
+            Param::Wheel { part, k }
+        } else {
+            let (art, j) = ((k - wheels) / 8, (k - wheels) % 8);
+            Param::Knob { part, art, j }
+        })
+    }
+
+    /// The control's Min, Max and DefaultValue (the editor form's, which
+    /// `0x867930` rescales a 0 to 1 by under REC_FromMIDI).
+    fn control(self) -> (i32, i32, i32) {
+        match self {
+            Param::Global(k) => match k {
+                0 => (0, 160, 128),
+                1 => (-128, 128, 128),
+                2 => (-24, 24, 0),
+                3..=10 => match (k - 3) % 4 {
+                    2 => (-128, 128, 0),
+                    _ => (0, 256, 128),
+                },
+                11 => (1, 9, 1),
+                12 => (0, 128, 128),
+                13 => (16, 128, 100),
+                14 => (0, 256, 128),
+                15 => (0, 96, 0),
+                16 => (0, 128, 16),
+                17 => (0, 192, 0),
+                18 | 19 => (0, 512, 256),
+                40..=42 => (-1800, 1800, 0),
+                43 => (0, 65_536, 8950),
+                44 => (0, 65_536, 33_145),
+                45 => (0, 65_536, 49_305),
+                46..=48 => (0, 65_536, 17_500),
+                _ => (0, 1, 0),
+            },
+            Param::Wheel { part, k } if part < OPERATORS => match k {
+                0 => (0, 256, 0),
+                1 => (-256, 256, 256),
+                _ => (0, 4800, 1200),
+            },
+            Param::Wheel { part, k } if part < ROWS => match k {
+                0 => (0, 5, 1),
+                1..=3 => (0, 256, [128, 128, 0][k - 1]),
+                4 => (0, 128, 128),
+                5 | 6 => (0, 128, 0),
+                7 => (64, 192, 128),
+                8 => (0, 128, 0),
+                _ => (-256, 256, 0),
+            },
+            Param::Wheel { k, .. } => match k {
+                0 => (-128, 128, 0),
+                1 => (0, 9, 4),
+                2 => (0, 1024, 512),
+                3 => (0, 1024, 768),
+                4 => (0, 128, 8),
+                5 => (0, 128, 128),
+                6 => (-128, 128, -32),
+                7 => (-128, 128, 128),
+                8 => (0, 128, 128),
+                _ => match (k - 9) % 5 {
+                    0 => (0, 127, 64),
+                    1 => (0, 384, 144),
+                    2 => (-512, 512, 0),
+                    3 => (-128, 128, 64),
+                    _ => (0, 2, 0),
+                },
+            },
+            Param::Knob { j, .. } => match j {
+                0 | 1 | 3 => (0, 256, KNOBS[j]),
+                2 | 5 | 6 => (-128, 128, KNOBS[j]),
+                4 => (512, 65_536, KNOBS[j]),
+                _ => (-112, 112, KNOBS[j]),
+            },
+        }
+    }
+}
+
+/// A part's first REC parameter and how many wheels it has before its
+/// articulators.
+fn param_base(part: usize) -> (usize, usize) {
+    match part {
+        0..OPERATORS => (OP_PARAM + OP_STRIDE * part, 3),
+        OPERATORS..ROWS => (
+            FILTER_PARAMS[part - OPERATORS],
+            FILTER_WHEELS[part - OPERATORS],
+        ),
+        _ => (MAIN_PARAM, MAIN_WHEELS),
+    }
+}
+
+/// Where a REC parameter that is not an articulator knob keeps its value
+/// in [`State::params`]: the index itself.
+fn param_index(part: usize, k: usize) -> usize {
+    param_base(part).0 + k
+}
 
 /// `(base^x - 1)` cut down to an f32, how FL's knob curves start.
 fn curve(base: f64, x: f64) -> f64 {
@@ -161,6 +308,28 @@ fn additive(kind: usize, index: usize) -> bool {
     }
 }
 
+/// A new articulator's eight knobs.
+const KNOBS: [i32; 8] = [128, 128, 0, 128, 40_000, 0, 0, 0];
+
+/// The quick ADSR at rest.
+const ADSR: [i32; 4] = [128, 128, 0, 128];
+
+/// An envelope's attack, decay, sustain and release knobs with the main
+/// panel's quick ADSR over them: the times scaled by `knob / 128`, the
+/// sustain offset.
+fn scaled(knobs: [i32; 4], adsr: [i32; 4]) -> [i32; 4] {
+    if adsr == ADSR {
+        return knobs;
+    }
+    let scale = |knob: i32, by: i32| (f64::from(knob) * f64::from(by) / 128.0) as i32;
+    [
+        scale(knobs[0], adsr[0]),
+        scale(knobs[1], adsr[1]),
+        knobs[2] + adsr[2],
+        scale(knobs[3], adsr[3]),
+    ]
+}
+
 /// One articulator: what moves one control of a part.
 #[derive(Debug, Clone, PartialEq)]
 struct Articulator {
@@ -177,6 +346,10 @@ struct Articulator {
     /// The Mod X and Mod Y maps, baked into tables.
     mod_x: Option<Vec<f32>>,
     mod_y: Option<Vec<f32>>,
+    /// The envelope's attack, decay, sustain and release knobs and the
+    /// LFO's speed, tension, skew and pulse width, as the stream has them:
+    /// the eight REC parameters of the articulator.
+    knobs: [i32; 8],
 }
 
 /// Where one voice is in an [`Articulator`].
@@ -204,6 +377,7 @@ impl Articulator {
             random: None,
             mod_x: None,
             mod_y: None,
+            knobs: KNOBS,
         }
     }
 
@@ -223,16 +397,12 @@ impl Articulator {
         articulator.amount = reader.f32()?;
         articulator.lfo_amount = reader.f32()?;
         let mut envelope = MEnvelope::read(reader, Class::Envelope)?;
-        if adsr != [128, 128, 0, 128] {
-            let [attack, decay, sustain, release] = adsr;
-            let scale = |knob: i32, by: i32| (f64::from(knob) * f64::from(by) / 128.0) as i32;
-            envelope.knobs[0] = scale(envelope.knobs[0], attack);
-            envelope.knobs[1] = scale(envelope.knobs[1], decay);
-            envelope.knobs[2] += sustain;
-            envelope.knobs[3] = scale(envelope.knobs[3], release);
-        }
+        articulator.knobs[..4].copy_from_slice(&envelope.knobs);
+        envelope.knobs = scaled(envelope.knobs, adsr);
         articulator.envelope = Track::new(&envelope, centre);
-        articulator.lfo = Lfo::new(&MEnvelope::read(reader, Class::Lfo)?);
+        let lfo = MEnvelope::read(reader, Class::Lfo)?;
+        articulator.knobs[4..].copy_from_slice(&lfo.knobs);
+        articulator.lfo = Lfo::new(&lfo);
         // A map nobody drew is a level line at the identity, and nothing
         // is kept for one.
         let identity = (1.0 - centre) as f32;
@@ -249,6 +419,25 @@ impl Articulator {
         articulator.mod_y = table(&maps[3]);
         articulator.random = drawn(&maps[4]);
         Ok(articulator)
+    }
+
+    /// Set knob `j` (REC order: envelope attack, decay, sustain, release,
+    /// LFO speed, tension, skew, pulse width), with the main panel's quick
+    /// ADSR `adsr` over the envelope's. This allocates nothing.
+    fn set_knob(&mut self, j: usize, value: i32, adsr: [i32; 4]) {
+        self.knobs[j] = value;
+        self.rescale(adsr);
+        if j >= 4 {
+            let [_, _, _, _, speed, tension, skew, width] = self.knobs;
+            self.lfo.set_knobs([speed, tension, skew, width]);
+        }
+    }
+
+    /// Take the envelope knobs through the quick ADSR anew.
+    fn rescale(&mut self, adsr: [i32; 4]) {
+        let [attack, decay, sustain, release, ..] = self.knobs;
+        self.envelope
+            .set_knobs(scaled([attack, decay, sustain, release], adsr));
     }
 
     fn combine(&self, a: f32, b: f32) -> f32 {
@@ -485,6 +674,8 @@ struct Filter {
     gain: f32,
     /// The waveshaper is on with some mix.
     shaper: bool,
+    /// The waveshaper's switch, without the mix.
+    shaper_on: bool,
     to_next: f32,
     articulators: Vec<Articulator>,
 }
@@ -512,6 +703,33 @@ impl Design {
 }
 
 impl Filter {
+    /// Take wheel `k` of the header, as `0x869e80` does. The envelope
+    /// wheel (1) is the cutoff articulator's amount, and the "to next"
+    /// wheel (9) wants the rows routed anew; the waveshaper's pre-amp (7)
+    /// is not built.
+    fn set_wheel(&mut self, k: usize, value: i32) {
+        match k {
+            0 => {
+                let order = value - 1;
+                self.detune = order > 2;
+                let last = if self.detune { order - 2 } else { order };
+                self.stages = usize::try_from(last + 1).unwrap_or(0).min(STAGES);
+            }
+            2 => self.cutoff = value as f32 / 256.0,
+            3 => self.resonance = value as f32 / 256.0,
+            4..=6 => {
+                self.levels[k - 4] = level(value, 128.0);
+                if k == 4 {
+                    let knob = (f64::from(value) * 0.015_625) as f32;
+                    self.gain = (curve(8.0, f64::from(knob)) * 0.125 + 0.125) as f32;
+                }
+            }
+            8 => self.shaper = self.shaper_on && value != 0,
+            9 => self.to_next = level(value, 256.0),
+            _ => {}
+        }
+    }
+
     /// Design the row for a cutoff and a resonance from 0 to 1, as Love
     /// Philter's `design` does (`docs/plugins/fruity-love-philter.md`).
     /// `scale` is `44100 / rate`.
@@ -704,6 +922,8 @@ struct State {
     fx_send: f32,
     mod_x: i32,
     mod_y: i32,
+    /// Mod X and Mod Y glide to their wheels (`ModSmoothBtn`, u8 0x440).
+    mod_smooth: bool,
     /// The matrix as levels: `fm[carrier][modulator]` in cycles of the
     /// carrier for a modulator at 1, `rm[carrier][modulator]`, the
     /// operators' sends into each filter, and every row's pan (-0.5 to
@@ -729,6 +949,9 @@ struct State {
     rm_targets: Vec<Vec<(usize, f32)>>,
     /// Who feeds each filter: the row and the level.
     filter_inputs: Vec<Vec<(usize, f32)>>,
+    /// Every REC parameter but the articulator knobs, which the
+    /// articulators keep, at its own index.
+    params: [i32; PARAMS],
 }
 
 impl State {
@@ -776,6 +999,7 @@ impl State {
                 levels: [1.0, 0.0, 0.0],
                 gain: 8.0,
                 shaper: false,
+                shaper_on: false,
                 to_next: 0.0,
                 articulators: articulators(1),
             })
@@ -790,6 +1014,7 @@ impl State {
             fx_send: 1.0,
             mod_x: 256,
             mod_y: 256,
+            mod_smooth: true,
             fm: [[0.0; OPERATORS]; OPERATORS],
             rm: [[0.0; OPERATORS]; OPERATORS],
             to_filter: [[0.0; OPERATORS]; FILTERS],
@@ -801,9 +1026,19 @@ impl State {
             main: articulators(2),
             effects: false,
             active: [false; ROWS],
-            fm_targets: vec![Vec::new(); OPERATORS],
-            rm_targets: vec![Vec::new(); OPERATORS],
-            filter_inputs: vec![Vec::new(); FILTERS],
+            // Room for every target, so that routing anew allocates
+            // nothing.
+            fm_targets: (0..OPERATORS)
+                .map(|_| Vec::with_capacity(OPERATORS))
+                .collect(),
+            rm_targets: (0..OPERATORS)
+                .map(|_| Vec::with_capacity(OPERATORS))
+                .collect(),
+            filter_inputs: (0..FILTERS).map(|_| Vec::with_capacity(ROWS)).collect(),
+            params: std::array::from_fn(|index| match Param::of(index) {
+                Some(param @ (Param::Global(_) | Param::Wheel { .. })) => param.control().2,
+                _ => 0,
+            }),
         };
         state.route();
         state
@@ -863,7 +1098,8 @@ impl State {
         state.mod_y = reader.i32()?;
         let _smoothing = reader.f32()?;
         reader.bytes(0x440 - 0x430)?;
-        let _flags = reader.bytes(4)?;
+        let flags = reader.bytes(4)?;
+        state.mod_smooth = flags[0] != 0;
         reader.bytes(8)?;
         let mutes = reader.bytes(2 * ROWS * ROWS)?;
         for (cell, mute) in fm.iter_mut().zip(mutes) {
@@ -876,6 +1112,13 @@ impl State {
                 *cell = 0;
             }
         }
+        let params = &mut state.params;
+        params[..3].copy_from_slice(&globals);
+        params[3..11].copy_from_slice(&adsr);
+        params[11..18].copy_from_slice(&unison);
+        params[18] = state.mod_x;
+        params[19] = state.mod_y;
+        params[MAIN_PARAM..MAIN_PARAM + 9].copy_from_slice(&main);
         state.main_volume = level(globals[0], 128.0);
         state.main_pitch = globals[2] as f32 * 100.0;
         state.unison = unison[0];
@@ -915,12 +1158,19 @@ impl State {
                 18 => 8,
                 _ => 9,
             };
-            reader.bytes(count)?;
+            let flags = reader.bytes(count)?;
+            // 0x4f8, the portamento switch, is REC 596.
+            if let Some(porta) = flags.get(1) {
+                state.params[PARAMS - 1] = i32::from(*porta);
+            }
         }
         let mut effects = false;
-        for _ in 0..3 {
+        for unit in 0..3 {
             let delay = reader.bytes(23)?;
             effects |= delay[20] != 0;
+            for (j, word) in delay[..20].as_chunks::<4>().0.iter().enumerate() {
+                state.params[param_index(9, 9 + 5 * unit + j)] = i32::from_le_bytes(*word);
+            }
         }
         if version >= 10 {
             let reverb = reader.bytes(if version == 10 { 37 } else { 38 })?;
@@ -929,8 +1179,17 @@ impl State {
         if version > 2 {
             let eq = reader.i32()?;
             effects |= eq != 0;
-            let band = if version < 14 { 12 } else { 16 };
-            reader.bytes(3 * band)?;
+            let size = if version < 14 { 12 } else { 16 };
+            let bands = reader.bytes(3 * size)?;
+            // Level, frequency and width of each band: REC 587 + 3 field
+            // + band.
+            for band in 0..3 {
+                for field in 0..3 {
+                    let at = band * size + 4 * field;
+                    let word = [bands[at], bands[at + 1], bands[at + 2], bands[at + 3]];
+                    state.params[LATE_PARAM + 3 * field + band] = i32::from_le_bytes(word);
+                }
+            }
         }
         // The chorus is on with an order above 0.
         effects |= main[1] > 0;
@@ -953,23 +1212,6 @@ impl State {
             reader.bytes(2 * len)?;
         }
 
-        let adsr_of = |kind: usize, part: usize, index: usize| -> [i32; 4] {
-            let group = if kind == 1 && part < 2 && matches!(index, 2 | 3) {
-                Some(1)
-            } else if index == 1 {
-                Some(0)
-            } else {
-                None
-            };
-            group.map_or([128, 128, 0, 128], |g| {
-                [
-                    adsr[4 * g],
-                    adsr[4 * g + 1],
-                    adsr[4 * g + 2],
-                    adsr[4 * g + 3],
-                ]
-            })
-        };
         for part in 0..PARTS {
             let mut header = [0i32; 10];
             for word in &mut header {
@@ -980,6 +1222,12 @@ impl State {
                 OPERATORS..ROWS => 1,
                 _ => 2,
             };
+            // An operator's and a filter's wheels are the header's first
+            // words; the main part's are at 0x3fc.
+            if kind < 2 {
+                let (base, wheels) = param_base(part);
+                state.params[base..base + wheels].copy_from_slice(&header[..wheels]);
+            }
             if kind == 0 {
                 let operator = &mut state.operators[part];
                 operator.phase = header[0] as f32 / 256.0;
@@ -1011,16 +1259,9 @@ impl State {
             } else if kind == 1 {
                 let index = part - OPERATORS;
                 let filter = &mut state.filters[index];
-                let order = header[0] - 1;
-                filter.detune = order > 2;
-                let last = if filter.detune { order - 2 } else { order };
-                filter.stages = usize::try_from(last + 1).unwrap_or(0).min(STAGES);
-                filter.cutoff = header[2] as f32 / 256.0;
-                filter.resonance = header[3] as f32 / 256.0;
-                filter.levels = [header[4], header[5], header[6]].map(|v| level(v, 128.0));
-                let knob = (f64::from(header[4]) * 0.015_625) as f32;
-                filter.gain = (curve(8.0, f64::from(knob)) * 0.125 + 0.125) as f32;
-                filter.to_next = level(header[9], 256.0);
+                for k in [0, 2, 3, 4, 5, 6, 9] {
+                    filter.set_wheel(k, header[k]);
+                }
                 let block = reader.bytes(if version < 9 { 0x29 } else { 0x30 })?;
                 let word = |at: usize| {
                     block
@@ -1028,18 +1269,16 @@ impl State {
                         .map_or(0, |w| i32::from_le_bytes([w[0], w[1], w[2], w[3]]))
                 };
                 filter.kind = word(0x2c).clamp(0, PHASER);
-                filter.shaper = word(0x28) != 0 && header[8] != 0;
+                filter.shaper_on = word(0x28) != 0;
+                filter.set_wheel(8, header[8]);
                 let _shaper = MEnvelope::read(reader, Class::Map)?;
                 if version >= 12 {
                     reader.u8()?;
                 }
             }
             for index in 0..COUNTS[kind] {
-                let articulator = Articulator::read(
-                    reader,
-                    additive(kind, index),
-                    adsr_of(kind, part.saturating_sub(OPERATORS), index),
-                )?;
+                let articulator =
+                    Articulator::read(reader, additive(kind, index), state.adsr(part, index))?;
                 match kind {
                     0 => state.operators[part].articulators[index] = articulator,
                     1 => state.filters[part - OPERATORS].articulators[index] = articulator,
@@ -1060,6 +1299,27 @@ impl State {
         }
         state.route();
         Ok(state)
+    }
+
+    /// The main panel's quick ADSR over the envelope of articulator `index`
+    /// of `part`: group 0 (REC 3 to 6) over every volume articulator,
+    /// group 1 (7 to 10) over the cutoff and resonance of filters 1 and 2.
+    fn adsr(&self, part: usize, index: usize) -> [i32; 4] {
+        let filter = (OPERATORS..OPERATORS + 2).contains(&part);
+        let group = if filter && matches!(index, 2 | 3) {
+            1
+        } else if index == 1 {
+            0
+        } else {
+            return ADSR;
+        };
+        let at = 3 + 4 * group;
+        [
+            self.params[at],
+            self.params[at + 1],
+            self.params[at + 2],
+            self.params[at + 3],
+        ]
     }
 
     /// Work out which rows sound and who feeds whom.
@@ -1133,6 +1393,103 @@ impl State {
             0..OPERATORS => &self.operators[part].articulators,
             OPERATORS..ROWS => &self.filters[part - OPERATORS].articulators,
             _ => &self.main,
+        }
+    }
+
+    fn articulators_mut(&mut self, part: usize) -> &mut [Articulator] {
+        match part {
+            0..OPERATORS => &mut self.operators[part].articulators,
+            OPERATORS..ROWS => &mut self.filters[part - OPERATORS].articulators,
+            _ => &mut self.main,
+        }
+    }
+
+    /// What REC parameter `index` is at: what `0x867930` reads back.
+    fn param(&self, index: usize) -> Option<i32> {
+        Some(match Param::of(index)? {
+            Param::Knob { part, art, j } => self.articulators(part).get(art)?.knobs[j],
+            _ => self.params[index],
+        })
+    }
+
+    /// Set REC parameter `index`, inside its control's range, and do what
+    /// `0x867930` does after it stores one. Allocates nothing: routing
+    /// anew pushes into lists that have room for every target.
+    fn set_param(&mut self, index: usize, value: f32) {
+        let Some(param) = Param::of(index) else {
+            return;
+        };
+        let (min, max, _) = param.control();
+        let value = crate::knob_value(value, (min, max));
+        match param {
+            Param::Knob { part, art, j } => {
+                let adsr = self.adsr(part, art);
+                if let Some(articulator) = self.articulators_mut(part).get_mut(art) {
+                    articulator.set_knob(j, value, adsr);
+                }
+                return;
+            }
+            _ => self.params[index] = value,
+        }
+        match param {
+            // `0x86a1d0`: the main volume and pitch, and the LFO level,
+            // which every articulator takes as its LFO amount and a
+            // filter's cutoff as its envelope amount times it.
+            Param::Global(0) => self.main_volume = level(value, 128.0),
+            Param::Global(1) => {
+                let lfo = level(value, 128.0);
+                for part in 0..PARTS {
+                    for articulator in self.articulators_mut(part) {
+                        articulator.lfo_amount = lfo;
+                    }
+                }
+                for filter in &mut self.filters {
+                    let cutoff = &mut filter.articulators[2];
+                    cutoff.lfo_amount = cutoff.amount * lfo;
+                }
+            }
+            Param::Global(2) => self.main_pitch = value as f32 * 100.0,
+            // The quick ADSR scales the envelopes it is over.
+            Param::Global(3..=10) => {
+                for part in 0..PARTS {
+                    for art in 0..self.articulators(part).len() {
+                        let adsr = self.adsr(part, art);
+                        self.articulators_mut(part)[art].rescale(adsr);
+                    }
+                }
+            }
+            Param::Global(11) => self.unison = value,
+            // `0x86a3e0`; the voices glide to them a tick at a time.
+            Param::Global(18) => self.mod_x = value,
+            Param::Global(19) => self.mod_y = value,
+            // `0x86a730` and `0x869e30`.
+            Param::Wheel { part, k } if part < OPERATORS => {
+                let operator = &mut self.operators[part];
+                match k {
+                    0 => operator.phase = value as f32 / 256.0,
+                    1 => operator.volume = value as f32 / 256.0,
+                    _ => operator.range = value as f32,
+                }
+            }
+            // `0x869e80`, and `0x865120` routes the rows anew after the
+            // "to next" wheel.
+            Param::Wheel { part, k } if part < ROWS => {
+                let lfo = level(self.params[1], 128.0);
+                let filter = &mut self.filters[part - OPERATORS];
+                filter.set_wheel(k, value);
+                if k == 1 {
+                    let cutoff = &mut filter.articulators[2];
+                    cutoff.amount = value as f32 / 128.0;
+                    cutoff.lfo_amount = cutoff.amount * lfo;
+                }
+                if k == 9 {
+                    self.route();
+                }
+            }
+            Param::Wheel { k: 8, .. } => self.fx_send = level(value, 128.0),
+            // The unison, the chorus, the delays, the EQ and portamento
+            // are kept but not built.
+            _ => {}
         }
     }
 
@@ -1243,11 +1600,15 @@ fn flushed(state: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq)]
 struct Voice {
     id: u32,
-    /// The note's pitch in cents from C5, with the main pitch in it.
+    /// The note's pitch in cents from C5, without and with the main pitch.
+    key_pitch: f32,
     pitch: f32,
     velocity: f32,
     pan: f32,
-    /// Where Mod X and Mod Y are in their tables.
+    /// Mod X and Mod Y as they glide to the wheels, the note's own on top
+    /// of them, and where the two come to in the tables.
+    mods: [f32; 2],
+    offsets: [f32; 2],
     places: [usize; 2],
     operators: [OpRun; OPERATORS],
     filters: [FilterRun; FILTERS],
@@ -1276,11 +1637,29 @@ struct Timing {
     scale: f32,
     /// What a fade loses a sample.
     fade_step: f32,
+    /// What is left a tick of the way Mod X and Mod Y have to go: 1 % in
+    /// 0.209 s (`0x8658b7`).
+    mod_glide: f32,
+}
+
+/// Where a Mod X or Mod Y map is read: the wheel and the note's own, in
+/// 512ths, to the nearest step.
+fn place(wheel: f32, offset: f32) -> usize {
+    (f64::from(wheel + offset * 256.0).round_ties_even()).clamp(0.0, MAP as f64) as usize
+}
+
+/// What an operator's phase moves by a sample at `pitch` cents from C5,
+/// before its pitch articulator (`0x872210`).
+fn op_pitch(operator: &Operator, pitch: f32, rate: f32) -> f64 {
+    let base = C5 * (f64::from(pitch) / 1200.0).exp2() / f64::from(rate);
+    base * f64::from(operator.ratio) / RATIO_UNIT
+        + f64::from(operator.offset) / (100.0 * f64::from(rate))
 }
 
 impl Voice {
     fn new(note: &NoteOn, state: &State, timing: Timing, seed: &mut u32) -> Self {
-        let pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch + state.main_pitch;
+        let key_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
+        let pitch = key_pitch + state.main_pitch;
         let key = f64::from((pitch / 100.0 + 60.0) / 120.0).clamp(0.0, 1.0);
         // FL's velocity of a note is the host's gain turned back into 0..1
         // of 128.
@@ -1288,10 +1667,6 @@ impl Voice {
             .clamp(0.0, 1.0);
         *seed = seed.wrapping_mul(0x0808_8405).wrapping_add(1);
         let random = f64::from(*seed) / f64::from(u32::MAX);
-        let place = |wheel: i32, offset: f32| {
-            (f64::from(wheel as f32 + offset * 256.0).round_ties_even()).clamp(0.0, MAP as f64)
-                as usize
-        };
         let mut articulators = [ArtRun {
             run: state.main[0].envelope.start(1.0),
             lfo: state.main[0].lfo.start(1.0),
@@ -1318,9 +1693,7 @@ impl Voice {
         }; OPERATORS];
         for (op, run) in operators.iter_mut().enumerate() {
             let operator = &state.operators[op];
-            let base = C5 * (f64::from(pitch) / 1200.0).exp2() / f64::from(timing.rate);
-            run.pitch = base * f64::from(operator.ratio) / RATIO_UNIT
-                + f64::from(operator.offset) / (100.0 * f64::from(timing.rate));
+            run.pitch = op_pitch(operator, pitch, timing.rate);
             run.phase = f64::from(operator.phase);
             if operator.free_run {
                 *seed = seed.wrapping_mul(0x0808_8405).wrapping_add(1);
@@ -1328,15 +1701,17 @@ impl Voice {
             }
             run.phase -= run.phase.floor();
         }
+        let mods = [state.mod_x as f32, state.mod_y as f32];
+        let offsets = [note.mod_x, note.mod_y];
         Voice {
             id: note.voice,
+            key_pitch,
             pitch,
             velocity: note.velocity,
             pan: note.pan,
-            places: [
-                place(state.mod_x, note.mod_x),
-                place(state.mod_y, note.mod_y),
-            ],
+            mods,
+            offsets,
+            places: [place(mods[0], offsets[0]), place(mods[1], offsets[1])],
             operators,
             filters: [FilterRun::rest(); FILTERS],
             articulators,
@@ -1370,6 +1745,26 @@ impl Voice {
         let len = len.max(1) as f32;
         let snap = self.first;
         self.first = false;
+        // The main pitch retunes the operators (`0x872290` calls `0x872210`
+        // when the note's pitch and it come to another sum).
+        let pitch = self.key_pitch + state.main_pitch;
+        if pitch != self.pitch {
+            self.pitch = pitch;
+            for (run, operator) in self.operators.iter_mut().zip(&state.operators) {
+                run.pitch = op_pitch(operator, pitch, timing.rate);
+            }
+        }
+        // Mod X and Mod Y glide to the wheels a tick at a time, or jump
+        // with smoothing off.
+        for (i, wheel) in [state.mod_x, state.mod_y].into_iter().enumerate() {
+            let wheel = wheel as f32;
+            self.mods[i] = if state.mod_smooth {
+                wheel + (self.mods[i] - wheel) * timing.mod_glide
+            } else {
+                wheel
+            };
+            self.places[i] = place(self.mods[i], self.offsets[i]);
+        }
         for part in 0..PARTS {
             if part < ROWS && !state.active[part] {
                 continue;
@@ -1621,6 +2016,7 @@ impl Sytrus {
             rates: [seconds * 2.0, seconds * self.tempo / 60.0],
             scale: (44_100.0 / f64::from(self.rate)) as f32,
             fade_step: (1.0 / (FADE * f64::from(self.rate))) as f32,
+            mod_glide: 0.01f64.powf(seconds * 44_100.0 / (96.0 * 96.0)) as f32,
         }
     }
 }
@@ -1711,12 +2107,19 @@ impl Generator for Sytrus {
         }
     }
 
-    /// Sytrus's 597 REC parameters are not moved from outside yet.
-    fn param(&self, _index: usize) -> f32 {
-        0.0
+    /// FL's 597 REC parameters, numbered as `0x868c90` numbers them.
+    fn param_count(&self) -> usize {
+        PARAMS
     }
 
-    fn set_param(&mut self, _index: usize, _value: f32) {}
+    fn param(&self, index: usize) -> f32 {
+        self.state.param(index).unwrap_or(0) as f32
+    }
+
+    /// The notes that sound hear it from their next tick.
+    fn set_param(&mut self, index: usize, value: f32) {
+        self.state.set_param(index, value);
+    }
 
     fn reset(&mut self) {
         self.voices.clear();
@@ -1839,6 +2242,179 @@ mod tests {
     }
 
     #[test]
+    fn the_rec_parameters_are_numbered_as_the_decoder_walks_the_parts() {
+        let of = |index| Param::of(index).unwrap();
+        assert_eq!(of(18), Param::Global(18));
+        assert_eq!(of(19), Param::Global(19));
+        // Operator 2's volume wheel, then its first articulator's attack.
+        assert_eq!(of(72), Param::Wheel { part: 1, k: 1 });
+        assert_eq!(
+            of(74),
+            Param::Knob {
+                part: 1,
+                art: 0,
+                j: 0
+            }
+        );
+        // The filters' cutoffs, and filter 2's last knob.
+        assert_eq!(of(328), Param::Wheel { part: 6, k: 2 });
+        assert_eq!(of(476), Param::Wheel { part: 8, k: 2 });
+        assert_eq!(
+            of(473),
+            Param::Knob {
+                part: 7,
+                art: 7,
+                j: 7
+            }
+        );
+        // Filter 3 has no "to next" wheel.
+        assert_eq!(
+            of(483),
+            Param::Knob {
+                part: 8,
+                art: 0,
+                j: 0
+            }
+        );
+        // The main part: chorus, delay unit 1, its articulators.
+        assert_eq!(of(550), Param::Wheel { part: 9, k: 3 });
+        assert_eq!(of(556), Param::Wheel { part: 9, k: 9 });
+        assert_eq!(
+            of(571),
+            Param::Knob {
+                part: 9,
+                art: 0,
+                j: 0
+            }
+        );
+        assert_eq!(
+            of(586),
+            Param::Knob {
+                part: 9,
+                art: 1,
+                j: 7
+            }
+        );
+        // The late globals: the EQ and portamento.
+        assert_eq!(of(587), Param::Global(40));
+        assert_eq!(of(596), Param::Global(49));
+        assert_eq!(Param::of(597), None);
+
+        let mut sytrus = blank();
+        assert_eq!(sytrus.param_count(), 597);
+        let read: Vec<f32> = [0, 2, 13, 18, 72, 328, 556, 571, 575, 591]
+            .iter()
+            .map(|i| sytrus.param(*i))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                128.0, 0.0, 100.0, 256.0, 256.0, 128.0, 64.0, 128.0, 40_000.0, 33_145.0
+            ]
+        );
+        // Each inside its control.
+        for (index, value, kept) in [
+            (18, 999.0, 512.0),
+            (0, 999.0, 160.0),
+            (2, -99.0, -24.0),
+            (476, -5.0, 0.0),
+            (326, 9.0, 5.0),
+            (333, 0.0, 64.0),
+            (575, 0.0, 512.0),
+            (578, 999.0, 112.0),
+            (560, 9.0, 2.0),
+            (587, -9999.0, -1800.0),
+            (596, 7.0, 1.0),
+        ] {
+            sytrus.set_param(index, value);
+            assert_eq!(sytrus.param(index), kept, "{index}");
+        }
+        assert_eq!(sytrus.state.main[0].knobs[4], 512);
+        assert_eq!(sytrus.state.main_pitch, -2400.0);
+    }
+
+    #[test]
+    fn every_state_s_rec_parameters_read_back_what_it_holds() {
+        let Some(root) = testing::corpus() else {
+            eprintln!("FL_RS_CORPUS unset, Sytrus's parameters skipped");
+            return;
+        };
+        let ours = |saved: &testing::Saved| saved.plugin.eq_ignore_ascii_case(NAME);
+        for saved in testing::projects(&root).into_iter().filter(ours) {
+            let mut sytrus = Sytrus::default();
+            if sytrus.set_state(&saved.state).is_err() {
+                continue;
+            }
+            let state = sytrus.state.clone();
+            // Setting each to what it reads changes nothing. The LFO level
+            // and the filters' envelope wheels are left out: they set LFO
+            // amounts, which the state keeps as FL last worked them out,
+            // to a bit or so.
+            let amounts = [1, 327, 401, 475];
+            for index in (0..PARAMS).filter(|index| !amounts.contains(index)) {
+                let value = sytrus.param(index);
+                let (min, max, _) = Param::of(index).unwrap().control();
+                if (min as f32..=max as f32).contains(&value) {
+                    sytrus.set_param(index, value);
+                    assert_eq!(sytrus.param(index), value, "{index}");
+                }
+            }
+            assert_eq!(sytrus.state.mod_x, state.mod_x);
+            assert_eq!(sytrus.state.filters, state.filters, "{}", saved.file);
+            assert_eq!(sytrus.state.out, state.out);
+            assert_eq!(sytrus.state.active, state.active);
+        }
+    }
+
+    #[test]
+    fn mod_x_glides_to_its_wheel_and_the_cutoff_and_main_pitch_are_heard() {
+        let mut sytrus = blank();
+        sytrus.note_on(note(1, 60));
+        let (mut left, mut right) = (vec![0.0; 512], vec![0.0; 512]);
+        sytrus.process(&mut left, &mut right);
+        assert_eq!(sytrus.voices[0].places, [256, 256]);
+        // 1 % of the way is left 0.209 s on.
+        sytrus.set_param(18, 0.0);
+        let len = (0.209 * RATE) as usize;
+        let (mut left, mut right) = (vec![0.0; len], vec![0.0; len]);
+        sytrus.process(&mut left, &mut right);
+        let left_over = sytrus.voices[0].mods[0];
+        assert!((left_over - 2.56).abs() < 0.6, "{left_over}");
+        // Without smoothing it jumps.
+        sytrus.state.mod_smooth = false;
+        sytrus.set_param(18, 512.0);
+        sytrus.process(&mut vec![0.0; 512], &mut vec![0.0; 512]);
+        assert_eq!(sytrus.voices[0].places[0], 512);
+
+        // Operator 1 through filter 1, a low pass, to the output.
+        let mut sytrus = blank();
+        let state = &mut sytrus.state;
+        state.out = [0.0; ROWS];
+        state.out[OPERATORS] = 1.0;
+        state.to_filter[0][0] = 1.0;
+        state.filters[0].kind = LOW;
+        state.route();
+        sytrus.set_param(328, 256.0);
+        let open = rms(&play(&mut sytrus, 72, 8192)[4096..]);
+        sytrus.set_param(328, 0.0);
+        let (mut left, mut right) = (vec![0.0; 8192], vec![0.0; 8192]);
+        sytrus.process(&mut left, &mut right);
+        let shut = rms(&left[4096..]);
+        assert!(open > 0.3 && shut < open * 0.1, "{open} {shut}");
+
+        // The main pitch retunes a note that sounds.
+        let mut sytrus = blank();
+        let turns = f64::from(C5 as f32) / f64::from(RATE);
+        let whole = (4096.0 * turns * 2.0).round() / (turns * 2.0);
+        let len = whole.round() as usize;
+        play(&mut sytrus, 60, 4096);
+        sytrus.set_param(2, 12.0);
+        let (mut left, mut right) = (vec![0.0; 2048 + len], vec![0.0; 2048 + len]);
+        sytrus.process(&mut left, &mut right);
+        assert!(partial(&left[2048..], turns * 2.0) > 0.68);
+    }
+
+    #[test]
     fn a_modulator_at_index_0_leaves_the_carrier_alone_and_at_more_bends_it() {
         let alone = play(&mut blank(), 60, 8192);
         // Operator 2 modulates operator 1 by nothing.
@@ -1902,6 +2478,7 @@ mod tests {
             levels: [1.0, 0.0, 0.0],
             gain: 1.0,
             shaper: false,
+            shaper_on: false,
             to_next: 0.0,
             articulators: Vec::new(),
         };
@@ -2030,7 +2607,7 @@ mod tests {
             sytrus.set_state(&state),
             Err(StateError::Length { .. })
         ));
-        assert_eq!(sytrus.param_count(), 0);
+        assert_eq!(sytrus.param(18), 256.0);
         assert_eq!(sytrus.fidelity(), Fidelity::Approximate("Sytrus operators"));
     }
 
