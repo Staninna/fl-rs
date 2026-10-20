@@ -51,10 +51,13 @@
 //! - Every note is of FL's first colour: the colour groups of legato and
 //!   portamento, the colours that turn them round and the filter notes are
 //!   not built.
-//! - The phaser's frequency-shift type (9) and the noise resonance type
-//!   (8) are played as the types before them.
+//! - The noise resonance and the per-note LFO value draw from a
+//!   generator of their own: FL's is a Mersenne twister seeded from the
+//!   performance counter (`FUN_0074bcf0`), so no two runs of FL agree
+//!   either.
 //! - Slide notes bend nothing (FL slides the host levels of what sounds).
 
+use crate::autogun_engine::rand_uniform;
 use crate::fl_fx::{
     Delay32, DelayKernel, FlangerSettings, FruityReverb, ReverbSettings, StereoFlanger,
 };
@@ -826,6 +829,10 @@ struct Derived {
     keytrack: f32,
     flfo: f32,
     res_offset: f32,
+    /// The noise resonance's hold in ms (0x720) and the part of it a tick
+    /// is (0x718).
+    noise_len: f64,
+    noise_rate: f64,
     res_ratio: f32,
     res_scale: f32,
     res_bias: f32,
@@ -950,6 +957,8 @@ impl Derived {
             keytrack: 1.0,
             flfo: 0.0,
             res_offset: 0.0,
+            noise_len: 2.0,
+            noise_rate: 0.0,
             res_ratio: 1.0,
             res_scale: 1024.0,
             res_bias: -0.125,
@@ -1103,6 +1112,10 @@ struct Voice {
     slide_coef: f32,
     /// The frames left of the tremolo's fade in (`voice+0x80`).
     trem_fade: i32,
+    /// The noise resonance's seed (`voice+0x1a8`) and how far through
+    /// its hold it is (`+0x1b0`).
+    noise_seed: i32,
+    noise_time: f64,
     phase_offset: f32,
     pan_offset: f32,
     pitch_offset: f32,
@@ -1168,6 +1181,8 @@ impl Voice {
             slide_ticks: 0,
             slide_coef: 1.0,
             trem_fade: 0,
+            noise_seed: 0,
+            noise_time: 0.0,
             phase_offset: 0.5,
             pan_offset: 0.0,
             pitch_offset: 0.0,
@@ -1602,6 +1617,12 @@ impl Harmless {
         d.keytrack = k(p[57]) as f32;
         d.flfo = (k(p[58]) * 6.0) as f32;
         d.res_offset = (f64::from(p[61]) / 1200.0) as f32;
+        // `ProcessParam` 61: the noise holds `(201^x - 1) 2.49 + 2.0` ms,
+        // x the wheel from 0 to 1.
+        let x = (f64::from(p[61] + 2400) * 0.000_208_333_333_333_333_35) as f32;
+        let e = ((f64::from(x) * 201f64.ln()).exp() - 1.0) as f32;
+        d.noise_len = f64::from(e) * 2.490_022_675_736_961_2 + 1.995_464_852_607_709_7;
+        d.noise_rate = d.tick as f64 / (d.noise_len * 0.001 * sr.round());
         d.res_ratio = f64::from(d.res_offset).exp2() as f32;
         let (scale, bias) = match (p[60] > 0, p[63] > 0) {
             (false, false) => (1024.0, -0.125),
@@ -1835,6 +1856,9 @@ impl Harmless {
         let spreads = FAT_PITCH[self.state.params[70].clamp(0, 2) as usize];
         for (i, spread_of) in spreads.iter().enumerate().take(n) {
             let r = global_random.unwrap_or_else(|| self.random());
+            // A seed of its own for the noise resonance (`FUN_0074bb70`).
+            self.random();
+            let self_seed = self.seed as i32;
             let slot = self.free_slot();
             let age = self.next_age;
             self.next_age += 1;
@@ -1880,6 +1904,8 @@ impl Harmless {
                 voice.variance = s * p[69] as f32 / 256.0;
             }
             voice.random = r;
+            voice.noise_seed = self_seed;
+            voice.noise_time = 0.0;
             voice.countdown = 0;
             voice.first = true;
             voice.lfo_phase = 0.0;
@@ -2271,7 +2297,30 @@ impl Harmless {
             let moved = (fc - voice.res_mt).abs();
             resonance *= (moved * moved).min(1.0);
         }
-        if resonance > 0.0 {
+        if resonance > 0.0 && self.state.selectors[1] == 8 {
+            // Noise (resonance type 8): a partial is silent with the
+            // chance `t / (t + 1)`, `t = 9999 (4 r)^3 / hold`, and the
+            // rest go up by `sqrt(t + 1)` so the power stays; the draw is
+            // held for the noise's hold (ippsRandUniform_Direct_32f,
+            // ippsThreshold_LTVal, ippsThreshold_GTVal).
+            let x = f64::from(resonance * 4.0);
+            let t = (x * x * x * 9999.0 / d.noise_len) as f32;
+            let top = t + 1.0;
+            let keep = f64::from(top).sqrt() as f32;
+            let seed = voice.noise_seed;
+            let draw = &mut voice.scratch[..n];
+            rand_uniform(draw, 0.0, top, &mut voice.noise_seed);
+            for (level, v) in voice.levels[..n].iter_mut().zip(draw.iter()) {
+                let v = if *v < t { 0.0 } else { *v };
+                *level *= if v > 0.0 { keep } else { v };
+            }
+            voice.noise_time += d.noise_rate;
+            if voice.noise_time < 1.0 {
+                voice.noise_seed = seed;
+            } else {
+                voice.noise_time = frac(voice.noise_time);
+            }
+        } else if resonance > 0.0 {
             let scale = if p[63] > 0 {
                 d.res_scale / voice.f0_hz
             } else {
@@ -2310,6 +2359,10 @@ impl Harmless {
                 * len
                 - (self.phaser_phase as f32) * table.period;
             let mix = p[71] as f32 / 1000.0;
+            let shift = self.state.selectors[2] == 9;
+            let m = p[71] as f32 * 0.001f32;
+            let bend = (f64::from(m * m * m) * LN_2 * 0.25) as f32;
+            let inv_rate = (1.0 / d.rate) as f32;
             let octaves = ((d.phaser_width - 1.0) * 8.0 + lfo * d.phaser_width_lfo * 2.0) as f64;
             for k in 0..n {
                 let shape = match p[72] {
@@ -2327,7 +2380,20 @@ impl Harmless {
                         table.wrapped(voice.hz[k], scale, offset - kt * len)
                     }
                 };
-                voice.levels[k] *= shape * mix + (1.0 - mix);
+                if shift {
+                    // Type 9 moves the partial instead: by `2^(curve
+                    // mix^3 / 4)` (`ippsExp_32f` of `curve * mix^3 ln2 /
+                    // 4`, times the partial's Hz and 1/SR, into the
+                    // bank), with the frequency weight over again.
+                    let e = f64::from(shape * bend).exp() as f32;
+                    let f = e * voice.hz[k] * inv_rate;
+                    if k > 0 {
+                        voice.bank.set_freq(k, f64::from(f));
+                        voice.alias[k] = alias_weight((f64::from(f) * d.rate) as f32);
+                    }
+                } else {
+                    voice.levels[k] *= shape * mix + (1.0 - mix);
+                }
             }
         }
         if sfx && sfx_at == 2 {
@@ -2981,13 +3047,10 @@ impl Generator for Harmless {
     }
 
     fn fidelity(&self) -> Fidelity {
-        let p = &self.state.params;
         if self.missing_compression {
             Fidelity::Approximate("Harmless without its compression preset")
-        } else if (p[71] > 0 && self.state.selectors[2] == 9)
-            || (p[59] > 0 && self.state.selectors[1] == 8)
-        {
-            Fidelity::Approximate("Harmless frequency-shift phaser or noise resonance")
+        } else if self.state.selectors[6] < 2 {
+            Fidelity::Approximate("Harmless curve lookups at quality 0 and 1")
         } else {
             Fidelity::Exact
         }
@@ -3313,6 +3376,60 @@ mod tests {
         assert_eq!(voice.trem_fade, 4410 - 512);
         render(&mut plugin, 4096);
         assert!(sounding(&plugin)[0].trem_fade < 1);
+    }
+
+    fn with_selectors(params: &[(usize, i32)], selectors: [i32; 7]) -> Harmless {
+        let mut plugin = Harmless::default();
+        plugin.set_sample_rate(44_100.0);
+        plugin.set_state(&state_of(params, selectors)).unwrap();
+        plugin
+    }
+
+    #[test]
+    fn the_noise_resonance_silences_partials_and_holds_its_draw() {
+        let mut selectors = DEFAULT_SELECTORS;
+        selectors[1] = 8;
+        let mut plugin = with_selectors(&[(59, 1000), (61, 0)], selectors);
+        // The middle of the wheel holds (201^0.5 - 1) 2.49 + 2.0 ms.
+        let hold = (201f64.sqrt() - 1.0) * 2.490_022_675_736_961_2 + 1.995_464_852_607_709_7;
+        assert!((plugin.d.noise_len - hold).abs() < 1e-5);
+        assert!((plugin.d.noise_rate * hold * 44.1 / 88.0 - 1.0).abs() < 1e-6);
+        plugin.note_on(note(60));
+        render(&mut plugin, 1);
+        let voice = sounding(&plugin)[0];
+        let seed = voice.noise_seed;
+        // At full resonance t = 9999 / hold: few partials are left, and
+        // those at sqrt(t + 1) times their level.
+        let n = voice.count;
+        let silent = voice.levels[4..n].iter().filter(|l| **l == 0.0).count();
+        assert!(silent * 10 > (n - 4) * 9, "{silent} of {}", n - 4);
+        // The draw holds for the hold's ticks, then moves on.
+        let ticks = (1.0 / plugin.d.noise_rate) as usize;
+        render(&mut plugin, 88 * (ticks - 1));
+        assert_eq!(sounding(&plugin)[0].noise_seed, seed);
+        render(&mut plugin, 88 * 2);
+        assert_ne!(sounding(&plugin)[0].noise_seed, seed);
+    }
+
+    #[test]
+    fn the_frequency_shift_phaser_bends_the_partials_a_quarter_octave_rms() {
+        let mut selectors = DEFAULT_SELECTORS;
+        selectors[2] = 9;
+        let mut plugin = with_selectors(&[(71, 1000)], selectors);
+        plugin.note_on(note(60));
+        render(&mut plugin, 1);
+        let voice = sounding(&plugin)[0];
+        let mut bent = 0;
+        for k in 4..voice.count {
+            let plain = f64::from(voice.hz[k]) / 44_100.0;
+            let octaves = (voice.bank.freq(k) / plain).log2();
+            // The curve is a sine of RMS 1: at most sqrt 2 / 4 octave.
+            assert!(octaves.abs() <= 2f64.sqrt() / 4.0 + 1e-4, "{k}: {octaves}");
+            if octaves.abs() > 1e-3 {
+                bent += 1;
+            }
+        }
+        assert!(bent > 0);
     }
 
     #[test]

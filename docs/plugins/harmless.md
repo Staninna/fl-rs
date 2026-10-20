@@ -256,7 +256,7 @@ Cases 0x36..0x62 of `ProcessParam` (read in `run4refs/FUN_0077f630`):
 | 48, 49 `FEnvAtt`, `FEnvDec` | 0x638, 0x640 | `+1 / -1` over `(SR (1001^(v/1000) - 1) 0.12 + 1)`: a step a sample, the decay's negative; 0 at 1000 | loader |
 | 50, 51 slopes | 0x700, 0x70c | `FUN_005fd4d0(t)` with `t = sign (1000001^(|v|/1000) - 1)`: record `(t, 1/|t|, ln(|t| + 1))` | loader |
 | 60, 63 `ResHzSlope`, `FResAdaptive` | 0x6ec, 0x6f0 | `FUN_00788060`: (log, fixed) 1024 / -0.125; (log, adaptive) `450560 * 2^(-27/12)` / f0 and 0.875; (linear, fixed) 0.384 / -1.5; (linear, adaptive) `168.96 * 2^(-15/12)` / f0 and 0.5 | loader |
-| 61 `FResCutOfs` | 0x6e4, 0x6e0 | `v/1200` octaves, and `2^` that | loader |
+| 61 `FResCutOfs` | 0x6e4, 0x6e0, 0x720, 0x718 | `v/1200` octaves, and `2^` that; the noise hold `0x720 = (f32)(201^((f32)((v + 2400)/4800)) - 1) * 2.49002 + 1.99546` ms (`DAT_007810a0..b8`) and `0x718 = tick / (0x720 * 0.001 * SR)` | loader |
 | 62 `FOsc` | `0x580[0]` | `v/256` | loader |
 | 65 `FatOrder` | 0x5c0, 0x5cc | the order; gain `1 - (3^(1 - 1/n) - 1)/2` (1 for one voice) | loader |
 | 67 `FatPitch` | 0x5c4 | `(41^(v/256) - 1) * 1.875` cents | loader |
@@ -540,15 +540,34 @@ host's rate factor and 88 at 44.1 kHz, from the quality selector 6's
    read at `(log2 Hz - fc - offset) * S + centre` (or linear in Hz) with S
    `0x6ec` (over f0 when adaptive), and each partial is multiplied by
    `max(max((log2(Hz/f0) + 0x6f0) * r, 0) * curve + 1, 0)` (`FUN_00784180`).
-   Resonance type 8 (`0x6c`) instead adds noise bursts (`ippsRandUniform`).
+   Resonance type 8 (the table's type `0x6c`) is noise instead: with `x =
+   4r` (`DAT_00787358 = 4.0f`), `t = (f32)(9999 x^3 / 0x720)`
+   (`DAT_00787360`), `ippsRandUniform_Direct_32f` draws `[0, t + 1)` for
+   each partial from the voice's seed (`voice+0x1a8`, a draw of the
+   plugin's generator at the trigger), `ippsThreshold_LTVal_32f_I(t, 0)`
+   and `ippsThreshold_GTVal_32f_I(0, sqrt(t + 1))` make it 0 or `sqrt(t +
+   1)`, and the levels are multiplied by it: a partial is silent with the
+   chance `t / (t + 1)` and the power stays. `voice+0x1b0 += 0x718`; under
+   1 the seed goes back to what it was, so the draw holds; else it keeps
+   the new seed and takes the fraction. The self-oscillation (16) follows
+   as for the other types. The generator (`FUN_0074bb70`, at `0x540`) is a
+   Mersenne twister the constructor seeds from the performance counter
+   (`FUN_0074bab0`, `FUN_0074bcf0`), so FL's noise is new every run;
+   `harmless.rs` draws its seeds from a generator of its own and runs
+   `autogun_engine::rand_uniform`, the port of the IPP generator.
 10. Harmonizer at position 1.
 11. Phaser (`PMix > 0`): the periodic curve at `log2 Hz * 2^((PWidth - 1) 8 +
     lfo PWidthLFO 2) * 12 N` (`PHzSlope` 0; 1 is Hz times that times 0.005;
     2 is `Hz (2 - width) N / f0`) plus `((-POfs/1000 - lfo POfsLFO) - var) N
     - motion N'` minus the key tracking; each partial times `curve * mix +
-    1 - mix`. Type 9 (`0xd1`) instead bends each partial's frequency by
-    `exp(curve * mix^3 ln2 / 4)`. The motion phase `0x750` moves by `0x758`
-    a sample.
+    1 - mix`. Type 9 (`0xd1`) leaves the levels and bends each partial's
+    frequency instead: `ippsMulC_32f_I((f32)(m^3 ln2 0.25))` on the curve
+    (`m = (f32)PMix * 0.001f`, `_DAT_00787318 = 0.25`), `ippsExp_32f`
+    (A11 at quality under 2, else A24), times the partial's Hz (`voice+0xd8`,
+    which keeps the unbent ones), times `(f32)(1/SR)`, converted into the
+    bank's frequencies; partial 0 gets its own back and partials 1.. get
+    their frequency weight again (`FUN_007454b0`), as on a pitch change.
+    The motion phase `0x750` moves by `0x758` a sample.
 12. Harmonizer at position 2.
 13. Pluck (`FUN_00784860`, voice `+0x119`): a tick count starting at
     `min(1 - Round(0.002 SR / tick), -Round(attack / tick))`, from which each
@@ -779,8 +798,11 @@ corpus is of the first): the colour groups, the colours that turn the
 boxes round and the filter notes of the 16th are not built. A `NoteOn`
 marked porta glides as `PortaBox` does.
 
-Approximated: phaser type 9 and resonance type 8 (played as plain
-curves).
+Approximated: the curve lookups at quality 0 and 1, which FL makes to
+the point below (`FUN_0077c470`, `FUN_0077c690`) and `harmless.rs`
+between the two either side. Where FL itself is random (the noise
+resonance, the LFO's per-note value) the draws are from another
+generator, as FL's are new every run.
 
 Left to the host: slide notes, which FL plays by sliding the host levels
 (`FinalLevels`) of the voices that sound and which fl-rs does not send a
