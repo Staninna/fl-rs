@@ -242,6 +242,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fruity_slicer::NAME, || {
         Box::new(crate::fruity_slicer::FruitySlicer::default())
     }),
+    (crate::fruity_slicer_2::NAME, || {
+        Box::new(crate::fruity_slicer_2::FruitySlicer2::default())
+    }),
     (crate::gms::NAME, || Box::new(crate::gms::Gms::default())),
     (crate::harmless::NAME, || {
         Box::new(crate::harmless::Harmless::default())
@@ -251,6 +254,9 @@ const GENERATORS: &[(&str, Make)] = &[
     }),
     (crate::kepler::NAME, || {
         Box::new(crate::kepler::Kepler::default())
+    }),
+    (crate::kepler_exo::NAME, || {
+        Box::new(crate::kepler_exo::KeplerExo::default())
     }),
     (crate::minisynth::NAME, || {
         Box::new(crate::minisynth::MiniSynth::default())
