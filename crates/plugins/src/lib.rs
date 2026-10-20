@@ -139,6 +139,7 @@ pub mod vintage_chorus;
 pub mod vintage_phaser;
 pub mod vocodex;
 pub mod wave_candy;
+pub mod wave_traveller;
 pub mod waveshaper;
 pub mod wrapper;
 pub mod xy_controller;
