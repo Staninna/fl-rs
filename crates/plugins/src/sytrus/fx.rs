@@ -16,9 +16,10 @@
 //! 5. EQ mode 1: the EQ on the dry bus.
 //! 6. With 0x4f5 on, a two-pole high pass at about 33 Hz on the dry bus.
 //!
-//! The classes are `fl_fx`'s. FL runs the voices oversampled by `2^L` and
-//! the effects at up to four times the rate when the oversampling select
-//! (u8 0x438 while playing) is above 0; here both run at the rate.
+//! The classes are `fl_fx`'s. With the oversampling select (`L`, the i32
+//! 0x438) above 0 the voices run at `2^L` times the rate: both buses are
+//! halved down to at most four times it before the effects, the dry bus
+//! the rest of the way after them, then the high pass runs.
 
 use crate::fl_fx::{
     Delay32, DelayKernel, FlangerSettings, FruityReverb, ReverbSettings, StereoFlanger,
@@ -172,10 +173,70 @@ impl Band {
     }
 }
 
+/// The most halvings: `DQOverSelect` runs 0 to 6.
+pub(super) const LEVELS: usize = 7;
+/// The allpasses of the two chains of a halving (`0x8f71e0`, the table
+/// `0x8421d0` copies for both sides; its last number, 0.5, scales the sum).
+const HALF_BAND: [[f64; 3]; 2] = [
+    [
+        0.147_377_113_601_046_6,
+        0.482_468_542_769_700_1,
+        0.883_005_025_769_373_1,
+    ],
+    [
+        0.039_151_597_734_460_045,
+        0.302_646_848_328_493_4,
+        0.674_615_918_546_963_9,
+    ],
+];
+
+/// FL's decimator (`0x841e40`): a stereo half-band filter for every
+/// halving, two chains of three allpasses on the even and the odd samples
+/// whose sum is halved (the SSE kernel `0x841cd0`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Decimator {
+    /// Per level, side, chain and allpass: its last input and output.
+    state: [[[[[f64; 2]; 3]; 2]; 2]; LEVELS],
+}
+
+impl Decimator {
+    /// Halve the first `2 n` frames of each side into their first `n`, in
+    /// place, with the filter of `level`.
+    fn halve(&mut self, level: usize, sides: [&mut [f32]; 2], n: usize) {
+        for (side, buffer) in sides.into_iter().enumerate() {
+            let chains = &mut self.state[level][side];
+            for i in 0..n {
+                let mut sum = 0.0;
+                for (chain, passes) in chains.iter_mut().enumerate() {
+                    let mut x = f64::from(buffer[2 * i + chain]);
+                    for (memory, c) in passes.iter_mut().zip(&HALF_BAND[chain]) {
+                        let y = memory[0] + (x - memory[1]) * c;
+                        *memory = [x, y];
+                        x = y;
+                    }
+                    sum += x;
+                }
+                buffer[i] = (sum * 0.5) as f32;
+            }
+            for memory in chains.iter_mut().flatten().flatten() {
+                if memory.abs() < f64::from(f32::MIN_POSITIVE) {
+                    *memory = 0.0;
+                }
+            }
+        }
+    }
+}
+
 /// The post chain.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Effects {
+    /// The effects' rate: the host's times `min(2^L, 4)`.
     rate: f64,
+    /// The host's rate, the voices' halvings down to it (`L`, the i32
+    /// 0x438) and the decimators of the dry and the send bus.
+    host: f64,
+    levels: usize,
+    decimators: [Decimator; 2],
     tempo: f64,
     chorus: StereoFlanger,
     chorus_on: bool,
@@ -204,6 +265,9 @@ impl Default for Effects {
     fn default() -> Self {
         Effects {
             rate: 44_100.0,
+            host: 44_100.0,
+            levels: 0,
+            decimators: [Decimator::default(); 2],
             tempo: 120.0,
             chorus: StereoFlanger::default(),
             chorus_on: false,
@@ -225,12 +289,23 @@ impl Default for Effects {
 }
 
 impl Effects {
-    /// Make the memory the state's effects need at this rate and start
-    /// them fresh. The delays have room for their longest time down to 20
-    /// BPM and the reverb for its longest predelay. This allocates.
-    pub(super) fn build(&mut self, saved: &Saved, wheels: &Wheels<'_>, rate: f32, tempo: f64) {
-        self.rate = f64::from(rate);
-        let hz = rate.round() as i32;
+    /// Make the memory the state's effects need at the host's `rate` with
+    /// the voices `levels` halvings above it, and start them fresh. The
+    /// effects run at `min(2^levels, 4)` times the rate (`0x8737a0`). The
+    /// delays have room for their longest time down to 20 BPM and the
+    /// reverb for its longest predelay. This allocates.
+    pub(super) fn build(
+        &mut self,
+        saved: &Saved,
+        wheels: &Wheels<'_>,
+        (rate, levels): (f32, usize),
+        tempo: f64,
+    ) {
+        self.host = f64::from(rate);
+        self.levels = levels.min(LEVELS - 1);
+        self.rate = self.host * f64::from(1u32 << self.levels.min(2));
+        self.decimators = [Decimator::default(); 2];
+        let hz = self.rate.round() as i32;
         self.chorus.make_room(self.rate);
         self.chorus.fresh();
         self.chorus_on = false;
@@ -368,9 +443,10 @@ impl Effects {
             let fields = [wheels.eq[b], wheels.eq[3 + b], wheels.eq[6 + b]];
             band.design(saved.eq_types[b] + 6, fields, rate);
         }
-        // The high pass: `1.0070235 / rate` and 0.96 (`0x8629d0`).
+        // The high pass, at the host's rate: `1.0070235 / rate` and 0.96
+        // (`0x8629d0`).
         self.high_pass = saved.high_pass;
-        self.pass_step = (1.007_023_5 / rate) as f32;
+        self.pass_step = (1.007_023_5 / self.host) as f32;
     }
 
     /// The four buses the voices add into for the next `len` frames: dry
@@ -392,11 +468,25 @@ impl Effects {
         })
     }
 
-    /// Run the chain over the `len` frames the voices put in the buses
-    /// and add the dry bus to the output. `voices` is how many sound and
-    /// `send` whether they use the send bus (u8 0x632c).
+    /// Run the chain over the frames the voices put in the buses, `2^L`
+    /// for every output frame, and add the dry bus to the output. `voices`
+    /// is how many sound and `send` whether they use the send bus (u8
+    /// 0x632c).
     pub(super) fn run(&mut self, voices: usize, send: bool, left: &mut [f32], right: &mut [f32]) {
-        let len = left.len().min(right.len()).min(CHUNK);
+        let out = left.len().min(right.len()).min(CHUNK >> self.levels);
+        // Down to the effects' rate, both buses (`0x8737a0`).
+        let mut len = out << self.levels;
+        {
+            let (dry, rest) = self.buses.split_at_mut(2 * CHUNK);
+            let (wet, _) = rest.split_at_mut(2 * CHUNK);
+            let (dl, dr) = dry.split_at_mut(CHUNK);
+            let (wl, wr) = wet.split_at_mut(CHUNK);
+            for level in (2..self.levels).rev() {
+                len /= 2;
+                self.decimators[0].halve(level, [&mut *dl, &mut *dr], len);
+                self.decimators[1].halve(level, [&mut *wl, &mut *wr], len);
+            }
+        }
         if !send {
             self.countdown = 0;
         } else if voices == 0 {
@@ -478,6 +568,12 @@ impl Effects {
                 band.run(dl, dr);
             }
         }
+        // The dry bus down to the host's rate.
+        for level in (0..self.levels.min(2)).rev() {
+            len /= 2;
+            self.decimators[0].halve(level, [&mut *dl, &mut *dr], len);
+        }
+        let (dl, dr) = (&mut dl[..len], &mut dr[..len]);
         if self.high_pass {
             let (g, k) = (f64::from(self.pass_step), f64::from(0.96f32));
             for (side, bus) in [&mut *dl, &mut *dr].into_iter().enumerate() {
@@ -514,11 +610,13 @@ impl Effects {
         self.reverb_on = false;
         self.bands = [Band::default(); 3];
         self.pass = [[0.0; 2]; 2];
+        self.decimators = [Decimator::default(); 2];
         self.countdown = 0;
         self.configure(saved, wheels, self.tempo);
     }
 
-    /// How long the effects sound on after the voices, in frames.
+    /// How long the effects sound on after the voices, in the host's
+    /// frames.
     pub(super) fn tail(&self) -> usize {
         let mut tail = 0.0f64;
         if self.chorus_on {
@@ -538,7 +636,7 @@ impl Effects {
             tail += f64::from(self.reverb.settings().decay) * 1.5
                 + f64::from(self.reverb.settings().predelay);
         }
-        tail.min(60.0 * self.rate) as usize
+        (tail.min(60.0 * self.rate) * self.host / self.rate) as usize
     }
 }
 
@@ -614,7 +712,7 @@ mod tests {
     fn the_send_bus_is_heard_only_through_the_effects() {
         let setup = Setup::new();
         let mut fx = Effects::default();
-        fx.build(&Saved::default(), &setup.wheels(), RATE, 120.0);
+        fx.build(&Saved::default(), &setup.wheels(), (RATE, 0), 120.0);
         let tone = sine(0.01, 4096);
         // No effect on: the send goes nowhere and the dry bus passes.
         assert!(run(&mut fx, &[0.0; 4096], &tone).iter().all(|v| *v == 0.0));
@@ -630,7 +728,7 @@ mod tests {
         let mut saved = Saved::default();
         saved.delay_flags[0] = [1, 0, 1];
         let mut fx = Effects::default();
-        fx.build(&saved, &setup.wheels(), RATE, 120.0);
+        fx.build(&saved, &setup.wheels(), (RATE, 0), 120.0);
         let mut send = vec![0.0; 48_000];
         send[0] = 1.0;
         let out = run(&mut fx, &[0.0; 48_000], &send);
@@ -663,7 +761,7 @@ mod tests {
             ..Saved::default()
         };
         let mut fx = Effects::default();
-        fx.build(&saved, &setup.wheels(), RATE, 120.0);
+        fx.build(&saved, &setup.wheels(), (RATE, 0), 120.0);
         let mut send = vec![0.0; 24_000];
         send[0] = 1.0;
         let out = run(&mut fx, &[0.0; 24_000], &send);
@@ -675,7 +773,7 @@ mod tests {
         // level, wet only.
         saved.reverb_on = false;
         setup.main[1] = 4;
-        fx.build(&saved, &setup.wheels(), RATE, 120.0);
+        fx.build(&saved, &setup.wheels(), (RATE, 0), 120.0);
         let turns = 440.0 / f64::from(RATE);
         let tone = sine(turns, 24_000);
         let out = run(&mut fx, &[0.0; 24_000], &tone);
@@ -689,7 +787,7 @@ mod tests {
         let hz = 1000.0f64;
         setup.eq[1] = 1200;
         setup.eq[4] = (65_536.0 * ((hz - 10.0) / 159.9 + 1.0).ln() / 101f64.ln()).round() as i32;
-        fx.build(&saved, &setup.wheels(), RATE, 120.0);
+        fx.build(&saved, &setup.wheels(), (RATE, 0), 120.0);
         let gain = |fx: &mut Effects, at: f64| {
             let tone = sine(at / f64::from(RATE), 48_000);
             let out = run(fx, &tone, &[0.0; 48_000]);
@@ -722,7 +820,7 @@ mod tests {
             ..Saved::default()
         };
         let mut fx = Effects::default();
-        fx.build(&saved, &setup.wheels(), RATE, 120.0);
+        fx.build(&saved, &setup.wheels(), (RATE, 0), 120.0);
         let out = run(&mut fx, &[1.0; 96_000], &[0.0; 96_000]);
         assert!(out[90_000..].iter().all(|v| v.abs() < 1e-3));
         // 1 kHz goes through.
@@ -730,5 +828,41 @@ mod tests {
         let tone = sine(turns, 48_000);
         let out = run(&mut fx, &tone, &[0.0; 48_000]);
         assert!((partial(&out[24_000..], turns) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_halving_keeps_what_is_under_the_new_nyquist_and_cuts_what_would_fold() {
+        let mut decimator = Decimator::default();
+        // A tenth of the new rate passes whole; 0.4 of the old rate, which
+        // would fold to 0.2, is down by more than 60 dB.
+        for (turns, most, least) in [(0.05, 1.01, 0.99), (0.4, 1e-3, 0.0)] {
+            let mut left = sine(turns, 16_384);
+            let mut right = left.clone();
+            decimator.halve(0, [&mut left, &mut right], 8192);
+            let heard = partial(&left[4096..8192], turns * 2.0);
+            assert!(heard < most && heard >= least, "{turns}: {heard}");
+            assert_eq!(left[..8192], right[..8192]);
+        }
+    }
+
+    #[test]
+    fn oversampled_voices_reach_the_output_at_the_rate() {
+        let setup = Setup::new();
+        let mut fx = Effects::default();
+        // Eight times: the buses halve once to the effects' four times,
+        // then twice more after them.
+        fx.build(&Saved::default(), &setup.wheels(), (RATE, 3), 120.0);
+        assert_eq!(fx.rate, 4.0 * f64::from(RATE));
+        let turns = 1000.0 / f64::from(RATE);
+        let tone = sine(turns / 8.0, 8 * 8192);
+        let mut out = vec![0.0; 8192];
+        let mut right = vec![0.0; 8192];
+        for (k, (l, r)) in out.chunks_mut(32).zip(right.chunks_mut(32)).enumerate() {
+            let buses = fx.buses(256);
+            buses[0].copy_from_slice(&tone[256 * k..256 * (k + 1)]);
+            buses[1].copy_from_slice(&tone[256 * k..256 * (k + 1)]);
+            fx.run(1, true, l, r);
+        }
+        assert!((partial(&out[4096..], turns) - 1.0).abs() < 0.01);
     }
 }

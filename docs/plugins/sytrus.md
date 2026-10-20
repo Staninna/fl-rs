@@ -751,8 +751,26 @@ rate (`0x62f4`) and the effects at `min(2^L, 4)` times (`0x62f8`), the
 decimators at `0x61e8..0x61f8` (`0x842100`) bringing the buses down
 between. In the corpus `0x438` is 0 in 218 states and 1..3 in 50.
 
-Implemented as read (`sytrus/fx.rs`), with the voices and the effects at
-the host's rate whatever the oversampling, the FX send to a mixer track
+A block of `n` host frames: the voices render `n 2^L` frames into both
+buses at `2^L` times the rate (the control tick, the filters' tables and
+caps, the band limit and the strings all take that rate). For each
+halving `l` from `L - 1` down to 2 both buses are halved (dry `0x61e8`,
+send `0x61f0`), then the effects run at `min(2^L, 4)` times the rate
+(their delays, reverb times, chorus, EQ, glide cap and countdown in its
+frames), then the dry bus alone is halved for `l` from `min(L, 2) - 1`
+down to 0, then the high pass runs at the host's rate. A halving
+(`0x842100` sets it up, `0x841e40` runs it, the SSE kernel `0x841cd0`)
+is a half-band filter per side: two chains of three first-order
+allpasses, the even samples through one and the odd through the other,
+each allpass `y = x_prev + (x - y_prev) c`, and `out = (A + B) 0.5`, with
+the coefficients (`0x8f71e0`, copied by `0x8421d0`)
+
+```
+even: 0.147377113601046, 0.482468542769700, 0.883005025769373
+odd:  0.039151597734460, 0.302646848328493, 0.674615918546964
+```
+
+Implemented as read (`sytrus/fx.rs`), with the FX send to a mixer track
 left out (its target is -1 in every corpus state; `fidelity` names it),
 and the classes as `fl_fx.rs` has them (the chorus there is the x87
 renderer).
