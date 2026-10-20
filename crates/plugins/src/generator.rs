@@ -245,6 +245,9 @@ const GENERATORS: &[(&str, Make)] = &[
         Box::new(crate::drumsynth_live::DrumSynthLive::default())
     }),
     (crate::dx10::NAME, || Box::new(crate::dx10::Dx10::default())),
+    (crate::envelope_controller::NAME, || {
+        Box::new(crate::envelope_controller::EnvelopeController::default())
+    }),
     (crate::fl_keys::NAME, || {
         Box::new(crate::fl_keys::FlKeys::default())
     }),
