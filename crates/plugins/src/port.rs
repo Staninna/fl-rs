@@ -87,6 +87,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::three_osc::NAME, Port::Gaps),
     (crate::transient_processor::NAME, Port::Exact),
     (crate::vintage_chorus::NAME, Port::Gaps),
+    (crate::vintage_phaser::NAME, Port::Gaps),
     (crate::vocodex::NAME, Port::Gaps),
     (crate::wave_candy::NAME, Port::Exact),
     (crate::waveshaper::NAME, Port::Gaps),
