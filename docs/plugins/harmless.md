@@ -196,9 +196,9 @@ implementation starts from `Default.fst`.
 | 40 | `TGrittinessWheel` | -1000..1000 | 0 | `0x5ac = sign(v) (e^(|v|/1000 ln C_140) - 1) * C_148`; FUN_00783c50 | loader, dfm |
 | 41 | `VibratoWheel` | 0..1000 | 0 | `0x31c = v * C_070` | loader, dfm |
 | 42 | `PitchLFOAmtWheel` | -1000..1000 | 0 | `0x2e0 = sign(v) (e^(|v|/1000 ln C_c8) - 1) * C_138` | loader, dfm |
-| 43, 44 | `PortaBox`, `MonoBox` | 0, 1 | 0 | 43 > 0: `FUN_00788030` (portamento setup); TriggerVoice reads them at 0x1d4 and 0x1d8; 44 is the legato flag | loader, dfm |
-| 45 | `PortaTimeWheel` | -1000..1000 | 0 | `0x548 = sign(v) SR (e^(|v|/1000 ln C_f8) - 1) / (0x2c8 * C_100)` | loader, dfm |
-| 46 | `VelToPortaTimeBox` | 0, 1 | 0 | | dfm |
+| 43, 44 | `PortaBox`, `MonoBox` | 0, 1 | 0 | 43 > 0: `FUN_00788030` (no last note); TriggerVoice reads them at 0x1d4 and 0x1d8; 44 is legato (section 3) | loader, dfm |
+| 45 | `PortaTimeWheel` | -1000..1000 | 0 | `0x548 = sign(v) SR (41^(|v|/1000) - 1) / (0x2c8 * 26.667)` ticks (section 3) | loader, dfm |
+| 46 | `VelToPortaTimeBox` | 0, 1 | 0 | `voice+0x24 = (1 - 0.85 vel)^2` | loader, dfm |
 | 47 | `FEnvAltBox` adaptive filter envelope | 0, 1 | 0 | `0x648 = v > 0`; re-sends params 52 and 58 | loader, dfm |
 | 48, 49 | `FEnvAttWheel`, `FEnvDecWheel` | 0..1000 | 0, 500 | v < 1000: `0x638 / 0x640 = 1 / (SR (e^(v/1000 ln C_d8) - 1) C_110 + 1)` else 0 (hold) | loader, dfm |
 | 50, 51 | `FEnvAttSlopeWheel`, `FEnvDecSlopeWheel` | -1000..1000 | 0 | tension through `FUN_005fd4d0(this+0x700 / +0x70c)` with `e^(|v|/1000 ln C_120)` | loader, dfm |
@@ -312,13 +312,69 @@ output:    envelope segments (attack, decay, release by state +0x11c: 0..2 attac
            FUN_005f5f60 ramps; mix into set[0]+0x20 with the voice gain, then FUN_005b82c0 stereo spread
 ```
 
-The `TriggerVoice` (`FUN_00782940`) handles the FL note kinds
-(`local_74 == 0xf` slide, `0xd` legato, `0xe` porta), legato (`0x1d8`,
-param 44 `MonoBox`) and portamento (`0x1d4`, param 43; voice table at
-`0x340 + 0x20 k`). `MonoBox` is a legato flag, not a voice limit: with it
-on, or for a legato note with it off, a new note while one is held glides
-that voice to the new pitch (`FUN_00787ef0`) and starts no voice of its
-own. `0x1bc` is param 37 `VelToVol`: when it is off the voice asks the host
+### Notes, legato and portamento (`FUN_00782940` TriggerVoice, `FUN_00783910` Voice_Release, `FUN_00787ef0`, `FUN_00784560`, `FUN_00784630`, `FUN_00787ec0`)
+
+The voice record (`FUN_00782810` makes one): +0 the host's `TVoiceParams`,
++8 the velocity `min(FPV_GetVelocity, 1)`, +0x10 the host tag, +0x18 the
+sample counter at its start, +0x24 its glide time scale, +0x28 its type
+(0 sounds, 1 a filter note, 2 a held note that sounds nothing), +0x3c its
+group, +0x4c..+0x7c the glide, +0x80 the tremolo fade (section 8), +0x98
+the next unison voice, +0xa0 the first voice of its note (0 for the
+first), +0xa8 how many voices it owns. +0x24 is `(1 - 0.85 vel)^2` with
+param 46 `VelToPortaTime` (`DAT_00782930 = 1`, `_DAT_00782938 = 0.85`),
+else 1; a release sets it again from the release velocity,
+`(1 - 0.85 min(rel, 1))^2`.
+
+The group is the note's colour (`FPV_GetColor & 0xf`), and the plugin
+keeps a slot per group at `0x340 + 0x20 g`: the voice that answers for
+the group, then (+8) the levels the last note in it left: pan, volume,
+cents, Mod X, Mod Y (`FinalLevels` +0x14..+0x24) and velocity. The
+constructor and param 43 set above 0 put 0x7fffffff in the cents
+(`FUN_00788030`): no last note. Colour 15 (the 16th) makes a type 1 voice
+whose cents move the filter (`0x338`, `0x6dc` in `Gen_Render`). Colour 13
+turns `MonoBox` round for its note and colour 14 `PortaBox`; with the box
+off such a note uses group 0.
+
+- Legato (`MonoBox` param 44, `0x1d8`): when the group's slot has a
+  voice, the new note gets a type 2 record and `FUN_00787ef0(slot voice,
+  0)` hands the sound to it: the slot takes the group's newest type 2
+  record (by +0x18), `FUN_00784560` swaps everything from +0x28 on between
+  the two records (so the sound, its unison voices and the glide go with
+  the new note's `TVoiceParams` and velocity, and the old note is the one
+  left holding a silent record), `FUN_00787ec0` records the old note's
+  levels, `FUN_00784630(new, levels, 0, 0)` glides from them, and the new
+  note's levels are recorded. No voice starts.
+- Release: a type 2 record is killed. The voice in the slot clears it and
+  hands its sound to the newest held record of the group the same way,
+  giving it its own +0x24 (`FUN_00787ef0(v, 1)`); with none held it is let
+  go (state 6, the filter envelope to its decay through `FUN_00783d80`, the
+  pluck on from now if it waits, `+0x100 = max(+0x100, 0)`) and so are its
+  unison voices. The voice in a slot is not killed for its level, as other
+  voices are under -80 dB.
+- Portamento (`PortaBox` param 43, `0x1d4`) with a last note in the slot:
+  `FUN_00784630(new, levels, 1, 1)` on every voice of the new note. Every
+  new note goes in the slot and its levels are recorded, with portamento
+  on or not.
+
+`FUN_00784630(voice, from, wrap, fresh)`: the glide's pan, volume and
+velocity are `+= from - note` (0 when `fresh`); its cents, Mod X and Mod Y
+are `+= from - note`; with `wrap` the cents lose 1200 a time (with their
+sign at the start) while above 1250 (`DAT_00784838` as f64). Then with `t =
+0x548 * +0x24` ticks: `t > 0` (`DAT_00784838` as f32 = 0) sets +0x4c to
+`0x80000001` and +0x48 to `exp(ln 0.01 / t)`, which the voice multiplies
+the six by every tick for good; else `n = 1 - Round(t)` ticks (+0x4c) each
+adding `glide * (-1/n)` (+0x68, `ippsMulC_32f`). It runs down the unison
+voices (+0x98). The voice moves the glide at the top of each tick, before
+the filter envelope, and reads it as: cents `FinalLevels.Pitch + 0x2dc +
+glide`, Mod X `(FCut + glide) * 0x6c8`, Mod Y `(FRes + glide)/2`, the
+velocity (LFO shape 12, `VelToFatPitch`, `VelToFEnvAmt`, the harmonizer's
+`VelToSFXWidth`; not the pluck) `+8 + glide`, and pan and volume in the
+block's gains (section 7). `0x548` (`ProcessParam` 45) is
+`(f32)(sign(v) SR) * (f32)(41^(|v| 0.001f) - 1) / (tick * 26.667)` ticks,
+so a positive time falls to a hundredth in it and a negative one runs
+straight over one tick more.
+
+`0x1bc` is param 37 `VelToVol`: when it is off the voice asks the host
 (`GetVoiceParam(voice, 6)`) not to put the velocity on its volume.
 
 
@@ -691,8 +747,8 @@ phaser (types 0..8), harmonizer, pluck, protection, subs and
 self-oscillation, the partial count and the bank's frequency weights, the
 sine bank and its 10 ms level glide, the LFO shapes, the vibrato and pitch
 LFO, the unison spreads, the attack, decay and release with their
-declick, the host's volume and pan gains and their capped ramp, and the
-compression through `maximus.rs`.
+declick, legato and portamento with their glides, the host's volume and
+pan gains and their capped ramp, and the compression through `maximus.rs`.
 
 The chorus, delay and reverb are FL's classes from `fl_fx.rs` behind the
 front end of section 8, told a block of 256 frames (the chunk the plugin
@@ -700,9 +756,14 @@ renders in): that sets their sleep and ring sizes, which FL takes from the
 host. The delay has room for its longest time down to 20 BPM, and is only
 made when the state has it on.
 
-Approximated: the tremolo's smoothing; mono, legato and portamento (mono
-releases the voices before, portamento glides in a straight line); slide
-notes; phaser type 9 and resonance type 8 (played as plain curves).
+Legato and portamento are FL's for notes of the first colour, which is
+every note fl-rs sends (a `NoteOn` carries no colour; every note of the
+corpus is of the first): the colour groups, the colours that turn the
+boxes round and the filter notes of the 16th are not built. A `NoteOn`
+marked porta glides as `PortaBox` does.
+
+Approximated: the tremolo's smoothing; phaser type 9 and resonance type 8
+(played as plain curves).
 
 Left to the host: slide notes, which FL plays by sliding the host levels
 (`FinalLevels`) of the voices that sound and which fl-rs does not send a
