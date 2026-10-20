@@ -252,6 +252,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::kepler::NAME, || {
         Box::new(crate::kepler::Kepler::default())
     }),
+    (crate::kepler_exo::NAME, || {
+        Box::new(crate::kepler_exo::KeplerExo::default())
+    }),
     (crate::minisynth::NAME, || {
         Box::new(crate::minisynth::MiniSynth::default())
     }),
