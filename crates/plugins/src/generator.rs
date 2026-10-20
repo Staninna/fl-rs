@@ -161,6 +161,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::bassdrum::NAME, || {
         Box::new(crate::bassdrum::BassDrum::default())
     }),
+    (crate::beepmap::NAME, || {
+        Box::new(crate::beepmap::BeepMap::default())
+    }),
     (crate::boobass::NAME, || {
         Box::new(crate::boobass::BooBass::default())
     }),
@@ -193,6 +196,9 @@ const GENERATORS: &[(&str, Make)] = &[
     }),
     (crate::kepler::NAME, || {
         Box::new(crate::kepler::Kepler::default())
+    }),
+    (crate::minisynth::NAME, || {
+        Box::new(crate::minisynth::MiniSynth::default())
     }),
     (crate::ogun::NAME, || Box::new(crate::ogun::Ogun::default())),
     (crate::three_osc::NAME, || {
