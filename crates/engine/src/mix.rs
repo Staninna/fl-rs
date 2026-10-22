@@ -163,10 +163,6 @@ impl Line {
     }
 }
 
-/// What [`Mixer::approximated_slots`] says of a plugin whose state names a
-/// sidechain input its insert does not have.
-const NO_INPUT: &str = "the sidechain input has no insert behind it, so the plugin hears its own";
-
 /// One sidechain input of an insert: what another insert puts out, for the
 /// plugins here that listen to it. None of it is added to the bus.
 struct Side {
@@ -735,7 +731,11 @@ fn visit(
 /// late as a send from there is read, so in step with the head of its own
 /// chain. That it is the sound behind the fader is inferred. An insert
 /// with no sound to send is a silent input. A number past the insert's
-/// inputs is no input, and [`Mixer::approximated_slots`] counts the slot.
+/// inputs is handed nothing, which is FL's: its host's `GetInBuffer`
+/// (`FUN_0132baa0`) hands a plugin no buffer for a number past the list it
+/// keeps of the insert and its senders (`FUN_012528f0`), and the plugin
+/// does without, as Vocodex and Fruity Limiter do by listening to their
+/// own input. `docs/rec-225.md` has the addresses.
 ///
 /// A plugin's second output, which is Fruity Stereo Shaper's difference,
 /// is added to the bus of the insert its number counts to among the
@@ -810,8 +810,7 @@ pub(crate) struct Mixer {
     /// their event 201 name, and the slots each is in.
     pub unhosted_slots: BTreeMap<String, usize>,
     /// The hosted slots whose plugin says another thing stands in for
-    /// what its state asks, by what the plugin says of it, and the ones
-    /// whose plugin asks for a sidechain input its insert does not have.
+    /// what its state asks, by what the plugin says of it.
     pub approximated_slots: BTreeMap<&'static str, usize>,
     /// The sidechain inputs the strips have: every pair of an insert and
     /// an insert that sends to it which a hosted plugin listens to.
@@ -1110,16 +1109,12 @@ impl Mixer {
                     .map(move |(which, n)| (slot, which, n))
             });
             // A slot counts once, whether it is fed one input or two.
-            let (mut fed, mut lacking) = (Vec::new(), Vec::new());
+            let mut fed = Vec::new();
             for (slot, which, number) in asked {
-                let Some(at_source) = number.checked_sub(1) else {
-                    continue;
-                };
-                let Some(source) = sources.get(at_source) else {
-                    if !lacking.contains(&slot) {
-                        lacking.push(slot);
-                        *approximated_slots.entry(NO_INPUT).or_default() += 1;
-                    }
+                // A number past the inputs gets no block, as FL's host
+                // hands no buffer for it, and the plugin does what its
+                // own code does without one.
+                let Some(source) = number.checked_sub(1).and_then(|at| sources.get(at)) else {
                     continue;
                 };
                 if !fed.contains(&slot) {
