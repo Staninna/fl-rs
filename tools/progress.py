@@ -1,5 +1,5 @@
-"""Write the progress block in README.md from docs/plugins.md, docs/parity.md
-and the port levels in crates/plugins/src/port.rs.
+"""Write the progress block in README.md from docs/plugins.md, docs/parity.md,
+docs/event-dictionary.md and the port levels in crates/plugins/src/port.rs.
 
 Usage: python3 -I tools/progress.py
        python3 -I tools/progress.py --check

@@ -1,12 +1,13 @@
-//! Signal building blocks the engine composes: gain and pan maths, a biquad
-//! filter, and sample-rate conversion. Everything works on `f32` samples,
-//! allocates nothing in its hot path, and is plain maths with no FL-specific
-//! behaviour; FL's own curves (its pan law, its sampler interpolation) live
-//! in the engine once they are read from the binary. The double biquad
-//! takes `f32` samples too and keeps its state in `f64`.
+//! Signal building blocks the engine and the plugins compose: gain and pan
+//! maths, a biquad filter, and fractional sample readers in [`resample`].
+//! Everything works on `f32` samples and allocates nothing in its hot path.
+//! The double biquad takes `f32` samples too and keeps its state in `f64`.
+//! FL's pan law lives in the engine.
 //!
-//! [`curve`] is the one FL-specific part: the envelope curve that both the
-//! engine and the plugins draw.
+//! Three parts are FL's own, read from its binaries: [`curve`], the
+//! envelope curve that both the engine and the plugins draw; [`interpolator`],
+//! the sample interpolator FL's plugins share; and [`additive`], the sine
+//! bank Image-Line's additive synths build their voices on.
 
 pub mod additive;
 pub mod biquad;

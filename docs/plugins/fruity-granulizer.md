@@ -163,15 +163,16 @@ also adds the pitch envelope to `FinalLevels.Pitch`) and its filter, pan
 and volume over the block (`0x7456c0`). This is the code 3x Osc links,
 and `crates/plugins/src/tab.rs` plays it from 3x Osc's port.
 
-## Not built
-
 The sample player's interpolation kernel (`+0xf0`, a windowed sinc of up to
-512 points by `0x5fce50`) is FL's interpolator, now built in
+512 points by `0x5fce50`) is FL's interpolator, built in
 `crates/dsp/src/interpolator.rs` and read at the render's quality (16
 points a side), which is inferred as for FPC and Slicex.
 
+## Not built
 
 - Transients: the regions of the file, FL's detection (`0x7397a0`,
   `0x7400a0`), the transient branch of the block and the transient hold.
 - The tempo lock: it needs the sample's beats, the dispatcher's 0x13.
 - A file's own loop points (`+0x108`): the loop is the whole sample.
+- FL's `Random` draws from a seed it shares with everything else. Here each
+  plugin starts from 0.

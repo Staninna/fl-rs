@@ -297,6 +297,10 @@ part recompute `FUN_0086a130`.
 Estimated: five Ghidra runs for a DSP spec; the state layout above is
 complete for versions 8..25 and the parameter index space is fully mapped.
 
+Done since: items 1 to 4 and 6 (sections 5 to 13) and the portamento of
+item 7 (section 14). Item 5 is not: versions 5..7 are refused. FL's
+arpeggiator runs outside the plugin.
+
 ## 5. The fifth run: kernel, routing, shape, articulators
 
 One run (`DecompileAddrs` with callees, output in `ghidra/out/sytrus/kernel/`)
@@ -449,9 +453,9 @@ block +0x2c (`part+0x8ac`), the waveshaper switch the i32 at +0x28, +0x880
 and +0x881 the quality and x2 flags. The types follow Love Philter's
 numbers: 0 state variable, 1 / 2 ladder low / high, 3..10 Vanilla, 11 comb,
 12 phaser (`FUN_00780ce0`, Sytrus's own). `FUN_0086ebe0` (the design, 6037
-bytes) was decompiled but not read line by line; the implementation ports
-Love Philter's design for types 0..10 and lets a low pass stand in for the
-comb and the phaser.
+bytes) was decompiled but not read line by line here; section 13 reads it,
+and the implementation builds every type, 11 and 12 included, as that
+section has them.
 
 ### What the implementation does and leaves out
 
@@ -620,9 +624,9 @@ a voice alone), `+0x40`, `+0x34` and `+0x44` again for every voice and
 forces the pitch to be taken again (`+0x18 = 2^31`). Order, sub, phase and
 envelope wait for the next note.
 
-Implemented as read (`Unison` in `sytrus.rs`). Not built: the velocity
-flags `0x4fd` (attack by velocity, `0x86af20`; 0 in every corpus state),
-global envelopes shared between voices (flag 2), portamento.
+Implemented as read (`Unison` in `sytrus.rs`). The velocity flags
+`0x4fd`, global envelopes shared between voices (flag 2) and portamento
+are built too, as section 14 has them.
 
 ## 8. The filters' waveshaper (`0x874040`, `0x870820`)
 

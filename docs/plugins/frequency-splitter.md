@@ -223,9 +223,15 @@ engine changes:
 2. Addressing by absolute insert index, with the target insert reached and
    processed after the source.
 
-No corpus state sets a target, so nothing shipped needs it. The plugin plays
-the main output only. It reports `Fidelity::Approximate` when any target is
-above 0.
+No corpus state in a mixer slot sets a target, so nothing shipped needs it
+there. In a mixer slot the plugin plays the main output only, and reports
+`Fidelity::Approximate` when any target is above 0.
+
+Inside a Patcher the bands are routed. `Effect::outputs` hands each band
+whose target is above 0, at its send level, to the Patcher output its
+target numbers, and the Patcher calls `Effect::route_outputs`, after which
+the plugin reports `Fidelity::Exact`. Astes - Bien Duro's and Mehran
+Abbasi - With You's Patchers send bands this way.
 
 ## 6. What `frequency_splitter.rs` builds
 
@@ -236,11 +242,12 @@ monitor, the toggles and the window settings. Every corpus state loads and
 plays.
 
 The parameter maps follow section 2 with the engine's float constants as
-bit patterns. Send levels and send mutes are kept but do nothing, because
-the sends go nowhere. The main levels glide as in the engine. A sample-rate
-change sends every parameter again, marks the filters dirty and sets the
-glide, as `setSampleRate` does. It also sizes the linear phase buffers for
-quality 5 at the new rate.
+bit patterns. Send levels and send mutes set the level of each band's
+second output, which only a Patcher takes (section 5); the send levels are
+taken to glide as the main levels do. The main levels glide as in the
+engine. A sample-rate change sends every parameter again, marks the
+filters dirty and sets the glide, as `setSampleRate` does. It also sizes
+the linear phase buffers for quality 5 at the new rate.
 
 The IIR mode builds section 3: the cookbook and one pole designs
 (`FUN_1801e33b0`), the four-lane biquad chain, the 18 dB allpass pair, the
@@ -257,9 +264,9 @@ redesign starts only once the previous fade has finished.
 
 Exact, up to libm and the FFT's rounding: the state, the parameter maps, the
 level curve and glide, the IIR crossovers and linear phase. The Rust reports
-`Fidelity::Exact` when no target is set.
+`Fidelity::Exact` when no target is set, or when a Patcher routes the bands.
 
-Left out: band routing, as section 5 says.
+Left out: band routing to other mixer tracks, as section 5 says.
 
 Guessed, not confirmed:
 

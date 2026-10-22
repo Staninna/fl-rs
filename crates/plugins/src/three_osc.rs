@@ -87,8 +87,9 @@
 //!
 //! What is not FL's:
 //!
-//! - The custom shape. No host hands a generator its channel's sample, so
-//!   the saw plays, and fidelity says so.
+//! - The custom shape. The engine hands a generator its channel's sample
+//!   ([`Generator::set_channel_sample`]), but this plugin does not take
+//!   it, so the saw plays, and fidelity says so.
 //! - FL steps the envelopes on the song's ticks. Here the ticks run from
 //!   when the plugin was made or last reset. They are as long as the
 //!   song's, by [`Generator::set_ppq`], and 96 to a beat until it is told.
