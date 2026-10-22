@@ -467,7 +467,7 @@ it, the FM and RM matrix, the three filters of every type (section 13)
 with their waveshapers (section 8), every articulator's envelope, LFO and
 six maps, the unison (section 7), the pan law and the output levels, the
 effects (section 9) and the oversampling. Section 14 lists what is left
-out and what `fidelity` names; 696 of the states ask for none of it and
+out and what `fidelity` names; 1011 of the states ask for none of it and
 report `Exact`. The 597
 REC parameters are the host's (section 6).
 
@@ -977,57 +977,120 @@ t; s = t`, `out = s`. Then the waveshaper (section 8).
 
 Implemented as read (`sytrus/filter.rs`).
 
-## 14. The switches and what is left out (`0x86c7d0`, `0x86af20`, `0x86d770`)
+## 14. The switches, portamento and global envelopes (`0x86c7d0`, `0x86af20`, `0x86d770`, `0x789e90`, `0x7859c0`)
 
-Read in run 6. The main block's u8 0x440..0x443 and 0x4f7..0x4ff
+Read in runs 6 and 7. The main block's u8 0x440..0x443 and 0x4f7..0x4ff
 (defaults from the constructor `0x865c10` and the loader `0x862d70`):
 
 | byte | default | what it does |
 |---|---|---|
-| 0x440 | 1 | Mod X and Mod Y glide (built) |
-| 0x441 | 1 | the random maps apply at voice start (`0x86af20`, `0x7897d0` of `random()`) |
-| 0x442 | 0 | the levels of the operators after the first (part index > 0) are multiplied by the voice's +0xd0 at start and in every render call (`0x86af20`, `0x870820`) |
-| 0x443 | 0 | a note cuts the voices of its key (built, below) |
+| 0x440 | 1 | Mod X and Mod Y glide |
+| 0x441 | 1 | the random maps apply at voice start (`0x86af20`: with the map drawn, `0x7897d0` of Delphi's `Random` folds into the static value by the mode); off, no number is drawn and the map is left out |
+| 0x442 | 0 | operators after the first (part index > 0) also take the first operator's pitch articulator: their increment `part+0x40 x part+0x48` is multiplied by the voice's +0xd0 at start (`0x86bef8`) and in every render call (`0x8708ab`). Voice +0xd0 is part 0's +0x48 (the part states start at voice+0x88), operator 1's `exp(art x part+0x86c)` |
+| 0x443 | 0 | a note cuts the voices of its key (below) |
 | 0x4f8 | 0 | portamento, REC 596 |
-| 0x4f9, 0x4fa, 0x4fb | 1, 0, 0 | portamento: the glide scaled by its distance, the start from the last note (0x62e0), and its kind (`< 2`: wrap by 1200 cents; else limit to `(6 - v) x 100` cents) |
-| 0x4fc | 1 | off: the voice calls the host's `Voice_ProcessEvent(FPV_SetLinkVelocity = 6, 0)` |
-| 0x4fd | 0 | bit 0: the attack by velocity (`x voice+0xa8`); bit 1: the envelope by velocity (`0x789770` with `voice+0xa4`) |
+| 0x4f9, 0x4fa, 0x4fb | 1, 0, 0 | portamento: the attack scaled by its distance, the voice keyed at the last note, and the glide's kind (below) |
+| 0x4fc | 1 | off: `TriggerVoice` calls `Voice_ProcessEvent(FPV_SetLinkVelocity = 6, 0)`, so the host's level no longer follows the velocity (a new note's 1) |
+| 0x4fd | 0 | bit 0: every active envelope's attack scale (run+0x50) times `2 - 2v`; bit 1: every active envelope jumps `v` of the way to its decay marker (`0x789770`: `env.tick(run, place(decay) x run+0x50 x v / env+0x10)`, `0x7872f0` adding the points' lengths). `v` is `FPV_GetVelocity` (`log11(10 vol + 1) x 100 / 128`), the velocity map's input too |
 | 0x4fe | 1 | a release takes the host's release time (`FPV_GetRelTime`) |
 | 0x4ff | 0 | the unison's kind (section 7) |
 
 The key cut (`0x86c7d0`, u8 0x443): a note's key is `round(max(0, (pitch
-x 0.01) + 60))` with `pitch` its cents from C5 plus the main pitch (and
-the last note's under portamento); every voice filed under that key
+x 0.01) + 60))` with `pitch` its cents from C5 plus the main pitch (the
+last note's under portamento with 0x4fa); every voice filed under that key
 (`voice+0x28`) whose stage is under 9 goes through `0x86d770`, which sets
 its stage to 9 and every envelope's and LFO level's run to 9 (+0, +8,
 +0x60, +0x68 of each 200-byte articulator run) and does the same to the
 voice it is linked to (+0x60), so its gains glide to 0 at the output cap
-(section 10). Built so (`Voice::cut`).
+(section 10).
 
-Global envelopes (articulator flag 2, `0x86af20`): an envelope with the
-flag that is on links its run (+0xc0) to the same articulator's run of the
-first voice in the list whose stage is under 5, and takes that voice's
-tick countdown (`+0x14`); then the quick ADSR does not scale it. Only with
-no such voice does it run its own. The link's reading in the tick
-(`0x78b720` and its callees) is not read, so this is left out.
+### The points' weights and the run's offset (`0x7859c0`, `0x787230`, `0x787e50`)
 
-What `fidelity` names, the first that a state asks for:
+Every envelope point keeps a weight at +0x1c, which `0x7859c0` works out
+whenever the points change. With `D` the decay marker (0 without one),
+`E` the loop end (the last point without one), `S` the loop start (`E`
+without one), and `A`, `M`, `R` the lengths of the points up to `D`, after
+`D` up to `S` and after `E` (each at least 2^-16, `0x7864e0`): a point up
+to `D` takes `(A - its time from the start, itself included) / A` (1 at
+the first point when it has no length, 0 at `D`), one after `D` up to `S`
+the share of `M` played to it, one after `S` up to `E` 1, and one after
+`E` the share of `R` still to come (1 for a class with bit 0x80 of its
+mask, which none has). `menvelope::weights`.
+
+A run carries an offset (+0x28): the value of point `i` is `clamp(y_i +
+w_i x offset, 0, 1) - centre` (`0x787230`; the clamp is the base
+constructor's +0x21, +0x70, +0x78), and an offset of 0 leaves the point
+as drawn. The run starts with offset 0 and a sustain (+0x34) that is the
+sustain knob's scale (run+0x58) when there is a loop end, 0 otherwise
+(`0x789e50`); a run that starts in its decay takes the sustain at once
+(`0x789f30`), and the tick switches the offset to the sustain when it
+passes the decay marker (`0x787e50`). So the sustain knob, the envelope's
+own plus the quick ADSR's, lifts the decay and the loop. `Track` does this
+for Sytrus (`with_offsets`); the other plugins on `menvelope.rs` keep
+their points as drawn.
+
+### Portamento (`0x86c7d0`, `0x86af20`)
+
+`TriggerVoice` reads the note's colour (`FPV_GetColor`); the note glides
+when u8 0x4f8 and "the colour is 14" disagree and there was a last note
+(0x62e0, `0x7fffffff` for none), and 0x62e0 takes every note's pitch
+after its voices start. Setting REC 596 to 0 forgets it. A gliding note
+is keyed (the key map, the key cut) at the last note with 0x4fa.
+
+In `0x86af20`, for every part's articulator 3 whose envelope is on and
+does not follow another voice's (below), when the part's pitch range
+(+0x86c) is not 0 (operators only): `d = last - pitch` in cents, then by
+0x4fb: 1 wraps it by 1200 cents until `|d| <= 1250`, 2 and up keep `|d|`
+to `(6 - kind) x 100`. When `d` is not 0, `0x789f30(env, run, d / 2400)`
+sets the run's offset before its decay (stage under 2), and with 0x4f9
+the run's attack scale is multiplied by `|d| x header[2] / 1440000`
+(`0x86c760`). The pitch envelope then starts `d x range / 1200` cents
+away, by its points' weights, and comes back to the note by its decay
+marker. Built so; a note with the switch off and colour 14 glides too.
+
+### Global envelopes (`0x86af20`, `0x789e90`, `0x872290`)
+
+For every articulator, `0x86af20` clears the envelope's link (+0xc0);
+with flag 2 and the envelope on, it walks the voice list (+0x62c0, the
+order the voices started in, a voice joining it at the end of its own
+`0x86af20`) for the first voice whose stage is under 5 (not released),
+links the envelope to that voice's run of the same part and articulator,
+and stores `-|count|` of that voice's tick countdown (+0x14) as the new
+voice's. The start of the run (`0x78b720` calls the envelope's
+`0x789e90`) copies the first 0x50 bytes of the linked run (stage, point,
+held stage, phase, step, segment, value, offsets) and then the
+envelope's own knob scales (+0xa8) over +0x50; the quick ADSR and the
+unison's stretch are skipped for a linked run (`0x86b37d`). The tick never
+reads the link: the copy and the countdown are the whole of it.
+`0x872290` turns a negative countdown into a first tick with step 0 and
+`|count|` frames to the next, and a countdown of 0 into an ordinary tick
+(step 1), so the new voice ticks with the one it copied and their runs
+move together until one is released. A note with no such voice runs its
+own.
+
+### Plucked noise (`0x86a810`)
+
+The noise is the function pointer at `0x90d668`, which the `DSP_IPP`
+loader fills, called at `0x86a9fc` as `(buffer, len, -1.0, 1.0, &seed)`,
+the signature of `ippsRandUniform_Direct_32f`, with the seed the start
+phase in 2^32ths (+0x38 x 2^32, rounded). `autogun_engine::rand_uniform`
+is that generator. The loop then mixes `table x dry + buffer x wet`.
+
+### What `fidelity` names
 
 - `Sytrus FX send`: the send to a mixer track (0x420 not -1 with the send
   on); 1 corpus state.
-- `Sytrus portamento`: 0x4f8 on (and its 0x4f9..0x4fb); 28 states. A
-  slide or portamento note with the switch off is not followed either.
-- `Sytrus global envelopes`: an active envelope with flag 2; 99 states.
-- `Sytrus voice switches`: 0x441, 0x442, 0x4fc or 0x4fd off their
-  defaults; 166 states.
-- `Sytrus plucked noise`: a plucked operator with noise, whose buffer is
-  IPP's `ippsRandUniform_Direct_32f` seeded by the phase, here Delphi's
-  generator; 22 states.
 
-The rest, 696 of the 1012 states, play as this document has them. Also
-not followed: the host's release time (0x4fe; 1 for an ordinary note),
-the arpeggiator (FL's, outside the plugin), and versions 5 to 7, which
-are turned down.
+The rest, 1011 of the 1012 states, play as this document has them. Before
+run 7, `fidelity` also named portamento (28 states), global envelopes
+(99), the voice switches (166) and the plucked noise (22). Not followed:
+the host's release time (0x4fe; 1 for an ordinary note), a note of colour
+15 (`+0x24 - 100000`, the voice's group), FL's arpeggiator (outside the
+plugin), the arpeggiator fields of a run (+0x39, +0x3c..+0x48, unused
+without arpeggiator points), and versions 5 to 7, which are turned down.
+Delphi's `Random` for the random maps is drawn per voice from the
+plugin's own generator, so a random map is FL's in law, not in its
+numbers.
 
 ## Corrections
 
@@ -1065,3 +1128,9 @@ are turned down.
   Love Philter's.
 - Articulator flag 2 links a new voice's envelope to an earlier voice's
   run; section 7 named it only as keeping the unison's stretch off.
+- u8 0x442 multiplies the pitch of the operators after the first by the
+  first one's pitch articulator (voice+0xd0 is operator 1's part+0x48),
+  not their levels; section 14 had it as levels.
+- `0x78b720` is the start of an articulator's run, not its tick (that is
+  `0x78b800`): the global envelopes' link is read there, by the
+  envelope's `0x789e90`, and nowhere in the tick.

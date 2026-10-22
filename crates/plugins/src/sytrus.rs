@@ -12,17 +12,18 @@
 //! unison of up to nine voices a note and nine more an octave down, alone
 //! or sharing one set of filters (section 7), the chorus, delays, reverb
 //! and EQ on the send bus (`sytrus/fx.rs`, section 9), and the voices
-//! oversampled as `DQOverSelect` asks. Left out, and named by
-//! [`Generator::fidelity`] when a state asks for it (section 14): the
-//! send to a mixer track, portamento, global envelopes, four of the voice
-//! switches and the noise of a plucked operator.
+//! oversampled as `DQOverSelect` asks; with section 14 the portamento,
+//! the global envelopes, the voice switches, the points' weights that
+//! the sustain knob and the portamento lift, and IPP's noise for a
+//! plucked operator. Left out, and named by [`Generator::fidelity`] when
+//! a state asks for it: the send to a mixer track.
 //!
 //! A host moves FL's 597 REC parameters, numbered and ranged as
 //! `ProcessParam` has them (section 6 of the doc): the main volume, LFO
 //! level and pitch, the quick ADSR, Mod X and Mod Y, which the voices
 //! glide to, the operators' and filters' wheels and every articulator's
 //! knobs are heard, and the unison's, the chorus's, the delays' and the
-//! EQ's; the portamento switch is kept and read back.
+//! EQ's, and the portamento switch.
 
 // The kernels index their rows and operators on purpose: the workspace
 // tests build unoptimised, and an index loop is what FL's kernel does.
@@ -431,7 +432,11 @@ impl Articulator {
         articulator.knobs[..4].copy_from_slice(&envelope.knobs);
         articulator.global = envelope.flags & 2 != 0;
         envelope.knobs = scaled(envelope.knobs, adsr);
-        articulator.envelope = Track::new(&envelope, centre);
+        articulator.envelope = Track::new(&envelope, centre).with_offsets();
+        let [attack, decay, sustain, release, ..] = articulator.knobs;
+        articulator
+            .envelope
+            .set_raw([attack, decay, sustain, release]);
         let lfo = MEnvelope::read(reader, Class::Lfo)?;
         articulator.knobs[4..].copy_from_slice(&lfo.knobs);
         articulator.lfo = Lfo::new(&lfo);
@@ -471,6 +476,7 @@ impl Articulator {
         let [attack, decay, sustain, release, ..] = self.knobs;
         self.envelope
             .set_knobs(scaled([attack, decay, sustain, release], adsr));
+        self.envelope.set_raw([attack, decay, sustain, release]);
     }
 
     fn combine(&self, a: f32, b: f32) -> f32 {
@@ -486,15 +492,18 @@ impl Articulator {
     /// A run at the start of a note. `at` is where the note is in the
     /// key, velocity, random and unison maps, each from 0 to 1: the unison
     /// map is read at the voice's place in the unison, a half for a voice
-    /// alone (`0x86af20`).
-    fn start(&self, at: [f64; 4], rates: [f64; 2]) -> ArtRun {
+    /// alone (`0x86af20`). The random map is left out with u8 0x441 off
+    /// (`random` false): FL then draws no number for it.
+    fn start(&self, at: [f64; 4], random_map: bool, rates: [f64; 2]) -> ArtRun {
         let centre = self.centre();
         let mut fixed = if self.additive { 0.0 } else { 1.0 };
         let [key, velocity, random, unison] = at;
+        let none = None;
+        let random_curve = if random_map { &self.random } else { &none };
         for (map, at) in [
             (&self.key, key),
             (&self.velocity, velocity),
-            (&self.random, random),
+            (random_curve, random),
             (&self.unison, unison),
         ] {
             if let Some(curve) = map {
@@ -870,11 +879,16 @@ struct State {
     /// i32 0x438, 0 to 6).
     oversample: usize,
     /// The switches a voice start reads, defaults in [`SWITCHES`]: u8
-    /// 0x441 (the random maps), 0x442 (the operators after the first by
-    /// the voice's factor at +0xd0), 0x443 (a note cuts the voices of its
-    /// key, `0x86c7d0`), 0x4fc (off: `FPV_SetLinkVelocity` to the host)
-    /// and 0x4fd (the attack and decay by velocity). Only 0x443 is built.
+    /// 0x441 (the random maps), 0x442 (the operators after the first
+    /// also follow the first one's pitch articulator, the voice's +0xd0),
+    /// 0x443 (a note cuts the voices of its key, `0x86c7d0`), 0x4fc (off:
+    /// `FPV_SetLinkVelocity(0)`, the velocity leaves the volume alone)
+    /// and 0x4fd (the attack and the envelopes' start by velocity).
     switches: [u8; 5],
+    /// The portamento's u8 0x4f9 (the attack as long as the glide is
+    /// far), 0x4fa (the voice is keyed at the last note) and 0x4fb (the
+    /// glide's kind, [`porta_cents`]); 0x4f8, the switch, is REC 596.
+    porta: [u8; 3],
     /// u8 0x4f6 (section 11 of the doc).
     smooth: bool,
     /// The waveshapers read between their steps (u8 0x5f18; FL also does
@@ -983,6 +997,7 @@ impl State {
             envelope_hq: false,
             oversample: 0,
             switches: SWITCHES,
+            porta: [1, 0, 0],
             smooth: false,
             hq_shaper: false,
             fm: [[0.0; OPERATORS]; OPERATORS],
@@ -1144,6 +1159,9 @@ impl State {
             }
             if let Some(kind) = flags.get(8) {
                 state.unison_kind = *kind;
+            }
+            for (switch, flag) in state.porta.iter_mut().zip(flags.iter().skip(2)) {
+                *switch = *flag;
             }
             // 0x4fc and 0x4fd.
             for (switch, flag) in state.switches[3..].iter_mut().zip(flags.iter().skip(5)) {
@@ -1588,7 +1606,53 @@ struct Voice {
     /// The frames left of the voice's control tick: every voice counts
     /// its own from its start (`voice+0x14`).
     to_tick: usize,
+    /// The frames from the first tick to the second, when they are not a
+    /// tick's, and the first tick's step: a voice whose global envelopes
+    /// follow another's takes that voice's count, so the two tick
+    /// together (`0x86af20` stores `-|count|` at +0x14; `0x872290` turns a
+    /// negative count into a first tick that does not move, and a count
+    /// of 0 into an ordinary tick).
+    first_len: Option<usize>,
+    first_dt: f64,
     seed: u32,
+}
+
+/// What a voice's start takes from the voices before it and the last
+/// note (`TriggerVoice` `0x86c7d0`).
+#[derive(Debug, Clone, Copy)]
+struct Start<'a> {
+    /// The first voice that is not released, whose runs the global
+    /// envelopes take over (`0x86af20`: the first in the list at +0x62c0
+    /// with a stage under 5).
+    link: Option<&'a Voice>,
+    /// The portamento's distance in cents, from the note to the last one
+    /// (0x62e0), when the note glides.
+    porta: Option<f32>,
+    /// The pitch the voice is filed and keyed under: the last note's with
+    /// portamento and u8 0x4fa, the note's own otherwise.
+    filed: f32,
+}
+
+/// How far a portamento glides, by its kind (u8 0x4fb, `0x86af20`): as it
+/// is (0), wrapped by octaves to within 1250 cents (1), or kept to `(6 -
+/// kind) x 100` cents (2 and up).
+fn porta_cents(d: f32, kind: u8) -> f32 {
+    let sign = if d == 0.0 { 0.0 } else { d.signum() };
+    match kind {
+        0 => d,
+        1 => {
+            let step = sign * 1200.0;
+            let mut d = d;
+            while f64::from(d.abs()) > 1250.0 {
+                d -= step;
+            }
+            d
+        }
+        _ => {
+            let limit = ((6 - i32::from(kind)) * 100) as f32;
+            sign * d.abs().min(limit)
+        }
+    }
 }
 
 /// The two rates an envelope can count by: half seconds and beats a
@@ -1848,11 +1912,12 @@ impl Voice {
         timing: Timing,
         seed: &mut u32,
         (group, unison, clock): (u32, Unison, u32),
+        start: Start<'_>,
     ) -> Self {
         let key_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         let pitch = key_pitch + state.main_pitch;
-        let filed = filed_key(pitch);
-        let key = f64::from(((pitch / 100.0 + 60.0).max(0.0) - unison.drop).max(0.0) / 120.0)
+        let filed = filed_key(start.filed);
+        let key = f64::from(((start.filed / 100.0 + 60.0).max(0.0) - unison.drop).max(0.0) / 120.0)
             .clamp(0.0, 1.0);
         // FL's velocity of a note is the host's gain turned back into 0..1
         // of 128.
@@ -1867,14 +1932,70 @@ impl Voice {
             value: 0.0,
         }; PARTS * ARTICULATORS];
         let at = [key, velocity, random, f64::from(unison.place)];
+        let [random_map, _, _, link_velocity, by_velocity] = state.switches;
+        let (mut first_len, mut first_dt) = (None, 0.0);
+        // The portamento's distance, as its kind keeps it.
+        let porta = start
+            .porta
+            .map(|d| porta_cents(d, state.porta[2]))
+            .filter(|d| *d != 0.0);
         for part in 0..PARTS {
             for (index, articulator) in state.articulators(part).iter().enumerate() {
-                let run = &mut articulators[part * ARTICULATORS + index];
-                *run = articulator.start(at, timing.rates);
-                // A unison voice stretches the attack and the decay of the
-                // envelopes under the quick ADSR (`0x86af20`).
-                if state.adsr_group(part, index).is_some() && !articulator.global {
+                let i = part * ARTICULATORS + index;
+                let run = &mut articulators[i];
+                *run = articulator.start(at, random_map != 0, timing.rates);
+                let envelope = &articulator.envelope;
+                if !envelope.active() {
+                    continue;
+                }
+                // A global envelope (flag 2) takes over the run of the
+                // first voice that is not released, and the voice ticks
+                // with that one (`0x86af20`, `0x789e90`).
+                let link = start.link.filter(|_| articulator.global);
+                if let Some(other) = link {
+                    run.run.follow(&other.articulators[i].run);
+                    (first_len, first_dt) = if other.first {
+                        (other.first_len, other.first_dt)
+                    } else if other.to_tick > 0 {
+                        (Some(other.to_tick), 0.0)
+                    } else {
+                        (None, 1.0)
+                    };
+                } else if state.adsr_group(part, index).is_some() && !articulator.global {
+                    // A unison voice stretches the attack and the decay of
+                    // the envelopes under the quick ADSR.
                     run.run.stretch(unison.stretch[0], unison.stretch[1]);
+                }
+                let rate = timing.rates[usize::from(envelope.tempo)];
+                // u8 0x4fd: bit 0 times the attack by `2 - 2v`, bit 1
+                // starts the envelope `v` of the way to its decay marker
+                // (`0x789770`).
+                if by_velocity & 1 != 0 {
+                    run.run.scale_attack((2.0 - 2.0 * velocity) as f32);
+                }
+                if by_velocity & 2 != 0 && envelope.decay() >= 0 {
+                    let attack = f64::from(envelope.attack_scale(&run.run));
+                    let dt = envelope.place(envelope.decay()) * attack * velocity / rate;
+                    envelope.advance(&mut run.run, dt, rate);
+                }
+                // Portamento: an operator's pitch envelope (articulator
+                // 3) with a range starts the distance to the last note
+                // away, by the points' weights, before its decay; with u8
+                // 0x4f9 the attack is as long as the glide is far.
+                let operator = (part < OPERATORS).then(|| &state.operators[part]);
+                if let (Some(d), Some(operator), 3, None) = (porta, operator, index, link)
+                    && operator.range != 0.0
+                {
+                    if run.run.attacking() {
+                        run.run.set_offset((f64::from(d) * (1.0 / 2400.0)) as f32);
+                    }
+                    if state.porta[0] != 0 {
+                        // `0x86c760`: 1 / 1440000.
+                        let by = f64::from(d.abs())
+                            * f64::from(operator.range)
+                            * 6.944_444_444_444_445e-7;
+                        run.run.scale_attack(by as f32);
+                    }
                 }
             }
         }
@@ -1911,7 +2032,14 @@ impl Voice {
             key_pitch,
             key: filed,
             pitch,
-            velocity: note.velocity,
+            // u8 0x4fc off unlinks the velocity from the volume
+            // (`FPV_SetLinkVelocity(0)`): the host's level is then a new
+            // note's, 1.
+            velocity: if link_velocity != 0 {
+                note.velocity
+            } else {
+                1.0
+            },
             pan: note.pan,
             mods,
             offsets,
@@ -1926,6 +2054,8 @@ impl Voice {
             over: false,
             first: true,
             to_tick: 0,
+            first_len,
+            first_dt,
             band: [band::WHOLE; OPERATORS],
             plucks: [pluck::Pluck::IDLE; OPERATORS],
             seed: *seed,
@@ -1975,7 +2105,7 @@ impl Voice {
         let len = len.max(1) as f32;
         let snap = self.first;
         self.first = false;
-        let dt = if snap { 0.0 } else { 1.0 };
+        let dt = if snap { self.first_dt } else { 1.0 };
         // The articulators move first, then the stage is taken.
         // The main pitch retunes the operators (`0x872290` calls `0x872210`
         // when the note's pitch and it come to another sum).
@@ -2008,6 +2138,17 @@ impl Voice {
         }
         let value =
             |part: usize, index: usize| self.articulators[part * ARTICULATORS + index].value;
+        let pitch_factor = |op: usize| {
+            (f64::from(value(op, 3)) * 2.0 * f64::from(state.operators[op].range) / 1200.0).exp2()
+        };
+        // u8 0x442: the operators after the first also follow the first
+        // one's pitch articulator, the voice's +0xd0 (operator 1's +0x48;
+        // `0x870820`, `0x86af20`).
+        let first_factor = if state.switches[1] != 0 {
+            pitch_factor(0)
+        } else {
+            1.0
+        };
         for op in 0..OPERATORS {
             if !state.active[op] {
                 continue;
@@ -2015,8 +2156,10 @@ impl Voice {
             let operator = &state.operators[op];
             let volume = value(op, 1) * operator.volume;
             let modulation = value(op, 2).clamp(0.0, 1.0);
-            let factor =
-                (f64::from(value(op, 3)) * 2.0 * f64::from(operator.range) / 1200.0).exp2();
+            let mut factor = pitch_factor(op);
+            if op > 0 {
+                factor *= first_factor;
+            }
             let phase_art = value(op, 4);
             let run = &mut self.operators[op];
             let delta = if snap {
@@ -2056,7 +2199,7 @@ impl Voice {
                         let rates = (base, pitch, timing.rate);
                         let (phase, noise) = (run.phase, operator.noise);
                         let table = &operator.table;
-                        pluck.start(buffer, table, rates, phase, noise, damping, &mut self.seed);
+                        pluck.start(buffer, table, rates, phase, noise, damping);
                     }
                 } else if pluck.slot != pluck::NONE {
                     pluck.damp(damping, pitch);
@@ -2158,7 +2301,10 @@ impl Voice {
         let mut at = 0;
         while at < len {
             if self.to_tick == 0 {
-                self.to_tick = timing.tick as usize;
+                self.to_tick = match (self.first, self.first_len) {
+                    (true, Some(len)) => len,
+                    _ => timing.tick as usize,
+                };
                 self.tick(state, timing, self.to_tick, pools);
                 // A slave lasts as long as its master.
                 if self.over && self.unison.role != Role::Slave {
@@ -2368,6 +2514,9 @@ pub struct Sytrus {
     seed: u32,
     /// The frames played since the plugin started (`0x62b8`).
     clock: u32,
+    /// The last note's pitch, cents from C5 with the main pitch (0x62e0,
+    /// `0x7fffffff` for none): where a portamento glides from.
+    last_pitch: Option<f32>,
 }
 
 impl Default for Sytrus {
@@ -2384,6 +2533,7 @@ impl Default for Sytrus {
             scratch: vec![0.0; (ROWS + OPERATORS + 2) * CHUNK],
             seed: 0x1234_5678,
             clock: 0,
+            last_pitch: None,
         }
     }
 }
@@ -2539,12 +2689,21 @@ impl Generator for Sytrus {
             let oldest = self.voices[0].group;
             self.drop_group(oldest);
         }
+        // The note glides from the last one when the portamento switch
+        // (u8 0x4f8) and the note's colour 14 disagree (`0x86c7d0` reads
+        // the colour with `FPV_GetColor`), and it is keyed at the last
+        // note with u8 0x4fa.
+        let pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch + self.state.main_pitch;
+        let porta_on = self.state.params[PARAMS - 1] != 0;
+        let porta = self.last_pitch.filter(|_| porta_on != (note.color == 14));
+        let filed = match porta {
+            Some(last) if self.state.porta[1] != 0 => last,
+            _ => pitch,
+        };
         // With u8 0x443 a note cuts the voices of its key that are not
         // already ending (`0x86c7d0`).
         if self.state.switches[2] != 0 {
-            let key = filed_key(
-                f32::from(note.key - 60) * 100.0 + note.fine_pitch + self.state.main_pitch,
-            );
+            let key = filed_key(filed);
             for voice in self.voices.iter_mut().filter(|v| v.key == key && !v.ending) {
                 voice.cut();
             }
@@ -2560,9 +2719,15 @@ impl Generator for Sytrus {
                 unison[k]
             };
             let place = (self.notes, u, self.clock);
-            let voice = Voice::new(&note, &self.state, timing, &mut self.seed, place);
+            let start = Start {
+                link: self.voices.iter().find(|v| !v.released),
+                porta: porta.map(|last| last - pitch),
+                filed,
+            };
+            let voice = Voice::new(&note, &self.state, timing, &mut self.seed, place, start);
             self.voices.push(voice);
         }
+        self.last_pitch = Some(pitch);
     }
 
     fn note_off(&mut self, voice: u32) {
@@ -2653,6 +2818,11 @@ impl Generator for Sytrus {
             let state = &self.state;
             self.fx.configure(&state.fx, &state.wheels(), self.tempo);
         }
+        // Switching the portamento off forgets the last note (0x62e0 goes
+        // back to 0x7fffffff).
+        if index == PARAMS - 1 && self.state.params[index] == 0 {
+            self.last_pitch = None;
+        }
     }
 
     fn reset(&mut self) {
@@ -2695,33 +2865,10 @@ impl Generator for Sytrus {
     /// for it.
     fn fidelity(&self) -> Fidelity {
         let state = &self.state;
-        let global = (0..PARTS).any(|part| {
-            (part >= ROWS || state.active[part])
-                && state
-                    .articulators(part)
-                    .iter()
-                    .any(|a| a.global && a.envelope.active())
-        });
-        let pluck_noise = (0..OPERATORS).any(|op| {
-            let operator = &state.operators[op];
-            state.active[op] && operator.plucked && operator.noise != 0.0
-        });
         if state.send_on && state.fx.send_target != -1 {
             // The send to a mixer track (`Gen_Render`'s GetInBuffer) has no
             // way out of a generator here.
             Fidelity::Approximate("Sytrus FX send")
-        } else if state.params[PARAMS - 1] != 0 {
-            Fidelity::Approximate("Sytrus portamento")
-        } else if global {
-            Fidelity::Approximate("Sytrus global envelopes")
-        } else if [0, 1, 3, 4]
-            .iter()
-            .any(|&k| state.switches[k] != SWITCHES[k])
-        {
-            Fidelity::Approximate("Sytrus voice switches")
-        } else if pluck_noise {
-            // IPP's uniform generator, seeded by the phase.
-            Fidelity::Approximate("Sytrus plucked noise")
         } else {
             Fidelity::Exact
         }
@@ -3327,10 +3474,246 @@ mod tests {
         assert_eq!(filed_key(150.0), 62);
         let mut sytrus = blank();
         sytrus.state.switches[4] = 2;
-        assert_eq!(
-            sytrus.fidelity(),
-            Fidelity::Approximate("Sytrus voice switches")
-        );
+        assert_eq!(sytrus.fidelity(), Fidelity::Exact);
+    }
+
+    /// A volume envelope on operator 1 that rises over a beat to its
+    /// decay marker, falls over another to its loop end and lets go over
+    /// a third.
+    fn rise_fall(flags: u32) -> MEnvelope {
+        let points = [
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(1.0, 0.5),
+            Point::new(1.0, 0.0),
+        ];
+        MEnvelope {
+            points: points.to_vec(),
+            arp: vec![0; 4],
+            flags,
+            active: true,
+            decay: 1,
+            loop_end: 2,
+            ..idle(1, 1.0, crate::menvelope::ENVELOPE_KNOBS)
+        }
+    }
+
+    fn set_envelope(sytrus: &mut Sytrus, op: usize, index: usize, envelope: &MEnvelope) {
+        let centre = sytrus.state.operators[op].articulators[index].centre();
+        let track = Track::new(envelope, centre).with_offsets();
+        sytrus.state.operators[op].articulators[index].envelope = track;
+        sytrus.state.operators[op].articulators[index].global = envelope.flags & 2 != 0;
+    }
+
+    #[test]
+    fn a_global_envelope_takes_over_the_run_of_the_first_voice_held() {
+        for global in [false, true] {
+            let mut sytrus = blank();
+            set_envelope(&mut sytrus, 0, 1, &rise_fall(1 | (2 * u32::from(global))));
+            let (mut l, mut r) = (vec![0.0; 1000], vec![0.0; 1000]);
+            sytrus.note_on(note(1, 60));
+            sytrus.process(&mut l, &mut r);
+            sytrus.note_on(note(2, 64));
+            let (first, second) = (&sytrus.voices[0], &sytrus.voices[1]);
+            let run = |v: &Voice| v.articulators[1].run;
+            if global {
+                // The second voice is where the first is, and ticks with
+                // it: its first tick comes when the first voice's next
+                // does, and does not move it.
+                assert_eq!(run(second).out, run(first).out);
+                assert!(run(second).out > 0.0);
+                assert_eq!(second.first_len, Some(first.to_tick));
+                assert_eq!(second.first_dt, 0.0);
+            } else {
+                assert_eq!(run(second).out, 0.0);
+                assert_eq!(second.first_len, None);
+            }
+            sytrus.process(&mut l, &mut r);
+            let (first, second) = (&sytrus.voices[0], &sytrus.voices[1]);
+            assert_eq!(run(first).out == run(second).out, global);
+            if global {
+                assert_eq!(first.to_tick, second.to_tick);
+            }
+            // A released voice is not followed.
+            sytrus.note_off(1);
+            sytrus.note_off(2);
+            sytrus.note_on(note(3, 67));
+            assert_eq!(run(&sytrus.voices[2]).out, 0.0);
+        }
+    }
+
+    #[test]
+    fn the_points_take_an_offset_by_their_weights() {
+        // Lengths 0, 1, 1, 1, 2 with the decay at 1, the loop from 2 to 3:
+        // the attack's share still to come, the decay's share played, 1 in
+        // the loop, the release's share still to come.
+        let lengths = [0.0, 1.0, 1.0, 1.0, 2.0, 2.0];
+        let w = crate::menvelope::weights(&lengths, 1, 2, 3);
+        assert_eq!(w, vec![1.0, 0.0, 1.0, 1.0, 0.5, 0.0]);
+        // No markers: the decay is point 0, the loop end the last point.
+        let w = crate::menvelope::weights(&[0.0, 1.0, 3.0], -1, -1, -1);
+        assert_eq!(w, vec![0.0, 0.25, 1.0]);
+        // A run with an offset lifts the points by them, kept to 0..1.
+        let track = Track::new(&rise_fall(0), 0.0).with_offsets();
+        let mut run = track.start(0.5);
+        assert!(run.attacking());
+        run.set_offset(0.5);
+        // Point 0 takes all of it and the first tick starts there; point 1
+        // (the decay) takes none, and the decay drops the offset for the
+        // sustain knob's (0).
+        track.advance(&mut run, 0.0, 0.5);
+        assert!((run.out - 0.5).abs() < 1e-6, "{}", run.out);
+        track.advance(&mut run, 1.0, 0.5);
+        assert!((run.out - 0.75).abs() < 1e-6, "{}", run.out);
+        track.advance(&mut run, 1.0, 0.5);
+        assert!((run.out - 1.0).abs() < 1e-6, "{}", run.out);
+        assert!(!run.attacking());
+        track.advance(&mut run, 1.0, 0.5);
+        assert!((run.out - 0.75).abs() < 1e-6, "{}", run.out);
+    }
+
+    #[test]
+    fn a_release_goes_to_the_loop_end_with_the_offset_carried_over() {
+        // Five points: up to 1 at the decay marker, 0.5 at the loop end,
+        // then 0.4 and 0, a tick each at a rate of 1.
+        let mut envelope = rise_fall(0);
+        envelope.points[3] = Point::new(1.0, 0.4);
+        envelope.points.push(Point::new(1.0, 0.0));
+        envelope.arp.push(0);
+        let track = Track::new(&envelope, 0.0).with_offsets();
+        let mut run = track.start(1.0);
+        track.advance(&mut run, 0.0, 1.0);
+        track.advance(&mut run, 1.0, 1.0);
+        // Half way down the decay, 0.75 against the loop end's 0.5.
+        track.advance(&mut run, 0.5, 1.0);
+        assert!((run.out - 0.75).abs() < 1e-6, "{}", run.out);
+        track.release(&mut run, 1.0);
+        // The next tick starts the release from 0.75, and the point after
+        // the loop end takes the 0.25 by its weight of 1/2: 0.525.
+        track.advance(&mut run, 0.0, 1.0);
+        assert!((run.out - 0.75).abs() < 1e-6, "{}", run.out);
+        track.advance(&mut run, 1.0, 1.0);
+        assert!((run.out - 0.525).abs() < 1e-6, "{}", run.out);
+        track.advance(&mut run, 1.0, 1.0);
+        assert!(run.out.abs() < 1e-6, "{}", run.out);
+        assert!(run.over());
+    }
+
+    #[test]
+    fn the_sustain_knob_lifts_the_decay_by_the_weights() {
+        let mut envelope = rise_fall(0);
+        envelope.knobs[2] = 64;
+        let track = Track::new(&envelope, 0.0).with_offsets();
+        let mut run = track.start(0.5);
+        // Two ticks to the decay marker, two more to the loop end, where
+        // point 2 (weight 1) is 0.5 + 0.5.
+        track.advance(&mut run, 0.0, 0.5);
+        for _ in 0..4 {
+            track.advance(&mut run, 1.0, 0.5);
+        }
+        assert!((run.out - 1.0).abs() < 1e-6, "{}", run.out);
+        // Without offsets the point is where it is drawn.
+        let plain = Track::new(&envelope, 0.0);
+        let mut run = plain.start(0.5);
+        plain.advance(&mut run, 0.0, 0.5);
+        for _ in 0..4 {
+            plain.advance(&mut run, 1.0, 0.5);
+        }
+        assert!((run.out - 0.5).abs() < 1e-6, "{}", run.out);
+    }
+
+    #[test]
+    fn a_portamento_starts_the_pitch_envelope_the_last_note_away() {
+        // A pitch envelope (bipolar, centre 0.5) flat at the centre with
+        // its decay at point 1 a beat on.
+        let flat = MEnvelope {
+            points: vec![Point::new(0.0, 0.5), Point::new(1.0, 0.5)],
+            arp: vec![0, 0],
+            flags: 1,
+            active: true,
+            decay: 1,
+            ..idle(1, 0.5, crate::menvelope::ENVELOPE_KNOBS)
+        };
+        let increment = |porta: i32, color: u8, kind: u8| {
+            let mut sytrus = blank();
+            set_envelope(&mut sytrus, 0, 3, &flat);
+            sytrus.state.params[PARAMS - 1] = porta;
+            sytrus.state.porta = [0, 0, kind];
+            let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+            sytrus.note_on(note(1, 48));
+            sytrus.process(&mut l, &mut r);
+            sytrus.note_on(NoteOn {
+                color,
+                ..note(2, 60)
+            });
+            sytrus.process(&mut l, &mut r);
+            let v = sytrus.voices.iter().find(|v| v.id == 2).unwrap();
+            v.operators[0].increment / v.operators[0].pitch
+        };
+        // Off, or on with colour 14, the note is at its pitch.
+        assert!((increment(0, 0, 0) - 1.0).abs() < 1e-9);
+        assert!((increment(1, 14, 0) - 1.0).abs() < 1e-9);
+        // On (or off with colour 14), operator 1's pitch envelope (range
+        // 1200) starts an octave down, at its first point's weight of 1.
+        assert!((increment(1, 0, 0) - 0.5).abs() < 1e-6);
+        assert!((increment(0, 14, 0) - 0.5).abs() < 1e-6);
+        // Kind 3 keeps the glide to 300 cents.
+        let three = (-300.0f64 / 1200.0).exp2();
+        assert!((increment(1, 0, 3) - three).abs() < 1e-6);
+        assert_eq!(porta_cents(-2500.0, 1), -100.0);
+        assert_eq!(porta_cents(1300.0, 1), 100.0);
+        assert_eq!(porta_cents(-1250.0, 1), -1250.0);
+        assert_eq!(porta_cents(700.0, 2), 400.0);
+    }
+
+    #[test]
+    fn the_voice_switches_do_what_the_voice_start_reads() {
+        // 0x442: operator 2 also follows operator 1's pitch articulator.
+        let up = MEnvelope {
+            points: vec![Point::new(0.0, 1.0)],
+            arp: vec![0],
+            active: true,
+            ..idle(1, 1.0, crate::menvelope::ENVELOPE_KNOBS)
+        };
+        let second = |switch: u8| {
+            let mut sytrus = blank();
+            set_envelope(&mut sytrus, 0, 3, &up);
+            sytrus.state.active[1] = true;
+            sytrus.state.switches[1] = switch;
+            let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+            sytrus.note_on(note(1, 60));
+            sytrus.process(&mut l, &mut r);
+            let v = &sytrus.voices[0];
+            v.operators[1].increment / v.operators[1].pitch
+        };
+        assert!((second(0) - 1.0).abs() < 1e-9);
+        // The articulator at 1 is 0.5 over its centre: 1200 cents up.
+        assert!((second(1) - 2.0).abs() < 1e-6, "{}", second(1));
+        // 0x4fc off: the velocity leaves the gain alone.
+        for (link, gain) in [(1, 0.5), (0, 1.0)] {
+            let mut sytrus = blank();
+            sytrus.state.switches[3] = link;
+            sytrus.note_on(NoteOn {
+                velocity: 0.5,
+                ..note(1, 60)
+            });
+            assert_eq!(sytrus.voices[0].velocity, gain);
+        }
+        // 0x4fd bit 1: the envelope starts the velocity's share of the
+        // way to its decay marker (a beat away: 0.78125 of it at 100).
+        let mut sytrus = blank();
+        set_envelope(&mut sytrus, 0, 1, &rise_fall(1));
+        sytrus.state.switches[4] = 2;
+        sytrus.note_on(note(1, 60));
+        let mut run = sytrus.voices[0].articulators[1].run;
+        let track = sytrus.state.operators[0].articulators[1].envelope.clone();
+        track.advance(&mut run, 0.0, sytrus.timing().rates[1]);
+        assert!((run.out - 0.781_25).abs() < 1e-3, "{}", run.out);
+        // Bit 0 times the attack by 2 - 2v.
+        sytrus.state.switches[4] = 1;
+        sytrus.note_on(note(2, 60));
+        let run = sytrus.voices[1].articulators[1].run;
+        assert!((track.attack_scale(&run) - 0.4375).abs() < 1e-6);
     }
 
     #[test]
