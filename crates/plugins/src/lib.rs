@@ -64,6 +64,7 @@ pub mod edison;
 pub mod effector;
 pub mod emphasis;
 mod emphasis_dsp;
+pub mod emphasizer;
 pub mod envelope_controller;
 pub mod equo;
 pub mod fast_dist;
@@ -129,6 +130,7 @@ pub mod reeverb;
 pub mod reeverb_2;
 mod sampler;
 pub mod send;
+pub mod seven_band_eq;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
@@ -144,6 +146,7 @@ pub mod test_sine;
 mod testing;
 pub mod three_osc;
 pub mod transient_processor;
+pub mod transporter;
 pub mod vintage_chorus;
 pub mod vintage_phaser;
 pub mod vocodex;
@@ -412,6 +415,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(effector::Effector::default()))
     } else if is(emphasis::NAME) {
         Some(Box::new(emphasis::Emphasis::default()))
+    } else if is(emphasizer::NAME) {
+        Some(Box::new(emphasizer::Emphasizer::default()))
     } else if is(equo::NAME) {
         Some(Box::new(equo::Equo::default()))
     } else if is(fast_dist::NAME) {
@@ -476,6 +481,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(reeverb_2::Reeverb2::default()))
     } else if is(send::NAME) {
         Some(Box::new(send::Send::default()))
+    } else if is(seven_band_eq::NAME) {
+        Some(Box::new(seven_band_eq::SevenBandEq::default()))
     } else if is(soft_clipper::NAME) {
         Some(Box::new(soft_clipper::SoftClipper::default()))
     } else if is(soundgoodizer::NAME) {
@@ -772,6 +779,7 @@ mod tests {
             ("effector", 316, 27),
             ("emphasis", 64, 4),
             ("emphasis", 67, 1),
+            ("emphasizer", 29, 1),
             ("equo", 4143, 10),
             ("frequency shifter", 52, 5),
             ("fruity bass boost", 12, 2),
@@ -866,7 +874,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 55);
+        assert_eq!(lengths.count(), 56);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
