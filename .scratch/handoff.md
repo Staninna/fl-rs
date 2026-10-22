@@ -6,14 +6,13 @@ Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every w
 
 - Perf: the mixer runs the strips of each wave of the routing graph on a worker pool (`crates/engine/src/pool.rs`, `mix.rs`; `FL_RS_THREADS` sets its size, 1 is serial). Every harness hash is unchanged. The sine bank is FL's AVX kernel to its sum order and restart period (`dsp::additive`).
 - New ports, each with its doc under `docs/plugins/`: Center, Mute 2, Phase Inverter, GMS, MiniSynth, BeepMap, Drumaxx, FL Slayer, Fruity Slicer 2, Kepler Exo, Fruity Granulizer, Wave Traveller, Fruity 7 Band EQ, Emphasizer (shell; LimiterLite is missing from the install), Patcher, and the Envelope, Formula, Keyboard and Voltage controllers.
-- Larger pieces: Sytrus's unison, waveshapers, effects, filters, plucked operators, oversampling, global envelopes and portamento; linear phase for Parametric EQ 2 and Frequency Splitter; FL's sample interpolator (`dsp::interpolator`, at a render quality that is inferred); note colour, slide notes and live channel pitch for generators; automation targets that FL plays by setting nothing, Tension in controller formulas, and the sampler filter's mod X/Y (`docs/automation-234.md` lists what the render still counts unsupported).
+- Larger pieces: Sytrus's unison, waveshapers, effects, filters, plucked operators, oversampling, global envelopes and portamento; Harmor's envelope sustain weights, release and arpeggiator, shared envelopes and global LFOs (what is left is under 3.3 of `docs/plugins/harmor.md`); linear phase for Parametric EQ 2 and Frequency Splitter; FL's sample interpolator (`dsp::interpolator`, at a render quality that is inferred); note colour, slide notes and live channel pitch for generators; automation targets that FL plays by setting nothing, Tension in controller formulas, and the sampler filter's mod X/Y (`docs/automation-234.md` lists what the render still counts unsupported).
 - `tools/`: a script that renders every demo project to WAV, and a record of the commit each demo rating was made with.
 
 ## Left half done, with notes in `.scratch/notes/`
 
-- Morphine (`morphine*.rs`): source files written, which built on the tree they were written on, but not in `lib.rs`, `generator.rs` or `port.rs`, so they are not compiled. `morphine.md` lists the lines to add and what is untested.
+- Morphine is registered and documented (`docs/plugins/morphine.md`, level Gaps); `notes/morphine.md` lists what is left: the noise layer and release-loop jump not rechecked against the DLL, unison and per-note tuning left out.
 - Sakura is registered and plays bit for bit against its DLL under unicorn but for the runtime's f64 `pow` (`Port::Gaps`, `docs/plugins/sakura.md`). `sakura.md` lists what is left and how to run the harness in `sakura-emu/`.
-- Harmor: `harmor-wip.patch` is a diff left uncommitted when usage ran out. It has not been built on this tree.
 - Fruity Convolver's EQ curve (`fruity-convolver.md`) and Transporter's DSP, TransientLooper, which is missing from the install (`transporter.md`). Slicex's declicker and Vintage Phaser's gaps are listed in their docs under `docs/plugins/`. FLEX is not started and has no note.
 - Toxic Biohazard and PoiZone are not started.
 

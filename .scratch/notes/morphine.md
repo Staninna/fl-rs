@@ -1,49 +1,40 @@
-# Morphine: handover (work in progress, 2026-10-22)
+# Morphine: what is left (2026-10-22)
 
-Stopped mid-task when usage ran out. Rebuilt from
-`Plugins/Fruity/Generators/Morphine/Morphine_x64.dll` (MSVC `CFLWrapper`
-engine, image base 0x180000000, no Delphi shell). Used by 4 shipped
-projects (Africa's Calling, NIGHT TERROR, SHINE, I'll Be Your Madonna).
+Morphine is registered (`lib.rs`, `generator.rs`, `port.rs` at `Gaps`),
+documented in `docs/plugins/morphine.md` with the DLL addresses, and its
+`docs/plugins.md` row is filled in. `cargo test -p plugins morphine` with
+`FL_RS_CORPUS` loads and plays all 310 shipped states (3 `.fst`, 7 project
+channels, 300 `.mrp`) finite and non-silent, and counts how many switch on
+each effect.
 
-## What is in the tree
+## Done in this pass
 
-- `crates/plugins/src/morphine.rs`: the generator. Four analysed
-  generators (frames of 128 harmonics' amplitude, pan, detune), the morph
-  line over the square, a 128-oscillator bank, master ADSR on a Catmull-Rom
-  level curve, four envelopes and the 12-route mod matrix. Control blocks
-  of `int(0.0029 * rate)` samples; see the module comment.
-- `morphine_state.rs`: the state: `SSLF`, then the chunk tree `0roM`,
-  `0RPM`, `0CVM`, `0HZM`, `0PSM`, ... and the program block.
-- `morphine_noise.rs`: the noise layer from `Noise Samples/*.wav`
-  (approximated).
-- `morphine_fx.rs`: overdrive, chorus, delay, reverb, 8-band EQ. The
-  last edit (filling in the effects from a stub) is committed as it stood
-  and was not test-run.
+The effects (`morphine_fx.rs`) were checked against the DLL listing by
+listing (`FUN_1800ff630` and everything under it; see the doc's Effects
+table). Fixed to match: the tape's slowest step is `1/size`, not 0; the read
+head may use the sample that crossed into the next pass (FL keeps it at the
+end of the finished pass; the port used to read 0 there); the chorus tapes
+are sized from the f32 0.02 widened (881 samples at 44.1 kHz, not 882); the
+chorus switch only gates it, without a reset; the equaliser keeps FL's
+`6.283185`. The idle path on `+0x584` in `FUN_1800ff630` never runs (the
+counter is only ever zeroed) and is not ported.
 
-## State of the work
+## Left
 
-- Builds (`cargo check -p plugins --tests` passed with it registered).
-  Its tests ran green except the effects' new ones, which were never run.
-- **Not registered**, so CI stays green: the port has no doc yet and
-  `tools/progress.py --check` fails when `port.rs` has a plugin that
-  `docs/plugins.md` does not. To pick up, add back:
-  - `lib.rs`: `pub mod morphine;`, `mod morphine_fx;`, `mod morphine_noise;`, `mod morphine_state;`
-  - `generator.rs` GENERATORS: `(crate::morphine::NAME, || { Box::new(crate::morphine::Morphine::default()) }),`
-  - `port.rs`: `(crate::morphine::NAME, Port::Approximate),`
-- Missing: `docs/plugins/morphine.md` (addresses live only in the code
-  comments for now), its `docs/plugins.md` row, a run of the effects
-  tests, the corpus test, clippy, and fmt. Approximated by its own
-  account: noise layer, effects, the release-loop jump. Left out: unison
-  and per-note tuning.
+- The noise layer (`morphine_noise.rs`, `FUN_180100300`, `FUN_180100880`,
+  `FUN_180113b70`) and the jump a generator or envelope makes on a release
+  inside its release loop (`FUN_1800ebc50`, `marker_value` in
+  `morphine.rs`) are called approximate by the agent that wrote them. They
+  were not rechecked; do that against the listings to move toward Exact.
+- Unison and the per-note tuning a host sends are left out. Parameter 3
+  (`int(12 v)` at `this+0x38dc`, `FUN_180111ec0` case 3) is not read by
+  the port; it may be the unison count.
+- No null test against FL.
 
 ## Tools
 
-`.scratch/notes/morphine-tools/`: the agent's small scripts (state chunk-tree
-parser `parse.py`, `tree.py`, VMT walk `vt.py`, disassembly `dis.py`).
-Paths in them point at `/root/work/morphine/`.
-
-## Next
-
-Register it, run `cargo test -p plugins morphine` with `FL_RS_CORPUS`, fix
-the effects, write the doc with addresses from the DLL, fill in the row,
-run the checks in `.scratch/agent-rules.md`.
+`morphine-tools/`: the first agent's scripts (chunk-tree parser `parse.py`,
+`tree.py`, VMT walk `vt.py`, `dis.py` disassembly with constant-pool
+values, `dat.py` constant dump). They need `pefile` and `capstone`; edit the
+DLL path at the top (`/root/work/morphine/` on the machine they were
+written on).

@@ -81,6 +81,7 @@ mod channel;
 mod codec;
 mod mixer;
 mod mixer_edit;
+mod note_tools;
 mod pattern;
 mod project;
 mod read;

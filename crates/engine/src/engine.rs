@@ -1,6 +1,7 @@
 //! The block renderer: a clock, the voices that are sounding, and the mixer
 //! they play into, which has the generators of the plugin channels in it.
 
+use crate::generator::{Cue, Signal};
 use crate::graph::Graph;
 use crate::mix::BLOCK;
 use crate::voice::Voice;
@@ -46,6 +47,9 @@ pub struct Engine {
     /// Whether the end of the song stops the clock or turns it back. A
     /// render plays past it, to the end of the last voice.
     ends: bool,
+    /// The ticks a pattern on its own plays between, round and round: from
+    /// the first and up to the second.
+    range: Option<(Ticks, Ticks)>,
     mode: Mode,
     /// What [`Engine::new`] was given, to build the graph of another mode
     /// from. An engine made of a graph has none.
@@ -142,6 +146,7 @@ impl Engine {
             ringing: false,
             looping: false,
             ends: true,
+            range: None,
             mode: Mode::default(),
             source: None,
         }
@@ -177,6 +182,58 @@ impl Engine {
     /// engine. A pattern on its own starts over either way.
     pub fn set_loop(&mut self, on: bool) {
         self.looping = on;
+    }
+
+    /// Play a pattern on its own from tick `range.0` up to tick `range.1`
+    /// and back, as FL's PAT mode does with a time selection: a clock
+    /// outside the range goes to its start, and at its end it turns back
+    /// there, with the voices that sound playing out and the generators
+    /// letting go of their notes. `None`, or a range with no ticks, plays
+    /// the whole pattern. The song ignores it.
+    pub fn set_range(&mut self, range: Option<(Ticks, Ticks)>) {
+        self.range = range.filter(|(from, to)| from < to);
+    }
+
+    /// The samples of the clock the range covers, when a pattern plays on
+    /// its own and the range is set.
+    fn range_samples(&self) -> Option<(usize, usize)> {
+        let (from, to) = self.range.filter(|_| self.graph.pattern)?;
+        let clock = &self.graph.clock;
+        let (from, to) = (clock.sample(from), clock.sample(to));
+        (from < to).then_some((from, to))
+    }
+
+    /// Start a voice outside the song's: the oldest one stops when every
+    /// voice is taken. Like [`Engine::process`], this is for an audio
+    /// callback, as long as the voice allocates nothing to clone.
+    pub(crate) fn start_voice(&mut self, voice: Voice) {
+        if self.max_voices == 0 {
+            return;
+        }
+        if self.voices.len() == self.max_voices {
+            self.voices.remove(0);
+        }
+        self.voices.push(voice);
+    }
+
+    /// End every voice where it is.
+    pub(crate) fn end_voices(&mut self) {
+        self.voices.clear();
+    }
+
+    /// Hand a generator a signal now, outside the song's cues.
+    pub(crate) fn signal(&mut self, generator: usize, signal: Signal) {
+        let cue = Cue {
+            at: self.position,
+            generator,
+            signal,
+        };
+        self.graph.mixer.cue(&cue);
+    }
+
+    /// Whether a voice sounds or a generator may.
+    pub(crate) fn sounding(&self) -> bool {
+        !self.voices.is_empty() || self.graph.mixer.ringing()
     }
 
     /// Play the playlist, which a new engine does, or with `false` the
@@ -384,9 +441,22 @@ impl Engine {
                 out_right[at..len].fill(0.0);
                 return;
             }
+            // A pattern played over a range turns back at its end, and a
+            // clock outside it goes to its start.
+            let range = self.range_samples().filter(|_| self.playing);
+            if let Some((from, to)) = range
+                && !(from..to).contains(&self.position)
+            {
+                self.position = from;
+                self.find_next();
+                self.graph.mixer.release();
+            }
             let mut count = (len - at).min(BLOCK);
             if self.playing && self.ends && self.position < end {
                 count = count.min(end - self.position);
+            }
+            if let Some((_, to)) = range {
+                count = count.min(to - self.position);
             }
             // Every note and clip due now starts a voice. The block then
             // ends where the next one starts, so a voice always starts on
@@ -723,6 +793,30 @@ mod tests {
         engine.set_loop(false);
         play(&mut engine, 96_000);
         assert!(!engine.is_playing());
+    }
+
+    #[test]
+    fn a_pattern_plays_round_its_range() {
+        // Notes on ticks 0, 2 and 4, 250 samples a tick, as one pattern.
+        let mut pattern = graph(&project(&[0, 2, 4]), &[1.0; 10]);
+        pattern.pattern = true;
+        let mut engine = Engine::with_graph(pattern, 8);
+        engine.set_range(Some((2, 4)));
+        engine.play();
+        // The clock goes to tick 2, and from tick 4 back to it.
+        let out = play(&mut engine, 1200);
+        let starts: Vec<usize> = (0..1200).filter(|at| out[*at] != 0.0).step_by(10).collect();
+        assert_eq!(starts, [0, 500, 1000]);
+        // A range with no ticks plays the whole pattern on from where the
+        // clock is, tick 2.8, to the note on tick 4.
+        engine.set_range(Some((3, 3)));
+        let out = play(&mut engine, 1000);
+        assert_eq!(out.iter().position(|v| *v != 0.0), Some(300));
+        // The song ignores it.
+        let mut engine = Engine::with_graph(graph(&project(&[0]), &[1.0]), 8);
+        engine.set_range(Some((2, 4)));
+        engine.play();
+        assert_eq!(play(&mut engine, 10)[0], 1.0);
     }
 
     #[test]

@@ -21,8 +21,9 @@
 //! of them a state asks for. The HQ offline render (0.5 ms tick, 520
 //! partials, perfect precision) is not used: this plays what FL plays live.
 
+use crate::autogun_engine::rand_uniform;
 use crate::harmless::shape;
-use crate::harmor_art::{ArtRun, Articulator, Inputs, smoothing};
+use crate::harmor_art::{ArtRun, Articulator, EnvRun, Inputs, smoothing};
 use crate::harmor_fx::{FX_BLOCK, GlobalFx};
 use crate::harmor_state::{
     ARTICULATORS, GLOBAL_PARAMS, GLOBAL_RANGES, KNOB_RANGES, PARAMS, PART_PARAMS, PART_RANGES,
@@ -1026,6 +1027,16 @@ struct Voice {
     runs: Vec<ArtRun>,
     art: [f32; ARTICULATORS],
     countdown: usize,
+    /// The frames from the first tick to the second when they are not a
+    /// tick's, and the first tick's step: a voice whose shared envelopes
+    /// follow another's takes that voice's countdown (`0x883cd0` stores
+    /// `-|count|` at +0x3c; `0x88ab10` turns a negative count into a first
+    /// tick that does not move, and 0 into an ordinary one).
+    first_len: Option<usize>,
+    first_dt: f64,
+    /// A shared envelope follows another voice's (+0x3330): its attack is
+    /// not jumped into.
+    linked: bool,
     first: bool,
     sp: f32,
     detune: f32,
@@ -1066,6 +1077,8 @@ struct Voice {
     noise_step: [f64; 2],
     noise_acc: [f64; 2],
     noise_seed: [u32; 2],
+    /// The noise resonance's numbers, one a partial.
+    noise_buf: Vec<f32>,
     blur: Vec<f32>,
     blur_len: usize,
     /// The Hz each partial's ramp was worked out for.
@@ -1100,6 +1113,9 @@ impl Voice {
             runs: Vec::with_capacity(ARTICULATORS),
             art: [0.0; ARTICULATORS],
             countdown: 0,
+            first_len: None,
+            first_dt: 0.0,
+            linked: false,
             first: true,
             sp: 0.0,
             detune: 0.0,
@@ -1133,6 +1149,7 @@ impl Voice {
             noise_step: [0.0; 2],
             noise_acc: [0.0; 2],
             noise_seed: [0x1234_5678, 0x8765_4321],
+            noise_buf: vec![0.0; PARTIALS],
             blur: vec![0.0; PARTIALS],
             blur_len: 0,
             ramp_hz: vec![f32::NAN; PARTIALS],
@@ -1176,6 +1193,13 @@ pub struct Harmor {
     fx: [[f32; CHUNK]; 2],
     dry: [[f32; CHUNK]; 2],
     units: Box<GlobalFx>,
+    /// The held voices changed since the arpeggiator last ranked them
+    /// (this+0xe90).
+    arp_dirty: bool,
+    /// Every global LFO's phase (flag 2, the TMLFO's +0xa8): where its
+    /// voices start, moved on with each block (`Gen_Render`'s list at
+    /// this+0x2cf0).
+    lfo_phase: [[u32; ARTICULATORS]; 2],
 }
 
 impl Default for Harmor {
@@ -1213,6 +1237,8 @@ impl Default for Harmor {
             fx: [[0.0; CHUNK]; 2],
             dry: [[0.0; CHUNK]; 2],
             units: Box::new(GlobalFx::new(44_100.0)),
+            arp_dirty: false,
+            lfo_phase: [[0; ARTICULATORS]; 2],
         };
         plugin.derive();
         plugin
@@ -1220,6 +1246,53 @@ impl Default for Harmor {
 }
 
 impl Harmor {
+    /// Rank the held voices for the envelopes' arpeggiator points
+    /// (`Gen_Render` `0x891320`, after a voice starts or is released):
+    /// the held keys, each once, in order (InvArpBox, REC 788, turns it
+    /// over); every held voice's main-list envelopes learn the place of
+    /// its key and how many there are (`FUN_007a24b0`). Only when an
+    /// envelope of the main list has such points (this+0x113d, set by
+    /// `0x8974d0`). This allocates nothing.
+    fn rank_held(&mut self) {
+        if !std::mem::take(&mut self.arp_dirty) {
+            return;
+        }
+        let gate = (0..2).any(|p| self.parts[p].arts[..31].iter().any(|a| a.envelope.arp_on));
+        if !gate {
+            return;
+        }
+        let down = self.state.globals.params[16];
+        let mut keys = [0f32; VOICES];
+        let mut n = 0;
+        for v in self.voices.iter().filter(|v| v.active && v.state < 6) {
+            let key = v.key_pitch;
+            if keys[..n].contains(&key) {
+                continue;
+            }
+            let at = keys[..n]
+                .iter()
+                .position(|k| i32::from(key < *k) != down)
+                .unwrap_or(n);
+            keys.copy_within(at..n, at + 1);
+            keys[at] = key;
+            n += 1;
+        }
+        for v in self.voices.iter_mut().filter(|v| v.active && v.state < 6) {
+            // FL stops looking at the last key.
+            let last = n.saturating_sub(1);
+            let rank = keys[..last]
+                .iter()
+                .position(|k| *k == v.key_pitch)
+                .unwrap_or(last);
+            let dsp = &self.parts[v.part];
+            for a in 0..31 {
+                dsp.arts[a]
+                    .envelope
+                    .rank(&mut v.runs[a].env, rank as i32, n as i32);
+            }
+        }
+    }
+
     /// The state the plugin has now.
     pub fn state_version(&self) -> u32 {
         self.state.version
@@ -1238,6 +1311,35 @@ impl Harmor {
         *self.units = GlobalFx::new(self.ctx.rate);
         self.derive();
         self.build_compression();
+        self.restart_lfos();
+    }
+
+    /// Put every global LFO at its start (`FUN_007a33e0`).
+    fn restart_lfos(&mut self) {
+        for p in 0..2 {
+            for (a, art) in self.parts[p].arts.iter().enumerate() {
+                self.lfo_phase[p][a] = art.lfo.start_phase();
+            }
+        }
+    }
+
+    /// Move the main list's global LFOs on by `len` frames, at the pace
+    /// of their tick: `round(len / tick x pace)` (`Gen_Render`
+    /// `0x892376`; the list at this+0x2cf0 is built by `0x8974d0`). A
+    /// frozen LFO's phase moves too: FL reads the pace it keeps before
+    /// freezing (+0x98).
+    fn move_lfos(&mut self, len: usize) {
+        let rates = self.ctx.rates();
+        for p in 0..2 {
+            for (a, art) in self.parts[p].arts[..31].iter().enumerate() {
+                if art.lfo_global && art.lfo.active() {
+                    let pace = art.lfo.pace_unfrozen(rates[usize::from(art.lfo.tempo())]);
+                    let ticks = len as f64 / self.ctx.tick as f64;
+                    let moved = (ticks * pace).round_ties_even() as i64 as u32;
+                    self.lfo_phase[p][a] = self.lfo_phase[p][a].wrapping_add(moved);
+                }
+            }
+        }
     }
 
     /// The control rate and what the parameters make of every part
@@ -1333,6 +1435,7 @@ impl Harmor {
     /// TriggerVoice (`0x883cd0`): a voice for every unison copy of every
     /// enabled part.
     fn start(&mut self, note: NoteOn) {
+        self.arp_dirty = true;
         let key_pitch = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         let vel01 = (((f64::from(note.velocity) * 10.0 + 1.0).ln() / 11f64.ln()) * 100.0 / 128.0)
             .min(1.0) as f32;
@@ -1420,6 +1523,32 @@ impl Harmor {
             if mode == 2 {
                 draw(self, &mut buffer);
             }
+            // Shared envelopes (flag 2) follow the first voice of the part
+            // that is held, the oldest (`0x883cd0`: the list at +0xe20, kind
+            // 0, the same part, state under 6), and the note's voices tick
+            // with it.
+            let shares = self.parts[p].arts[..31]
+                .iter()
+                .any(|a| a.envelope.active && a.envelope.shared);
+            let link = shares
+                .then(|| {
+                    self.voices
+                        .iter()
+                        .filter(|v| v.active && v.part == p && v.state < 6)
+                        .min_by_key(|v| v.age)
+                })
+                .flatten()
+                .map(|v| {
+                    let runs: [EnvRun; 31] = std::array::from_fn(|a| v.runs[a].env);
+                    let (len, dt) = if v.first {
+                        (v.first_len, v.first_dt)
+                    } else if v.countdown > 0 {
+                        (Some(v.countdown), 0.0)
+                    } else {
+                        (None, 1.0)
+                    };
+                    (runs, len, dt)
+                });
             let n = self.parts[p].unison;
             for i in 0..n {
                 if mode == 3 && i > 0 {
@@ -1456,6 +1585,9 @@ impl Harmor {
                     buffer
                 };
                 v.countdown = 0;
+                v.first_len = None;
+                v.first_dt = 0.0;
+                v.linked = false;
                 v.first = true;
                 v.glide = [0.0; 2];
                 v.glide_left = 0;
@@ -1494,6 +1626,19 @@ impl Harmor {
                 for (a, art) in dsp.arts.iter().enumerate() {
                     let random = (mode != 0).then_some(v.random[a]);
                     let mut run = art.start(random, v.unison_x, rates);
+                    if art.lfo_global
+                        && let Some(lfo) = &mut run.lfo
+                    {
+                        lfo.set_phase(self.lfo_phase[p][a]);
+                    }
+                    if let Some((runs, len, dt)) = &link
+                        && a < 31
+                        && art.envelope.active
+                        && art.envelope.shared
+                    {
+                        art.envelope.follow(&mut run.env, &runs[a]);
+                        (v.first_len, v.first_dt, v.linked) = (*len, *dt, true);
+                    }
                     if a == 1 && dsp.vel_to_attack {
                         // VelToAttScale: the volume envelope's attack is
                         // 2 - 2 vel as long.
@@ -1510,6 +1655,7 @@ impl Harmor {
     /// legato voice goes back to the newest note it took over that is
     /// still held.
     fn release(&mut self, id: Option<u32>) {
+        self.arp_dirty = true;
         if let Some(id) = id {
             for v in self.voices.iter_mut().filter(|v| v.active && v.stacked > 0) {
                 let mut keep = 0;
@@ -1603,7 +1749,7 @@ fn tick(dsp: &PartDsp, ctx: &Ctx, vibrato: f64, v: &mut Voice) {
     let glide = v.glide[1] as f32;
     let [mx, my, mz] = ctx.mod_xyz;
     let mut inputs = Inputs {
-        dt: if first { 0.0 } else { 1.0 },
+        dt: if first { v.first_dt } else { 1.0 },
         speed: 1.0,
         lfo_amount: 1.0,
         at: [
@@ -1630,8 +1776,16 @@ fn tick(dsp: &PartDsp, ctx: &Ctx, vibrato: f64, v: &mut Voice) {
         let globals = [v.art[34], v.art[35], v.art[36], v.art[37]];
         let identity = globals == [1.0, 1.0, 0.0, 1.0];
         let jump = (v.art[33] * 2.0).max(0.0);
+        // The global LFO phase (articulator 40) moves every LFO of the main
+        // list on, once (`0x88ab10`: `round(art[40] x 2^32)`).
+        let shift = (f64::from(v.art[40]) * 4_294_967_296.0).round_ties_even() as i64 as u32;
         for a in 0..31 {
             let art = &dsp.arts[a];
+            if shift != 0
+                && let Some(lfo) = &mut v.runs[a].lfo
+            {
+                lfo.shift_phase(shift);
+            }
             if !art.envelope.active {
                 continue;
             }
@@ -1643,7 +1797,8 @@ fn tick(dsp: &PartDsp, ctx: &Ctx, vibrato: f64, v: &mut Voice) {
             if a == 1 && dsp.vel_to_attack {
                 share += v.vel01;
             }
-            if share > 0.0 {
+            // A shared envelope that follows another voice's keeps its place.
+            if share > 0.0 && !(v.linked && art.envelope.shared) {
                 let rate = rates[usize::from(art.envelope.tempo)];
                 art.envelope.jump(run, share.min(1.0), rate);
             }
@@ -2029,8 +2184,7 @@ fn filter_slot(
     }
 }
 
-/// The noise resonance of `FUN_00886eb0` (resonance type 109). FL draws
-/// the noise with `ippsRandUniform`; this hashes the held seed instead.
+/// The noise resonance of `FUN_00886eb0` (resonance type 109).
 fn noise(
     filter: &Filter,
     ctx: &Ctx,
@@ -2054,13 +2208,14 @@ fn noise(
     }
     let hi = level + 1.0;
     let root = hi.sqrt();
-    let seed = v.noise_seed[f];
-    for k in 0..v.count {
-        let mut x = (seed ^ (k as u32).wrapping_mul(0x9e37_79b9)).wrapping_mul(0x85eb_ca6b);
-        x ^= x >> 13;
-        x = x.wrapping_mul(0xc2b2_ae35);
-        x ^= x >> 16;
-        let mut u = (f64::from(x) / 4_294_967_296.0) as f32 * hi;
+    // A uniform number in [0, hi) for every partial from a copy of the
+    // held seed: `ippsRandUniform_Direct_32f` through the pointer at
+    // 0x92bbd0 (`0x8876b8`).
+    let mut seed = v.noise_seed[f] as i32;
+    let n = v.count;
+    rand_uniform(&mut v.noise_buf[..n], 0.0, hi, &mut seed);
+    for k in 0..n {
+        let mut u = v.noise_buf[k];
         let top = v.hz[k] / 17_739.69;
         if !filter.res_hz {
             u -= top;
@@ -2392,8 +2547,9 @@ impl Harmor {
             if v.countdown == 0 {
                 let vib = self.vibrato[v.part] + dsp.vibrato_rate * done as f64;
                 v.motion = self.motion[v.part] + dsp.more.phaser_speed * done as f64;
+                let first_len = if v.first { v.first_len } else { None };
                 tick(dsp, ctx, vib, v);
-                v.countdown = ctx.tick;
+                v.countdown = first_len.unwrap_or(ctx.tick);
             }
             let run = v.countdown.min(len - done);
             let Voice { bank, mono, .. } = v;
@@ -2447,7 +2603,11 @@ impl Harmor {
             let run = &v.runs[1];
             let over =
                 !art.envelope.active || (run.env.over() && (run.out - run.value).abs() < 1e-4);
-            if over {
+            // And no envelope with arpeggiator points still runs
+            // (`0x88ab10`, before `FUN_008856b0`).
+            let arpeggiating =
+                (0..31).any(|a| dsp.arts[a].envelope.arp_on && !v.runs[a].env.over());
+            if over && !arpeggiating {
                 v.state = 9;
                 v.fade = 0;
             }
@@ -2569,6 +2729,7 @@ impl Generator for Harmor {
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let total = left.len().min(right.len());
+        self.rank_held();
         let mut done = 0;
         while done < total {
             let len = (total - done).min(CHUNK);
@@ -2621,6 +2782,8 @@ impl Generator for Harmor {
             self.sample_count += len as u64;
             done += len;
         }
+        // The global LFOs move on once a block, after the voices.
+        self.move_lfos(total);
     }
 
     fn param_count(&self) -> usize {
@@ -2695,6 +2858,7 @@ impl Generator for Harmor {
             m.reset();
         }
         self.units.reset();
+        self.restart_lfos();
         let g = &self.state.globals;
         self.units
             .set(&g.params, g.dist_mode, g.precision, self.ctx.tempo);
@@ -2743,18 +2907,17 @@ impl Generator for Harmor {
         if g.params[7] > 0 || g.params[8] > 0 {
             return Fidelity::Approximate("Harmor strum is left out");
         }
-        let shared = |p: &Part| {
-            p.arts.iter().any(|a| {
-                (a.envelope.active && a.envelope.flags & 2 != 0)
-                    || !a.envelope.plain(crate::menvelope::Class::Envelope)
-            })
+        // An LFO's level runs on `menvelope::Track`, which reads no
+        // arpeggiator points.
+        let arp_lfo = |p: &Part| {
+            p.arts[..31]
+                .iter()
+                .any(|a| a.lfo.active && a.lfo.arp.iter().any(|byte| *byte != 0))
         };
-        if any(&shared) {
-            return Fidelity::Approximate(
-                "Harmor envelopes shared between voices, or with arpeggiator points, run per voice",
-            );
+        if any(&arp_lfo) {
+            return Fidelity::Approximate("Harmor LFOs with arpeggiator points run without them");
         }
-        Fidelity::Approximate("Harmor: sustain weights, resonance tables and FX not null-tested")
+        Fidelity::Approximate("Harmor: resonance tables and FX not null-tested")
     }
 }
 
@@ -2762,6 +2925,7 @@ impl Generator for Harmor {
 mod tests {
     use super::*;
     use crate::testing::{corpus, partial, projects};
+    use dsp::curve::Point;
 
     fn note(key: i16) -> NoteOn {
         NoteOn {
@@ -2949,6 +3113,96 @@ mod tests {
         plugin.note_off(2);
         let v = plugin.voices.iter().find(|v| v.active).unwrap();
         assert_eq!((v.id, v.key_pitch, v.state), (1, 0.0, 1));
+    }
+
+    #[test]
+    fn a_shared_envelope_follows_the_oldest_held_voice_and_ticks_with_it() {
+        let mut plugin = Harmor::default();
+        let env = &mut plugin.state.parts[0].arts[1].envelope;
+        env.points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(2.0, 0.3),
+            Point::new(1.0, 0.0),
+        ];
+        env.arp = vec![0; 4];
+        (env.active, env.flags, env.decay, env.loop_end) = (true, 2, 1, 2);
+        plugin.load();
+        plugin.note_on(note(60));
+        render(&mut plugin, 1000);
+        plugin.note_on(NoteOn {
+            voice: 2,
+            ..note(64)
+        });
+        let first = plugin.voices.iter().find(|v| v.id == 1).unwrap().clone();
+        let second = plugin.voices.iter().find(|v| v.id == 2).unwrap().clone();
+        assert!(second.linked && !first.linked);
+        assert_eq!(second.first_len, Some(first.countdown));
+        render(&mut plugin, 3000);
+        let first = plugin.voices.iter().find(|v| v.id == 1).unwrap();
+        let second = plugin.voices.iter().find(|v| v.id == 2).unwrap();
+        assert_eq!(first.countdown, second.countdown);
+        assert_eq!(first.runs[1].env, second.runs[1].env);
+    }
+
+    #[test]
+    fn a_global_lfo_moves_on_between_notes() {
+        let mut plugin = Harmor::default();
+        let lfo = &mut plugin.state.parts[0].arts[2].lfo;
+        // Frozen, so only the global phase moves.
+        (lfo.active, lfo.flags, lfo.knobs[0]) = (true, 2 | 8, 26_259);
+        plugin.load();
+        let start = plugin.parts[0].arts[2].lfo.start_phase();
+        assert_eq!(plugin.lfo_phase[0][2], start);
+        render(&mut plugin, 1024);
+        let pace = plugin.parts[0].arts[2]
+            .lfo
+            .pace_unfrozen(plugin.ctx.rates()[0]);
+        let per_block = (512.0 / plugin.ctx.tick as f64 * pace).round_ties_even() as u32;
+        assert!(per_block > 0);
+        assert_eq!(
+            plugin.lfo_phase[0][2],
+            start.wrapping_add(per_block.wrapping_mul(2))
+        );
+        // A reset puts it back.
+        plugin.reset();
+        assert_eq!(plugin.lfo_phase[0][2], start);
+    }
+
+    #[test]
+    fn the_arpeggiator_ranks_the_held_keys() {
+        let mut plugin = Harmor::default();
+        let env = &mut plugin.state.parts[0].arts[1].envelope;
+        env.points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(1.0, 0.5),
+        ];
+        env.arp = vec![0, 3, 0];
+        (env.active, env.loop_start, env.loop_end) = (true, 0, 2);
+        plugin.load();
+        for (id, key) in [(1, 64), (2, 60), (3, 67), (4, 60)] {
+            plugin.note_on(NoteOn {
+                voice: id,
+                ..note(key)
+            });
+        }
+        render(&mut plugin, 64);
+        let rank = |plugin: &Harmor, id: u32| {
+            let v = plugin.voices.iter().find(|v| v.id == id).unwrap();
+            v.runs[1].env.arp_rank()
+        };
+        // Up, each key once.
+        assert_eq!(rank(&plugin, 2), (0, 3));
+        assert_eq!(rank(&plugin, 4), (0, 3));
+        assert_eq!(rank(&plugin, 1), (1, 3));
+        assert_eq!(rank(&plugin, 3), (2, 3));
+        // InvArpBox turns it over.
+        plugin.state.globals.params[16] = 1;
+        plugin.note_off(1);
+        render(&mut plugin, 64);
+        assert_eq!(rank(&plugin, 3), (0, 2));
+        assert_eq!(rank(&plugin, 2), (1, 2));
     }
 
     #[test]

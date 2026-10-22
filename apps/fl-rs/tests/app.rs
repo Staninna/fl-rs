@@ -814,6 +814,91 @@ fn the_piano_roll_s_drags_are_one_undo_step_each() {
 }
 
 #[test]
+fn a_tool_of_the_piano_roll_is_one_undo_step() {
+    let dir = Dir::new("note-tools");
+    let (mut app, _) = open_fixture(&dir);
+    let steps = notes(app.project());
+
+    // A paint drag says every note it has laid so far, and is one step.
+    let paint = |notes: &[(u64, u8)]| Edit::AddNotes {
+        channel: 0,
+        length: 48,
+        notes: notes.to_vec(),
+    };
+    edit(&mut app, paint(&[(400, 60)]), Some(1));
+    edit(&mut app, paint(&[(400, 60), (448, 62)]), Some(1));
+    assert_eq!(notes(app.project())[4..], [(400, 48, 60), (448, 48, 62)]);
+
+    // A slice through both makes four notes in one edit.
+    edit(
+        &mut app,
+        Edit::SliceNotes {
+            ids: vec![4, 5],
+            at: 424,
+        },
+        None,
+    );
+    assert_eq!(
+        notes(app.project())[4..],
+        [(400, 24, 60), (424, 24, 60), (448, 48, 62)]
+    );
+    let chopped = Edit::ChopNotes {
+        ids: vec![6],
+        step: 12,
+    };
+    edit(&mut app, chopped, None);
+    assert_eq!(notes(app.project()).len(), 10);
+    edit(&mut app, Edit::GlueNotes { ids: vec![4, 5] }, None);
+    assert_eq!(notes(app.project())[4], (400, 48, 60));
+
+    // C minor pentatonic has neither D nor C#, so the D goes up to D#.
+    let snapped = Edit::SnapNotesToScale {
+        ids: vec![6],
+        keys: 0b0100_1010_1001,
+    };
+    edit(&mut app, snapped, None);
+    assert_eq!(notes(app.project())[6].2, 63);
+
+    // Each tool comes back off in one undo, and the paint drag in one more.
+    for left in [10, 10, 7, 6, 4] {
+        app.apply(Command::Undo);
+        assert_eq!(notes(app.project()).len(), left);
+    }
+    assert_eq!(notes(app.project()), steps);
+    assert!(!app.is_modified());
+}
+
+#[test]
+fn the_loop_range_is_the_pattern_s_and_a_key_plays_without_a_change() {
+    let dir = Dir::new("range");
+    let (mut app, _) = open_fixture(&dir);
+    // Without an output device the app says so when it opens.
+    let opened = app.error().map(str::to_owned);
+    app.apply(Command::SetLoopRange(Some((96, 192))));
+    assert_eq!(app.state().loop_range, Some((96, 192)));
+    // A range with no ticks is the whole pattern.
+    app.apply(Command::SetLoopRange(Some((96, 96))));
+    assert_eq!(app.state().loop_range, None);
+    // Another pattern plays the whole of it.
+    app.apply(Command::SetLoopRange(Some((0, 96))));
+    app.apply(Command::SelectPattern(1));
+    assert_eq!(app.state().loop_range, Some((0, 96)));
+    app.apply(Command::SelectPattern(2));
+    assert_eq!(app.state().loop_range, None);
+    assert_eq!(app.error(), opened.as_deref());
+
+    // A key of the keyboard plays, and changes nothing.
+    app.apply(Command::NoteOn {
+        channel: 0,
+        key: 60,
+        velocity: 100,
+    });
+    app.apply(Command::NoteOff { key: 60 });
+    assert_eq!(app.error(), opened.as_deref());
+    assert!(!app.is_modified());
+}
+
+#[test]
 fn a_deleted_note_keeps_its_place_until_the_save_leaves_it_out() {
     let dir = Dir::new("compact");
     let (mut app, path) = open_fixture(&dir);
