@@ -257,7 +257,8 @@ mask (`0xf81eb0`):
 `((1 + |t|)^x - 1) / |t|` below 0 and its mirror image above: 0 stays 0,
 1 stays 1, and the sign of `t` bends the line down or up. The result goes
 on as any formula's, kept inside 0 and 1. Corpus: the 32 links of
-`Surround mix.flp` from a Peak Controller to the sends of inserts 1 to 16
+`Surround mix.flp` from the Y of the Fruity X-Y Controllers on inserts 1
+to 16 to those inserts' sends
 to inserts 17 and 18, `Tension(Input,10)` and `Tension(1-Input,10)`.
 
 ## Targets that change nothing FL plays (crates/engine/src/automation.rs, `unheard`)

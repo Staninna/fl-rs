@@ -439,7 +439,7 @@ first.
 ## Implementation notes (crates/plugins/src/parametric_eq_2.rs)
 
 - Sizes accepted: 305, 309, 326, 330, 350, 354 (versions 2 to 8); the corpus holds 1,138 states, not 1,117.
-- The steep peak width table and the polyphase coefficients are not transcribed; steep peak sections clamp at 0.8π. The allpass is `y = x1 + (x − y1)·c`.
+- The steep tables and the polyphase coefficients are read from the DLL; one filter of a steep peak clamps at 0.8π, as FL's does. The allpass is `y = x1 + (x − y1)·c`.
 - The engine resampler is in `crates/plugins/src/parametric_eq_2_engine.rs`. Rust's `sin` gives the DLL's taps to the bit, and the dot product keeps the DLL's four lanes. The plugin reports 44 frames of latency with it.
 - A band counts its 0 dB tail down once a block, after the whole block, as FL does. Going to sleep empties only the bands still counting down and the built-in polyphase, and the main level jumps to its target on waking.
 - The matched designer is `matched` in `crates/plugins/src/parametric_eq_2_engine.rs`, in the DLL's order of operations. Its tests hold a table of 32 calls to the DLL's `dispatch` (every branch of every kind), run under an emulator.

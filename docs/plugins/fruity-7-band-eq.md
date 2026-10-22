@@ -6,7 +6,8 @@ native plugin, image base 0x400000), headless Ghidra (project `eq7`,
 decompiles in `/root/gh/out/eq7/`) plus disassembly read with capstone.
 It links the same Delphi section library as Fruity Parametric EQ, in an
 older form: single precision coefficients and state.
-Corpus: no project uses it; 14 presets of 32 bytes in
+Corpus: no project uses it, natively or in a Fruity Wrapper (which swaps
+it in under both "Fruity 7 Band EQ" and "Fruity 7 Band Equalizer"); 14 presets of 32 bytes in
 `Patches/Plugin presets/Effects/Fruity 7 band EQ/`.
 
 Confidence tags: `asm` (read from the disassembly), `code` (read in a

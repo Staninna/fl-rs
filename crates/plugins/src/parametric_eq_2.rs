@@ -34,8 +34,8 @@
 //!
 //! With HQ on in its first mode the bands run at twice the rate, between
 //! the two halves of a 2x resampler. The plugin's own is two paths of
-//! three allpasses. The doc leaves its coefficients and the widths of the
-//! steep peaks open. Both are read from the DLL here. A state can ask for
+//! three allpasses. Its coefficients and the widths of the steep peaks
+//! are read from the DLL. A state can ask for
 //! the engine's instead: each sample twice over and a 0 going up, and a
 //! 176 tap FIR going down, 44 frames late
 //! (`crate::parametric_eq_2_engine`).
@@ -51,7 +51,7 @@
 //! run `3 N / 4` frames late. A new curve fades in over the window the
 //! state picks.
 //!
-//! The parameter smoothing of version 7 on is not here either: a moved
+//! The parameter smoothing of version 7 on is not here: a moved
 //! parameter counts at once, as it does in FL with the smoothing off, and
 //! every state FL's own projects hold has it off.
 
