@@ -1,4 +1,24 @@
-# Handoff, 2026-10-19
+# Handoff, 2026-10-22
+
+Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every workspace test with the corpus and `progress.py --check` pass at the head. Corpus render at `d807176`: 122 of 165 projects have sound and 82 play in full, up from 112 and 33 when this branch began. 1112 of 1147 reached effect slots are hosted, and 209 of 227 generator channels with notes play.
+
+## On this branch
+
+- Perf: the mixer runs the strips of each wave of the routing graph on a worker pool (`crates/engine/src/pool.rs`, `mix.rs`; `FL_RS_THREADS` sets its size, 1 is serial). Every harness hash is unchanged. The sine bank is FL's AVX kernel to its sum order and restart period (`dsp::additive`).
+- New ports, each with its doc under `docs/plugins/`: Center, Mute 2, Phase Inverter, GMS, MiniSynth, BeepMap, Drumaxx, FL Slayer, Fruity Slicer 2, Kepler Exo, Fruity Granulizer, Wave Traveller, Fruity 7 Band EQ, Emphasizer (shell; LimiterLite is missing from the install), Patcher, and the Envelope, Formula, Keyboard and Voltage controllers.
+- Larger pieces: Sytrus's unison, waveshapers, effects, filters, plucked operators, oversampling, global envelopes and portamento; linear phase for Parametric EQ 2 and Frequency Splitter; FL's sample interpolator (`dsp::interpolator`, at a render quality that is inferred); note colour, slide notes and live channel pitch for generators; automation targets that FL plays by setting nothing, Tension in controller formulas, and the sampler filter's mod X/Y (`docs/automation-234.md` lists what the render still counts unsupported).
+- `tools/`: a script that renders every demo project to WAV, and a record of the commit each demo rating was made with.
+
+## Left half done, with notes in `.scratch/notes/`
+
+- Morphine and Sakura (`morphine*.rs`, `sakura*.rs`): source files written, which built on the tree they were written on, but not in `lib.rs`, `generator.rs` or `port.rs`, so they are not compiled. `morphine.md` and `sakura.md` list the lines to add and what is untested. Sakura matched its DLL run under unicorn to about 3e-5.
+- Harmor: `harmor-wip.patch` is a diff left uncommitted when usage ran out. It has not been built on this tree.
+- Fruity Convolver's EQ curve (`fruity-convolver.md`) and Transporter's DSP, TransientLooper, which is missing from the install (`transporter.md`). Slicex's declicker and Vintage Phaser's gaps are listed in their docs under `docs/plugins/`. FLEX is not started and has no note.
+- Toxic Biohazard and PoiZone are not started.
+
+The sections below are earlier states, kept for their detail.
+
+## Handoff, 2026-10-19
 
 The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed and CI is green on Linux, macOS and Windows. fmt, clippy and `cargo test -p plugins` with the corpus pass at `20f0570`, where a release corpus render hears 112 of 165 projects and 33 play in full. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
 
