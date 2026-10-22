@@ -240,3 +240,38 @@ ranges the dispatcher scales a clip's value onto, is in
 offset and volume multiplier. Links in projects from before 11.5.6 number a
 channel's plugin parameters from 0x2000, and FL's loader moves them to
 0x8000 (`FUN_00f45980`); the model does the same.
+
+## The formula's `Tension(x, t)` (crates/engine/src/formula.rs)
+
+`FUN_00f81f70` registers one function with its parser besides the
+arithmetic: `Tension`, two arguments, evaluated by `FUN_00f81d60`. With
+`x` the first argument and `t` the second, both f64, and the constants
+0.0 (`0xf81e90`), 1.0 (`0xf81e98`), the f32 1.0 (`0xf81ea0`) and the sign
+mask (`0xf81eb0`):
+
+    t == 0:  x
+    t <  0:  u = -t;  (float)(exp((float)x * ln((float)u + 1f)) - 1) / u
+    t >  0:  (t - (float)(exp((float)(1 - x) * ln((float)t + 1f)) - 1)) / t
+
+(`FUN_0040c1d0` is `ln`, `FUN_0040ae70` `exp`.) So it is
+`((1 + |t|)^x - 1) / |t|` below 0 and its mirror image above: 0 stays 0,
+1 stays 1, and the sign of `t` bends the line down or up. The result goes
+on as any formula's, kept inside 0 and 1. Corpus: the 32 links of
+`Surround mix.flp` from a Peak Controller to the sends of inserts 1 to 16
+to inserts 17 and 18, `Tension(Input,10)` and `Tension(1-Input,10)`.
+
+## Targets that change nothing FL plays (crates/engine/src/automation.rs, `unheard`)
+
+A clip or a controller link on one of these is played by setting nothing:
+
+- A parameter of a ZGameEditor Visualizer the engine hosts. Its
+  parameters move its pictures; a hosted state runs only layers read to
+  make no sound (`docs/plugins/zgameeditor-visualizer.md`), so no
+  parameter changes the output, which is the input. The same for Fruity
+  NoteBook 2, which FL never asks for sound. A Visualizer state the engine
+  does not host keeps its links unsupported. Corpus: 52 clip bindings and
+  7 Peak Controller links in the first 10 seconds of `Astes - Raubana -
+  LIFE`, `JuiceBass - SeamlessR - Menagerie` and the Sacco projects, and
+  2 NoteBook 2 bindings in `Astes - Bien Duro`.
+- A control of an automation clip's LFO when that clip's LFO is off
+  (`docs/rec-channel.md`).

@@ -4498,12 +4498,7 @@ fn a_link_the_engine_cannot_play_is_counted() {
     // and with a formula the engine does not read.
     link(&mut project, (1, 0, PEAK), TEMPO, None);
     let volume = insert_control(3, VOLUME);
-    link(
-        &mut project,
-        (1, 0, LFO),
-        volume,
-        Some("Tension(Input, 0.5)"),
-    );
+    link(&mut project, (1, 0, LFO), volume, Some("Sin(Input)"));
     // To a control of a plugin the engine does not host.
     add_effect(&mut project, 2, 1, "ZGameEditor Visualizer", &[]);
     link(
@@ -4535,6 +4530,245 @@ fn a_link_the_engine_cannot_play_is_counted() {
     midi.controller_links[0].kind = LinkKind::Midi;
     midi.controller_links[0].order[0].item = Item::Field(Id::ControllerMIDI);
     assert_eq!(linked(&render(&midi, &dir)), (0, 0, 0));
+}
+
+#[test]
+fn a_tension_formula_bends_what_a_controller_opens_a_send_by() {
+    let dir = Dir::new("controller-tension");
+    dir.tone(3 * 96_000);
+    // The square of `gated_tone` on the send from insert 1, which the
+    // tone plays into, to insert 2, the way to the master, at level 0 in
+    // the project.
+    let gate = |formula: &str| {
+        let mut project = gated_tone();
+        project.controller_links.clear();
+        route(&mut project, 1, &[2]);
+        set(&mut project, 1, SEND + 2, 0);
+        link(
+            &mut project,
+            (3, 0, LFO),
+            insert_control(1, SEND + 2),
+            Some(formula),
+        );
+        project
+    };
+    let plain = render(&gate("Input"), &dir);
+    assert_eq!(linked(&plain), (1, 1, 0));
+    assert!(plain.left[..48 * TICK].iter().all(|v| *v != 0.0));
+    assert!(plain.left[49 * TICK..96 * TICK].iter().all(|v| *v == 0.0));
+    // `Tension(x, 10)` keeps 0 at 0 and 1 at 1, which is all a square
+    // gives, so the send opens and shuts as it does without it.
+    let bent = render(&gate("Tension(Input,10)"), &dir);
+    assert_eq!(linked(&bent), (1, 1, 0));
+    assert!(bent.left == plain.left && bent.right == plain.right);
+    // Upside down, it is open where the other was shut.
+    let turned = render(&gate("Tension(1-Input,10)"), &dir);
+    assert_eq!(linked(&turned), (1, 1, 0));
+    assert!(turned.left[..48 * TICK].iter().all(|v| *v == 0.0));
+    assert!(turned.left[49 * TICK..96 * TICK].iter().all(|v| *v != 0.0));
+}
+
+#[test]
+fn an_insert_s_control_whose_id_names_a_slot_is_the_insert_s() {
+    let dir = Dir::new("automation-slot-bits");
+    let fade = [Point::new(0.0, 0.8), Point::new(4.0, 0.0)];
+    let faded = |target: u32| {
+        let mut project = with_mixer(project(&[(1, &four_beats())], &[item(0, 1)]));
+        let clip = add_automation(&mut project, &fade, FULL);
+        bind(&mut project, clip, target);
+        place(&mut project, clip, 0, BAR);
+        project
+    };
+    // FL's dispatcher takes the slot of a mixer ID for a slot's own
+    // controls alone, so insert 1's volume through slot 9, which holds
+    // nothing, is insert 1's volume.
+    let plain = render(&faded(insert_control(1, VOLUME)), &dir);
+    let slotted = render(&faded(slot_control(1, 9, VOLUME)), &dir);
+    assert_eq!(
+        (slotted.automation_clips, slotted.unsupported_targets),
+        (1, 0)
+    );
+    assert_eq!(slotted.slot_targets, 0);
+    assert!(slotted.left == plain.left && slotted.right == plain.right);
+    assert_eq!(plain.left[0], 1.0);
+    assert!(plain.left[48_000] < 0.5);
+    // And so is a band of its EQ.
+    let mut eq = faded(slot_control(1, 3, EQ_FREQUENCY));
+    set(&mut eq, 1, EQ_GAIN, 1200);
+    let mut flat = faded(insert_control(1, EQ_FREQUENCY));
+    set(&mut flat, 1, EQ_GAIN, 1200);
+    let (eq, flat) = (render(&eq, &dir), render(&flat, &dir));
+    assert_eq!((eq.automation_clips, eq.unsupported_targets), (1, 0));
+    assert!(eq.left == flat.left);
+}
+
+#[test]
+fn a_clip_on_the_lfo_of_a_clip_whose_lfo_is_off_changes_nothing() {
+    let dir = Dir::new("automation-clip-lfo");
+    let fade = [Point::new(0.0, 0.8), Point::new(4.0, 0.0)];
+    let mut base = with_mixer(project(&[(1, &four_beats())], &[item(0, 1)]));
+    let clip = add_automation(&mut base, &fade, FULL);
+    bind(&mut base, clip, insert_control(1, VOLUME));
+    place(&mut base, clip, 0, BAR);
+    let plain = render(&base, &dir);
+
+    // A second clip on the first one's LFO level and speed. The first
+    // clip's LFO is off, as FL makes it, so FL adds no LFO whatever its
+    // level, and the engine sets nothing.
+    let mut driven = base.clone();
+    let line = [Point::new(0.0, 0.0), Point::new(4.0, 1.0)];
+    let lfo = add_automation(&mut driven, &line, FULL);
+    let clip_control = |control: u32| (u32::from(clip) << 16) + control;
+    bind(&mut driven, lfo, clip_control(0x604));
+    bind(&mut driven, lfo, clip_control(0x600));
+    place(&mut driven, lfo, 0, BAR);
+    let out = render(&driven, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (2, 0));
+    assert!(out.left == plain.left && out.right == plain.right);
+
+    // With the first clip's LFO on, which the engine does not play, the
+    // two are counted.
+    let data = driven.channels[usize::from(clip)].automation.as_mut();
+    data.unwrap().lfo_tail[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+    let out = render(&driven, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 2));
+}
+
+/// A ZGameEditor Visualizer state with one layer that draws and makes no
+/// sound, which the engine hosts.
+fn visualizer() -> Vec<u8> {
+    let text = "[General]\r\nLayerCount=1\r\n\r\n[AppSet0]\r\nApp=Peak Effects\\Linear\r\n";
+    let mut state = (text.len() as u32).to_le_bytes().to_vec();
+    state.extend(text.as_bytes());
+    state
+}
+
+#[test]
+fn a_parameter_of_a_plugin_that_only_draws_is_played_by_setting_nothing() {
+    let dir = Dir::new("automation-visualizer");
+    let base = kick_ducks_tone(&dir);
+    let plain = render(&base, &dir);
+    let mut drawn = base.clone();
+    add_effect(&mut drawn, 2, 1, "ZGameEditor Visualizer", &visualizer());
+    let line = [Point::new(0.0, 0.0), Point::new(4.0, 1.0)];
+    let clip = add_automation(&mut drawn, &line, FULL);
+    bind(&mut drawn, clip, slot_control(2, 1, PARAM + 0x21));
+    place(&mut drawn, clip, 0, BAR);
+    link(
+        &mut drawn,
+        (1, 0, PEAK),
+        slot_control(2, 1, PARAM + 0x80),
+        Some("1-Input"),
+    );
+    let out = render(&drawn, &dir);
+    assert_eq!(out.hosted_slots, plain.hosted_slots + 1);
+    assert_eq!((out.automation_clips, out.slot_targets), (1, 1));
+    assert_eq!(out.unsupported_targets, 0);
+    assert_eq!(linked(&out), (2, 2, 0));
+    assert!(out.left == plain.left && out.right == plain.right);
+
+    // A state the engine does not host keeps them unsupported.
+    let slot = drawn.inserts[2].slots.iter_mut().find(|s| s.index == 1);
+    slot.unwrap().plugin_state = Some(vec![1, 0, 0]);
+    let out = render(&drawn, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (0, 1));
+    assert_eq!(linked(&out), (2, 1, 1));
+}
+
+/// The loudest a buffer gets.
+fn loudest(buffer: &[f32]) -> f32 {
+    buffer.iter().fold(0.0, |most, v| most.max(v.abs()))
+}
+
+/// The 219 of a new channel, with this mod X, mod Y and filter type.
+fn filter_levels(mod_x: u32, mod_y: u32, kind: i32) -> Levels {
+    Levels {
+        pan: 6400,
+        volume: 10_000,
+        unknown_8: [0; 4],
+        mod_x,
+        mod_y,
+        unknown_20: kind.to_le_bytes(),
+        len: 24,
+    }
+}
+
+#[test]
+fn a_clip_on_a_sampler_s_mod_x_closes_its_filter() {
+    let dir = Dir::new("automation-mod-x");
+    dir.sine(2 * 96_000);
+    let plain = render(&tone(BAR), &dir);
+    // Mod X wide open for two beats, then at a fifth: 51 of 256.
+    let shut = [Point::new(0.0, 1.0), hold(2.0, 0.2), Point::new(2.0, 0.2)];
+    let filtered = |kind: i32, control: u32| {
+        let mut project = tone(BAR);
+        project.channels[0].levels = Some(filter_levels(256, 0, kind));
+        let clip = add_automation(&mut project, &shut, FULL);
+        bind(&mut project, clip, control);
+        place(&mut project, clip, 0, BAR);
+        project
+    };
+    let out = render(&filtered(0, 2), &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    // Wide open, the Fast LP leaves the tone as it is.
+    assert!(out.left[..48_000] == plain.left[..48_000]);
+    assert_eq!(out.left, out.right);
+    // At a fifth it is a low-pass at about 30 Hz, which leaves a 100 Hz
+    // tone at under a third.
+    let last = 72_000..96_000;
+    let (before, after) = (loudest(&plain.left[last.clone()]), loudest(&out.left[last]));
+    assert!(
+        after < 0.35 * before && after > 0.15 * before,
+        "{after} of {before}"
+    );
+
+    // The high-pass at the same cutoff takes even more of it away, and
+    // wide open nearly all of it.
+    let out = render(&filtered(3, 2), &dir);
+    assert!(loudest(&out.left[24_000..48_000]) < 0.01);
+    assert!(loudest(&out.left[72_000..96_000]) < before);
+
+    // The offset of mod X moves it the same way. Its range is -256 to
+    // 256, so this clip holds it at 0 and then at -205, which leaves the
+    // cutoff where the clip on mod X put it.
+    let offset = [Point::new(0.0, 0.5), hold(2.0, 0.1), Point::new(2.0, 0.1)];
+    let mut moved = tone(BAR);
+    moved.channels[0].levels = Some(filter_levels(256, 0, 0));
+    let clip = add_automation(&mut moved, &offset, FULL);
+    bind(&mut moved, clip, 0x13);
+    place(&mut moved, clip, 0, BAR);
+    let out = render(&moved, &dir);
+    assert_eq!((out.automation_clips, out.unsupported_targets), (1, 0));
+    assert!(out.left == render(&filtered(0, 2), &dir).left);
+
+    // A channel whose filter no clip drives plays as it did, whatever its
+    // mod X and Y.
+    let mut set = tone(BAR);
+    set.channels[0].levels = Some(filter_levels(51, 128, 0));
+    let out = render(&set, &dir);
+    assert!(out.left == plain.left);
+}
+
+#[test]
+fn a_filtered_voice_comes_out_the_same_in_blocks_of_any_size() {
+    let dir = Dir::new("automation-mod-x-blocks");
+    dir.sine(2 * 96_000);
+    let sweep = [Point::new(0.0, 1.0), Point::new(4.0, 0.1)];
+    let mut project = tone(BAR);
+    project.channels[0].levels = Some(filter_levels(256, 96, 0));
+    let clip = add_automation(&mut project, &sweep, FULL);
+    bind(&mut project, clip, 2);
+    place(&mut project, clip, 0, BAR);
+    let out = render(&project, &dir);
+    assert!(loudest(&out.left[90_000..96_000]) < loudest(&out.left[..6000]));
+    let samples = engine::prepare(&project, &dir.0).unwrap();
+    for block in [1, 64, 333, 4096] {
+        let mut engine = Engine::new(&project, &samples, RATE).unwrap();
+        engine.play();
+        let mut sink = NullSink::new(block);
+        sink.pull(&mut engine, out.left.len());
+        assert!(sink.left == out.left, "left in blocks of {block}");
+    }
 }
 
 #[test]

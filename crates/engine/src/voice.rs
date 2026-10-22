@@ -2,6 +2,7 @@
 //! sampler channel is one, and so is an audio clip on the playlist.
 
 use crate::Curves;
+use crate::channel_filter::ChannelFilter;
 use crate::sample::Sample;
 use dsp::resample::read_hermite;
 use model::{Channel, Project};
@@ -83,6 +84,23 @@ pub(crate) struct Follow {
     /// speed the automation can take it to, as a share of the speed it was
     /// made with. `None` when the pitch stays.
     pub slowest: Option<f64>,
+    /// For a voice whose channel has its mod X or mod Y automated: the
+    /// channel's filter, which then runs on the voice.
+    pub filter: Option<Filtered>,
+}
+
+/// The filter a voice runs when automation moves its channel's mod X or
+/// mod Y ([`crate::channel_filter`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Filtered {
+    /// The filter type, 219 @20.
+    pub kind: i32,
+    /// The output rate.
+    pub rate: u32,
+    /// The voice's own side of `FinalLevels.FCut` and `FRes`: its note's
+    /// mod X and mod Y, from -1 to 1, and what tracking adds. 0 for a
+    /// clip.
+    pub mods: (f32, f32),
 }
 
 /// A clone shares the sample and starts where the original is.
@@ -120,6 +138,10 @@ pub(crate) struct Voice {
     /// `next_bend`.
     bends: Option<Arc<[(usize, f64)]>>,
     next_bend: usize,
+    /// The channel's filter, on a voice whose channel has its mod X or
+    /// mod Y automated, and the cutoff and resonance it was last given.
+    filter: Option<ChannelFilter>,
+    mods: Option<(f32, f32)>,
 }
 
 impl Voice {
@@ -150,6 +172,8 @@ impl Voice {
             slid: 1.0,
             bends: None,
             next_bend: 0,
+            filter: None,
+            mods: None,
         }
     }
 
@@ -160,8 +184,27 @@ impl Voice {
     /// the sample.
     pub fn following(mut self, follow: Follow) -> Self {
         self.follow = Some(follow);
+        self.filter = follow
+            .filter
+            .and_then(|filtered| ChannelFilter::new(filtered.kind, filtered.rate));
         self.lengthen();
         self
+    }
+
+    /// Give the channel's filter the channel's side of the cutoff and the
+    /// resonance, `(219 @12 + 229 @12) / 256` and the same of @16, from
+    /// the next sample on. The voice adds its own. Nothing happens for a
+    /// voice without the filter, or when the two have not moved.
+    pub fn set_filter(&mut self, cut: f32, res: f32) {
+        let own = self.follow.and_then(|f| f.filter).map(|f| f.mods);
+        let (Some(filter), Some((x, y))) = (&mut self.filter, own) else {
+            return;
+        };
+        let mods = (x + cut, y + res);
+        if self.mods != Some(mods) {
+            self.mods = Some(mods);
+            filter.set(mods.0, mods.1);
+        }
     }
 
     /// The note slides: from output sample `at` of the voice on it plays at
@@ -307,6 +350,13 @@ impl Voice {
                 Some(right) => read_hermite(right, pos),
                 None => a,
             };
+            if let Some(filter) = &mut self.filter {
+                let [a, b] = filter.run([a, b]);
+                let gain = filter.gain();
+                *l += a * (self.gains.0 * gain);
+                *r += b * (self.gains.1 * gain);
+                continue;
+            }
             *l += a * self.gains.0;
             *r += b * self.gains.1;
         }
@@ -434,6 +484,7 @@ mod tests {
             level: 1.0,
             pan: 0.0,
             slowest: Some(slowest),
+            filter: None,
         }
     }
 
