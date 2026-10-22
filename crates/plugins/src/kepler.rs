@@ -211,7 +211,7 @@ fn curve(table: &[f32; 11], v: f32) -> f32 {
 }
 
 /// The engine's defaults (`FUN_18001d900`).
-fn default(index: usize) -> f32 {
+pub(crate) fn default(index: usize) -> f32 {
     match index {
         3 | 8 | 10 | 0xf | 0x11 | 0x17 | 0x20 | 0x21 | 0x25 | 0x28 | 0x49 | 0x5a | 0x9a => 1.0,
         0xb
@@ -1095,6 +1095,41 @@ impl Kepler {
         self.arp.gate = self.arp.step * f64::from(self.params[0x5a]);
     }
 
+    /// Takes the engine's parameters as a state left them, with the
+    /// state's version and count, the chorus noise switch and whether
+    /// the oversampling is 4 (else 2). Kepler Exo's states load through
+    /// here too, since its engine is this one.
+    pub(crate) fn load(
+        &mut self,
+        params: [f32; PARAMS],
+        version: i32,
+        count: usize,
+        noise_on: bool,
+        four: bool,
+    ) {
+        self.params = params;
+        self.version = version;
+        self.count = count;
+        self.noise_on = noise_on;
+        self.oversample = if four { 4 } else { 2 };
+        self.voices = std::array::from_fn(Voice::new);
+        self.halfband = [Halfband::default(); 2];
+        self.prepare();
+    }
+
+    /// Reads the noise and LFO 1's wave out of an engine DLL.
+    pub(crate) fn read_engine(&mut self, file: &Path) {
+        let read = std::fs::read(file).ok();
+        if let Some(data) = read.as_deref().and_then(Data::from_dll) {
+            self.data = Some(data);
+        }
+    }
+
+    /// Whether the noise and LFO 1's wave were read.
+    pub(crate) fn has_data(&self) -> bool {
+        self.data.is_some()
+    }
+
     fn synced(&self) -> bool {
         self.params[0x57] >= 0.5
     }
@@ -1493,14 +1528,7 @@ impl Generator for Kepler {
             let y = (f64::from(ticks as f32 * 0.020_673_936 + 1.0)).log2() as f32;
             params[0x30] = 1.0 - y * 0.206_099_3;
         }
-        self.params = params;
-        self.version = version;
-        self.count = count;
-        self.noise_on = flags[1] != 0;
-        self.oversample = if flags[2] != 0 { 4 } else { 2 };
-        self.voices = std::array::from_fn(Voice::new);
-        self.halfband = [Halfband::default(); 2];
-        self.prepare();
+        self.load(params, version, count, flags[1] != 0, flags[2] != 0);
         Ok(())
     }
 
@@ -1517,10 +1545,7 @@ impl Generator for Kepler {
 
     /// Reads the noise and the LFO's wave out of the engine's DLL.
     fn set_resource_dir(&mut self, dir: &Path) {
-        let read = std::fs::read(dir.join(DLL)).ok();
-        if let Some(data) = read.as_deref().and_then(Data::from_dll) {
-            self.data = Some(data);
-        }
+        self.read_engine(&dir.join(DLL));
     }
 
     fn note_on(&mut self, note: NoteOn) {

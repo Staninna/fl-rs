@@ -60,8 +60,11 @@
 //! An envelope that starts at the table's velocity factor falls by the
 //! decay (or holds), the point is driven by the overdrive and goes through
 //! a one-pole lowpass whose cutoff follows the muffle and the velocity.
-//! The voice is panned by its key, and gets FL's pan law with the note's
-//! velocity gain raised to the velocity sensitivity. A note off makes the
+//! The voice is panned by its key, and gets FL's pan law with
+//! `FinalLevels.Vol`, the note's velocity gain times the channel's volume,
+//! raised to the velocity sensitivity and worked out again every block.
+//! The host puts the channel's volume on what the plugin plays, so the
+//! voice takes it off again ([`Generator::set_channel_volume`]). A note off makes the
 //! envelope fall at the release rate, and a voice ends when its envelope
 //! is under 1e-4 or its sample runs out.
 //!
@@ -71,9 +74,6 @@
 //!
 //! # What is not FL's
 //!
-//! - FL raises the voice's whole volume, the channel's volume in it, to
-//!   the velocity sensitivity. The engine puts the channel's volume on
-//!   after, so a velocity sensitivity other than 1 is approximate.
 //! - The RIFF files are decoded by the host and turned into 16-bit points
 //!   by rounding. FL decodes them itself.
 //! - A slide note sounds nothing and a voice's pitch does not move once it
@@ -669,6 +669,10 @@ struct Voice {
     /// The key-pan of each side, and FL's pan law with the velocity.
     out: [f32; 2],
     gains: [f32; 2],
+    /// The note's own velocity gain and pan, which the gains are worked
+    /// out of again when the channel's volume moves.
+    velocity: f32,
+    pan: f32,
     /// The key, fine pitch in it, inside 0 to 127.
     note: f32,
     dead: bool,
@@ -694,6 +698,9 @@ pub struct FlKeys {
     lfo: [f32; 2],
     comb: [f32; COMB],
     comb_at: usize,
+    /// The channel's volume the host puts on the output, which FL puts in
+    /// `FinalLevels.Vol`.
+    channel_volume: f32,
 }
 
 impl Default for FlKeys {
@@ -714,6 +721,7 @@ impl Default for FlKeys {
             lfo: [0.0, 1.0],
             comb: [0.0; COMB],
             comb_at: 0,
+            channel_volume: 1.0,
         };
         keys.update();
         keys
@@ -782,6 +790,20 @@ impl FlKeys {
         velocity.min(127) as f32
     }
 
+    /// FL's pan law with `Power(max(Final.Vol, 0), velsens)`, where
+    /// `Final.Vol` is the note's velocity gain times the channel's volume,
+    /// less the channel's volume that the host puts on after.
+    fn gains(&self, velocity: f32, pan: f32) -> [f32; 2] {
+        let volume = self.channel_volume;
+        if volume <= 0.0 {
+            return [0.0; 2];
+        }
+        let level = (velocity * volume).max(0.0);
+        let gain = f64::from(level).powf(f64::from(self.derived.velocity_sensitivity)) as f32;
+        let (left, right) = circular(pan, gain / volume);
+        [left, right]
+    }
+
     /// `TriggerVoice`, `FUN_00721660`.
     fn start(&self, table: &Table, note: &NoteOn) -> Voice {
         let d = &self.derived;
@@ -837,8 +859,7 @@ impl FlKeys {
             let rate = (f64::from(held) * 0.033 + -0.6 - f64::from(l)).exp();
             (f64::from(-self.inverse_rate) * rate).exp() as f32
         };
-        let gain = f64::from(note.velocity.max(0.0)).powf(f64::from(d.velocity_sensitivity)) as f32;
-        let (gain_left, gain_right) = circular(note.pan, gain);
+        let [gain_left, gain_right] = self.gains(note.velocity, note.pan);
         Voice {
             id: note.voice,
             delta,
@@ -853,6 +874,8 @@ impl FlKeys {
             cutoff: cutoff * cutoff * self.inverse_rate,
             out: [left, right],
             gains: [gain_left, gain_right],
+            velocity: note.velocity,
+            pan: note.pan,
             note: key,
             dead: false,
         }
@@ -1104,6 +1127,19 @@ impl Generator for FlKeys {
         self.voices.clear();
     }
 
+    /// `Gen_Render` works the pan law out again every block from
+    /// `Final.Vol`, so the voices that sound take the new volume.
+    fn set_channel_volume(&mut self, volume: f32) {
+        if volume == self.channel_volume {
+            return;
+        }
+        self.channel_volume = volume;
+        for n in 0..self.voices.len() {
+            let (velocity, pan) = (self.voices[n].velocity, self.voices[n].pan);
+            self.voices[n].gains = self.gains(velocity, pan);
+        }
+    }
+
     /// The longest a voice can take to fall from the table's velocity
     /// factor to 1e-4 at the release rate, at the key that releases
     /// slowest.
@@ -1135,11 +1171,6 @@ impl Generator for FlKeys {
         });
         if resampled {
             return Fidelity::Approximate("FL Keys: a resampled RIFF wavetable");
-        }
-        if self.derived.velocity_sensitivity != 1.0 {
-            return Fidelity::Approximate(
-                "FL Keys: the channel volume is not raised to the velocity sensitivity",
-            );
         }
         Fidelity::Exact
     }
@@ -1361,6 +1392,37 @@ mod tests {
             });
             assert!(in_range, "{}", saved.file);
         }
+    }
+
+    #[test]
+    fn the_channel_volume_is_raised_to_the_velocity_sensitivity_with_the_velocity() {
+        // A sensitivity of 2: p6 = 0.5 is 0.5 + 1 + 0.5.
+        let mut values = PLAIN;
+        values[6] = 0;
+        let mut keys = keys_with(sine_spec(100, 40), &values);
+        assert_eq!(keys.derived.velocity_sensitivity, 2.0);
+        // FL's level is (0.8 * 0.5)^2 = 0.16 on top of the pan law; the
+        // host puts the 0.5 on after, so the voice keeps 0.32.
+        keys.set_channel_volume(0.5);
+        keys.note_on(NoteOn {
+            velocity: 0.8,
+            ..note(1, 60)
+        });
+        let centre = std::f32::consts::FRAC_1_SQRT_2;
+        let gain = keys.voices[0].gains[0];
+        assert!((gain * 0.5 - 0.16 * centre).abs() < 1e-6, "{gain}");
+        // A volume that moves under the note moves its level the same way:
+        // (0.8 * 0.25)^2 / 0.25 = 0.16.
+        keys.set_channel_volume(0.25);
+        let gain = keys.voices[0].gains[0];
+        assert!((gain - 0.16 * centre).abs() < 1e-6, "{gain}");
+        keys.set_channel_volume(0.0);
+        assert_eq!(keys.voices[0].gains, [0.0; 2]);
+        // At a volume of 1 the level is the velocity's alone, as it was.
+        keys.set_channel_volume(1.0);
+        let gain = keys.voices[0].gains[0];
+        assert!((gain - 0.64 * centre).abs() < 1e-6, "{gain}");
+        assert_eq!(keys.fidelity(), Fidelity::Exact);
     }
 
     #[test]
