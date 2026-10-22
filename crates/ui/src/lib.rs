@@ -223,6 +223,45 @@ pub enum Edit {
         field: NoteField,
         value: u8,
     },
+    /// Add notes for this channel, each `length` ticks long, at the
+    /// positions and on the keys of `notes`: what the paint tool lays down
+    /// in one drag.
+    AddNotes {
+        channel: u16,
+        length: Ticks,
+        notes: Vec<(Ticks, u8)>,
+    },
+    /// Cut each note that tick `at` falls inside of in two, at `at`.
+    SliceNotes {
+        ids: Vec<NoteId>,
+        at: Ticks,
+    },
+    /// Join the notes on one key that touch or overlap into one.
+    GlueNotes {
+        ids: Vec<NoteId>,
+    },
+    /// Move each note's start to the nearest multiple of `step`, and with
+    /// `lengths` its length too.
+    QuantizeNotes {
+        ids: Vec<NoteId>,
+        step: Ticks,
+        lengths: bool,
+    },
+    /// Cut each note into pieces `step` ticks long.
+    ChopNotes {
+        ids: Vec<NoteId>,
+        step: Ticks,
+    },
+    /// Play each chord among the notes upwards, a note every `step` ticks.
+    ArpeggiateNotes {
+        ids: Vec<NoteId>,
+        step: Ticks,
+    },
+    /// Start each note of a chord `delay` ticks after the one under it.
+    StrumNotes {
+        ids: Vec<NoteId>,
+        delay: Ticks,
+    },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for
     /// `Undo` and no change to save.
@@ -283,7 +322,8 @@ impl Edit {
     /// Whether, in a drag, this edit takes the place of the edit of its
     /// kind that the drag sent before it. A move and a resize do: they
     /// are measured from where the drag began. So does a note that a drag
-    /// draws, which is one note however long the drag makes it. Every
+    /// draws, which is one note however long the drag makes it, and the
+    /// notes a drag paints, which are all of them so far. Every
     /// other edit says what a value is to be, and a drag that paints steps
     /// sends one for each.
     pub fn replaces_last(&self) -> bool {
@@ -292,6 +332,7 @@ impl Edit {
             Edit::MoveItems { .. }
                 | Edit::ResizeItems { .. }
                 | Edit::AddNote { .. }
+                | Edit::AddNotes { .. }
                 | Edit::MoveNotes { .. }
                 | Edit::ResizeNotes { .. }
         )

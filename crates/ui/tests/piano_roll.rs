@@ -576,3 +576,139 @@ fn a_channel_that_plays_no_notes_shows_none() {
     assert!(harness.query_by_label("Snare notes").is_some());
     assert!(harness.state().is_empty());
 }
+
+#[test]
+fn a_paint_drag_lays_a_note_at_every_step_in_one_drag() {
+    let mut harness = harness(fixture());
+    harness.get_by_label("Paint").click();
+    harness.run();
+    // A first note is a step long, 24 ticks. The press is in the step
+    // at 240, 48 points on is tick 322, in the step at 312, and the last
+    // point is three rows down and at tick 394.
+    let from = at(&harness, 250.0, 57);
+    let to = [from + vec2(48.0, 0.0), from + vec2(96.0, 30.0)];
+    drag(&mut harness, from, &to);
+    harness.drop_at(to[1]);
+    harness.run();
+    let paint = |notes: &[(u64, u8)]| {
+        let notes = notes.to_vec();
+        let (channel, length) = (2, 24);
+        dragged(
+            Edit::AddNotes {
+                channel,
+                length,
+                notes,
+            },
+            1,
+        )
+    };
+    let first = [(240, 57), (264, 57), (288, 57), (312, 57)];
+    let mut all = first.to_vec();
+    all.extend([(336, 54), (360, 54), (384, 54)]);
+    assert_eq!(
+        harness.state(),
+        &[paint(&first[..1]), paint(&first), paint(&all)]
+    );
+
+    // On a note a click selects it, as the draw tool's does.
+    let pos = at(&harness, 30.0, 48);
+    click(&mut harness, pos);
+    assert_eq!(harness.state()[3..], [select(&[BASS[0]], false)]);
+}
+
+#[test]
+fn the_slice_tool_cuts_the_notes_on_the_keys_it_crosses() {
+    let mut harness = harness(fixture());
+    harness.get_by_label("Slice").click();
+    harness.run();
+    // Tick 130 snaps to 120, inside the G4 and past the end of the C4.
+    let from = at(&harness, 130.0, 56);
+    let to = at(&harness, 130.0, 47);
+    drag(&mut harness, from, &[to]);
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    harness.drop_at(to);
+    harness.run();
+    let slice = |ids: &[usize], at| {
+        let ids = ids.to_vec();
+        edit(Edit::SliceNotes { ids, at })
+    };
+    assert_eq!(harness.state(), &[slice(&[BASS[1]], 120)]);
+
+    // A click cuts the note under it.
+    let pos = at(&harness, 250.0, 51);
+    click(&mut harness, pos);
+    assert_eq!(harness.state()[1..], [slice(&[BASS[2]], 240)]);
+}
+
+#[test]
+fn the_tools_menu_and_its_keys_edit_the_selection() {
+    let mut project = fixture();
+    for id in [BASS[0], BASS[2]] {
+        project.patterns[0].notes[id].flags |= Note::SELECTED;
+    }
+    let mut harness = harness(project);
+    let ids = vec![BASS[0], BASS[2]];
+    for entry in ["Glue", "Arpeggiate"] {
+        harness.get_by_label("Tools").click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
+    let step = 24;
+    assert_eq!(
+        harness.state(),
+        &[
+            edit(Edit::GlueNotes { ids: ids.clone() }),
+            edit(Edit::ArpeggiateNotes {
+                ids: ids.clone(),
+                step
+            }),
+        ]
+    );
+
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.run();
+    for (modifiers, key) in [
+        (Modifiers::COMMAND, Key::Q),
+        (Modifiers::SHIFT, Key::Q),
+        (Modifiers::ALT, Key::U),
+        (Modifiers::ALT, Key::S),
+    ] {
+        harness.key_press_modifiers(modifiers, key);
+        harness.run();
+    }
+    let quantized = |lengths| Edit::QuantizeNotes {
+        ids: ids.clone(),
+        step,
+        lengths,
+    };
+    let expected = [
+        quantized(true),
+        quantized(false),
+        Edit::ChopNotes {
+            ids: ids.clone(),
+            step,
+        },
+        // A 64th note at PPQ 96.
+        Edit::StrumNotes {
+            ids: ids.clone(),
+            delay: 6,
+        },
+    ];
+    assert_eq!(harness.state()[2..], expected.map(edit));
+}
+
+#[test]
+fn without_a_selection_a_tool_takes_every_note_of_the_channel() {
+    let mut harness = harness(fixture());
+    harness.get_by_label("Tools").click();
+    harness.run();
+    harness.get_by_label("Quantize").click();
+    harness.run();
+    let quantized = Edit::QuantizeNotes {
+        ids: BASS.to_vec(),
+        step: 24,
+        lengths: true,
+    };
+    assert_eq!(harness.state(), &[edit(quantized)]);
+}

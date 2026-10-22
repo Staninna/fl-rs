@@ -16,6 +16,32 @@
 //! dragged over, as the right button does with any tool, and the mute tool
 //! mutes them or unmutes them. A drag snaps to the grid unless Alt is held.
 //!
+//! The paint tool lays a note at every step of the length the draw tool
+//! would give a note, along the drag, each on the key the pointer was on
+//! when it got there: one undo step for the whole drag, as FL's paint does.
+//! On a note it moves and resizes as the draw tool does. The slice tool
+//! cuts the notes in two where it is pressed, snapped to the grid, on
+//! every key from the one it is pressed on to the one it is let go on: FL
+//! cuts along the line a drag draws, and this keeps that line upright. A
+//! click with it cuts the note under the pointer.
+//!
+//! The Tools menu does what FL's Tools menu does at its default settings,
+//! to the selected notes, or to all of the channel's notes when none is
+//! selected, as FL does. Each is one undo step:
+//!
+//! - Glue joins the notes on one key that touch or overlap.
+//! - Quantize (Ctrl+Q) moves the starts and the lengths to the grid's
+//!   step, and Quantize starts (Shift+Q) the starts alone: FL's quick
+//!   quantize.
+//! - Chop (Alt+U) cuts the notes into pieces a step of the grid long, from
+//!   each note's start. FL's chopper has patterns too; this is its default.
+//! - Arpeggiate (Alt+A) plays each chord upwards, a note every step of the
+//!   grid, for as long as the chord lasts. FL's arpeggiator opens on that
+//!   pattern; its range and gate are left at the chord and at a full step.
+//! - Strum (Alt+S) starts each note of a chord a 64th note after the one
+//!   under it and keeps its end. FL's strummer has a time knob and a
+//!   tension; this is a fixed time with no tension.
+//!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
 //! or by a key, Ctrl+Up and Ctrl+Down by an octave, Ctrl+A selects every
@@ -34,7 +60,7 @@ use egui::{
     Align2, Color32, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
     StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
-use model::{Channel, Note, Pattern, Project};
+use model::{Channel, Note, Pattern};
 use std::ops::RangeInclusive;
 
 /// The width of the keyboard down the left.
@@ -63,18 +89,30 @@ const PLAYHEAD: Color32 = Color32::from_rgb(120, 220, 110);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Draw,
-    Select,
+    Paint,
     Delete,
     Mute,
+    Slice,
+    Select,
 }
 
 impl Tool {
-    const ALL: [Tool; 4] = [Tool::Draw, Tool::Select, Tool::Delete, Tool::Mute];
+    /// In the order of FL's toolbar.
+    const ALL: [Tool; 6] = [
+        Tool::Draw,
+        Tool::Paint,
+        Tool::Delete,
+        Tool::Mute,
+        Tool::Slice,
+        Tool::Select,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Tool::Draw => "Draw",
+            Tool::Paint => "Paint",
             Tool::Select => "Select",
+            Tool::Slice => "Slice",
             Tool::Delete => "Delete",
             Tool::Mute => "Mute",
         }
@@ -83,9 +121,84 @@ impl Tool {
     fn hint(self) -> &'static str {
         match self {
             Tool::Draw => "Click to add a note, drag to draw one. Drag a note to move it",
+            Tool::Paint => "Drag to lay a note at every step. Drag a note to move it",
             Tool::Select => "Drag to select notes. Drag a note to move the selection",
+            Tool::Slice => "Press where to cut and drag over the keys to cut there",
             Tool::Delete => "Click or drag over notes to delete them",
             Tool::Mute => "Click or drag over notes to mute or unmute them",
+        }
+    }
+
+    /// The tools that lay and move notes as the draw tool does.
+    fn draws(self) -> bool {
+        matches!(self, Tool::Draw | Tool::Paint)
+    }
+}
+
+/// An entry of the Tools menu: an edit of the selection, or of all of the
+/// channel's notes when none is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Glue,
+    Quantize,
+    QuantizeStarts,
+    Chop,
+    Arpeggiate,
+    Strum,
+}
+
+impl Action {
+    const ALL: [Action; 6] = [
+        Action::Glue,
+        Action::Quantize,
+        Action::QuantizeStarts,
+        Action::Chop,
+        Action::Arpeggiate,
+        Action::Strum,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Action::Glue => "Glue",
+            Action::Quantize => "Quantize",
+            Action::QuantizeStarts => "Quantize starts",
+            Action::Chop => "Chop",
+            Action::Arpeggiate => "Arpeggiate",
+            Action::Strum => "Strum",
+        }
+    }
+
+    /// FL's shortcut, when it has one. Ctrl+Q comes before Shift+Q in
+    /// [`Action::ALL`], since a shortcut without Shift matches with it
+    /// held.
+    fn shortcut(self) -> Option<(Modifiers, Key)> {
+        match self {
+            Action::Glue => None,
+            Action::Quantize => Some((Modifiers::COMMAND, Key::Q)),
+            Action::QuantizeStarts => Some((Modifiers::SHIFT, Key::Q)),
+            Action::Chop => Some((Modifiers::ALT, Key::U)),
+            Action::Arpeggiate => Some((Modifiers::ALT, Key::A)),
+            Action::Strum => Some((Modifiers::ALT, Key::S)),
+        }
+    }
+
+    /// The edit, with `step` the grid's step in ticks and `ppq` the
+    /// project's.
+    fn edit(self, ids: Vec<NoteId>, step: u64, ppq: u16) -> Edit {
+        match self {
+            Action::Glue => Edit::GlueNotes { ids },
+            Action::Quantize | Action::QuantizeStarts => Edit::QuantizeNotes {
+                ids,
+                step,
+                lengths: self == Action::Quantize,
+            },
+            Action::Chop => Edit::ChopNotes { ids, step },
+            Action::Arpeggiate => Edit::ArpeggiateNotes { ids, step },
+            // A 64th note.
+            Action::Strum => Edit::StrumNotes {
+                ids,
+                delay: u64::from(ppq / 16).max(1),
+            },
         }
     }
 }
@@ -191,6 +304,16 @@ enum Gesture {
         position: u64,
         key: u8,
     },
+    /// Lay notes `length` long along the drag, at `origin` and every
+    /// `length` either side of it. `notes` are the ones laid so far.
+    Paint {
+        channel: u16,
+        length: u64,
+        origin: u64,
+        notes: Vec<(u64, u8)>,
+    },
+    /// Cut the notes at `at`, on the keys from `key` to the pointer's.
+    Slice { at: u64, key: i32 },
     /// Select the notes in the rectangle from where the pointer went down:
     /// that tick, and that many points under the top of the highest key.
     Band { tick: f32, y: f32 },
@@ -243,8 +366,46 @@ impl Gesture {
                     key: *key,
                 })
             }
-            Gesture::Band { .. } | Gesture::Erase | Gesture::Mute { .. } => None,
+            Gesture::Paint { .. }
+            | Gesture::Slice { .. }
+            | Gesture::Band { .. }
+            | Gesture::Erase
+            | Gesture::Mute { .. } => None,
         }
+    }
+
+    /// For a paint, lay the notes the pointer has come to at `tick` on
+    /// `key`: every slot from the last one laid to the one under the
+    /// pointer that has none yet. The edit that says every note laid, when
+    /// this laid one.
+    fn paint(&mut self, tick: f32, key: i32) -> Option<Edit> {
+        let Gesture::Paint {
+            channel,
+            length,
+            origin,
+            notes,
+        } = self
+        else {
+            return None;
+        };
+        let key = u8::try_from(key).ok()?.min(TOP_KEY as u8);
+        let (origin, length) = (*origin as i64, (*length).max(1) as i64);
+        let slot = |tick: i64| origin + (tick - origin).div_euclid(length) * length;
+        let here = slot(tick.floor() as i64).max(0);
+        let last = notes.last().map_or(here, |(position, _)| *position as i64);
+        let (from, to) = (last.min(here), last.max(here));
+        let before = notes.len();
+        for position in (from..=to).step_by(length as usize) {
+            let position = position as u64;
+            if !notes.iter().any(|(laid, _)| *laid == position) {
+                notes.push((position, key));
+            }
+        }
+        (notes.len() > before).then(|| Edit::AddNotes {
+            channel: *channel,
+            length: length as u64,
+            notes: notes.clone(),
+        })
     }
 }
 
@@ -346,6 +507,17 @@ fn selected(own: &[(NoteId, &Note)]) -> Vec<NoteId> {
     selected.map(|(id, _)| *id).collect()
 }
 
+/// What an entry of the Tools menu acts on: the selection, or every note
+/// of the channel when none is selected.
+fn targets(own: &[(NoteId, &Note)]) -> Vec<NoteId> {
+    let chosen = selected(own);
+    if chosen.is_empty() {
+        own.iter().map(|(id, _)| *id).collect()
+    } else {
+        chosen
+    }
+}
+
 /// The keys the piano roll takes when the pointer is over it. This runs
 /// before the windows are drawn, and what it takes no other window sees.
 pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
@@ -374,6 +546,18 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         let ids = own.iter().map(|(id, _)| *id).collect();
         out.push(edit(Edit::SelectNotes { ids, add: false }, None));
     }
+    let grid = Grid::of(project);
+    let step = snap_step(grid, memory.beat / grid.beat as f32);
+    if !own.is_empty() {
+        for action in Action::ALL {
+            if let Some((modifiers, key)) = action.shortcut()
+                && pressed(modifiers, key)
+            {
+                let tool = action.edit(targets(&own), step, project.header.ppq);
+                out.push(edit(tool, None));
+            }
+        }
+    }
     // Without a selection the other keys are another window's.
     let ids = selected(&own);
     if ids.is_empty() {
@@ -392,8 +576,7 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         let ids = ids.clone();
         out.push(edit(Edit::SetNotesMuted { ids, muted }, None));
     }
-    let grid = Grid::of(project);
-    let step = snap_step(grid, memory.beat / grid.beat as f32) as i64;
+    let step = step as i64;
     // Ctrl does not match a shortcut without it, so the order is free.
     for (modifiers, key, delta_ticks, delta_keys) in [
         (ctrl, Key::ArrowUp, 0, 12),
@@ -414,9 +597,16 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
     }
 }
 
-/// The row above the notes: the channel, the tools, what the lane shows
-/// and how the notes are coloured.
-fn toolbar(ui: &mut Ui, project: &Project, channel: Option<&Channel>, memory: &mut Memory) {
+/// The row above the notes: the channel, the tools, the Tools menu, what
+/// the lane shows and how the notes are coloured.
+fn toolbar(
+    ui: &mut Ui,
+    state: &UiState,
+    channel: Option<&Channel>,
+    memory: &mut Memory,
+    out: &mut Vec<Command>,
+) {
+    let project = &*state.project;
     ui.horizontal(|ui| {
         let shown = channel.map_or_else(|| "No channel".to_owned(), channel_name);
         egui::ComboBox::from_id_salt("fl-rs piano roll channel")
@@ -440,6 +630,23 @@ fn toolbar(ui: &mut Ui, project: &Project, channel: Option<&Channel>, memory: &m
                 memory.tool = tool;
             }
         }
+        let own = channel.map_or_else(Vec::new, |channel| {
+            own(project.pattern(state.pattern), channel.index)
+        });
+        ui.add_enabled_ui(!own.is_empty(), |ui| {
+            ui.menu_button("Tools", |ui| {
+                let grid = Grid::of(project);
+                let step = snap_step(grid, memory.beat / grid.beat as f32);
+                for action in Action::ALL {
+                    if ui.button(action.name()).clicked() {
+                        let tool = action.edit(targets(&own), step, project.header.ppq);
+                        out.push(edit(tool, None));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Edit the selected notes, or all of them when none is selected");
+        });
         ui.separator();
         egui::ComboBox::from_id_salt("fl-rs piano roll lane")
             .width(80.0)
@@ -466,7 +673,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let memory_id = memory_id();
     let mut memory: Memory = ui.data(|data| data.get_temp(memory_id)).unwrap_or_default();
     let channel = selected_channel(ui.ctx(), project);
-    toolbar(ui, project, channel, &mut memory);
+    toolbar(ui, state, channel, &mut memory, out);
     let Some(channel) = channel.filter(|channel| takes_notes(channel)) else {
         let why = if project.channels.is_empty() {
             "The project has no channels"
@@ -727,7 +934,7 @@ impl Roll<'_> {
         };
         let (tool, shift) = (memory.tool, modifiers.shift);
 
-        if matches!(tool, Tool::Draw | Tool::Select)
+        if (tool.draws() || tool == Tool::Select)
             && memory.drag.is_none()
             && let Some((_, _, true)) = response.hover_pos().and_then(|pos| self.at(pos))
         {
@@ -747,6 +954,9 @@ impl Roll<'_> {
                 hit.map(|(_, note, _)| Gesture::Mute {
                     muted: !note.muted(),
                 })
+            } else if tool == Tool::Slice {
+                let at = snap(tick, step).max(0) as u64;
+                Some(Gesture::Slice { at, key })
             } else if modifiers.command || (tool == Tool::Select && hit.is_none()) {
                 let y = press.y - view.top;
                 Some(Gesture::Band { tick, y })
@@ -790,6 +1000,13 @@ impl Roll<'_> {
                         key,
                     }
                 })
+            } else if tool == Tool::Paint {
+                Some(Gesture::Paint {
+                    channel,
+                    length: memory.length.unwrap_or(view.step as u64).max(1),
+                    origin: floor(tick, step),
+                    notes: Vec::new(),
+                })
             } else {
                 u8::try_from(key).ok().map(|key| Gesture::Draw {
                     channel,
@@ -815,7 +1032,35 @@ impl Roll<'_> {
             // and the note under that point is the drag's too.
             let passed = pressed.filter(|_| started).into_iter().chain([pos]);
             let passed = passed.filter_map(|pos| self.at(pos));
-            match &drag.gesture {
+            match &mut drag.gesture {
+                gesture @ Gesture::Paint { .. } => {
+                    let pointer = pressed.filter(|_| started).into_iter().chain([pos]);
+                    for pos in pointer {
+                        if let Some(laid) = gesture.paint(time.tick(pos.x), view.key(pos.y)) {
+                            out.push(edit(laid.clone(), drag_id));
+                            drag.sent = Some(laid);
+                        }
+                    }
+                }
+                Gesture::Slice { at, key } => {
+                    let (at, under) = (*at, view.key(pos.y));
+                    let (low, high) = ((*key).min(under), (*key).max(under));
+                    let rows = egui::Rangef::new(view.y(high), view.y(low) + KEY);
+                    painter.vline(time.x(at as f32), rows, Stroke::new(1.5, strong));
+                    if dropped {
+                        let cut = |(_, note): &&(NoteId, &Note)| {
+                            let at = at as i64;
+                            (low..=high).contains(&i32::from(note.key))
+                                && note.length > 0
+                                && i64::from(note.position) < at
+                                && at < view.end(note)
+                        };
+                        let ids: Vec<NoteId> = own.iter().filter(cut).map(|(id, _)| *id).collect();
+                        if !ids.is_empty() {
+                            out.push(edit(Edit::SliceNotes { ids, at }, None));
+                        }
+                    }
+                }
                 Gesture::Erase => {
                     for (id, ..) in passed {
                         if !drag.done.contains(&id) {
@@ -825,6 +1070,7 @@ impl Roll<'_> {
                     }
                 }
                 Gesture::Mute { muted } => {
+                    let muted = &*muted;
                     for (id, note, _) in passed {
                         if note.muted() != *muted && !drag.done.contains(&id) {
                             drag.done.push(id);
@@ -834,7 +1080,7 @@ impl Roll<'_> {
                     }
                 }
                 Gesture::Band { tick, y } => {
-                    let band = Rect::from_two_pos(pos2(time.x(*tick), view.top + y), pos);
+                    let band = Rect::from_two_pos(pos2(time.x(*tick), view.top + *y), pos);
                     let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.25);
                     let stroke = Stroke::new(1.0, strong);
                     painter.rect(band, 0.0, fill, stroke, StrokeKind::Inside);
@@ -846,6 +1092,7 @@ impl Roll<'_> {
                     }
                 }
                 gesture => {
+                    let gesture = &*gesture;
                     let moved = gesture.edit(time.tick(pos.x), view.key(pos.y), step);
                     if let Some(moved) = moved.filter(|moved| drag.sent.as_ref() != Some(moved)) {
                         out.push(edit(moved.clone(), drag_id));
@@ -861,7 +1108,8 @@ impl Roll<'_> {
             // The next note a click adds is as long as the one this drag
             // drew or resized.
             match (drag.gesture, drag.sent) {
-                (Gesture::Draw { .. }, Some(Edit::AddNote { length, .. })) => {
+                (Gesture::Draw { .. }, Some(Edit::AddNote { length, .. }))
+                | (Gesture::Paint { .. }, Some(Edit::AddNotes { length, .. })) => {
                     memory.length = Some(length);
                 }
                 (Gesture::Resize { length, .. }, Some(Edit::ResizeNotes { delta_ticks, .. }))
@@ -885,14 +1133,21 @@ impl Roll<'_> {
                     let (ids, muted) = (vec![id], !note.muted());
                     out.push(edit(Edit::SetNotesMuted { ids, muted }, None));
                 }
-                (Tool::Draw | Tool::Select, Some((id, note, _))) => {
+                (Tool::Draw | Tool::Paint | Tool::Select, Some((id, note, _))) => {
                     let ids = vec![id];
                     out.push(edit(Edit::SelectNotes { ids, add: shift }, None));
                     if note.length > 0 {
                         memory.length = u64::try_from(note.length).ok();
                     }
                 }
-                (Tool::Draw, None) => {
+                (Tool::Slice, Some((id, note, _))) => {
+                    let at = snap(time.tick(pos.x), step).max(0) as u64;
+                    if note.length > 0 && i64::from(note.position) < at as i64 {
+                        let cut = Edit::SliceNotes { ids: vec![id], at };
+                        out.push(edit(cut, None));
+                    }
+                }
+                (Tool::Draw | Tool::Paint, None) => {
                     if let Ok(key) = u8::try_from(view.key(pos.y)) {
                         let add = Edit::AddNote {
                             channel,

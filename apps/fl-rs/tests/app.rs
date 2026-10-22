@@ -814,6 +814,53 @@ fn the_piano_roll_s_drags_are_one_undo_step_each() {
 }
 
 #[test]
+fn a_tool_of_the_piano_roll_is_one_undo_step() {
+    let dir = Dir::new("note-tools");
+    let (mut app, _) = open_fixture(&dir);
+    let steps = notes(app.project());
+
+    // A paint drag says every note it has laid so far, and is one step.
+    let paint = |notes: &[(u64, u8)]| Edit::AddNotes {
+        channel: 0,
+        length: 48,
+        notes: notes.to_vec(),
+    };
+    edit(&mut app, paint(&[(400, 60)]), Some(1));
+    edit(&mut app, paint(&[(400, 60), (448, 62)]), Some(1));
+    assert_eq!(notes(app.project())[4..], [(400, 48, 60), (448, 48, 62)]);
+
+    // A slice through both makes four notes in one edit.
+    edit(
+        &mut app,
+        Edit::SliceNotes {
+            ids: vec![4, 5],
+            at: 424,
+        },
+        None,
+    );
+    assert_eq!(
+        notes(app.project())[4..],
+        [(400, 24, 60), (424, 24, 60), (448, 48, 62)]
+    );
+    let chopped = Edit::ChopNotes {
+        ids: vec![6],
+        step: 12,
+    };
+    edit(&mut app, chopped, None);
+    assert_eq!(notes(app.project()).len(), 10);
+    edit(&mut app, Edit::GlueNotes { ids: vec![4, 5] }, None);
+    assert_eq!(notes(app.project())[4], (400, 48, 60));
+
+    // Each tool comes back off in one undo, and the paint drag in one more.
+    for left in [10, 7, 6, 4] {
+        app.apply(Command::Undo);
+        assert_eq!(notes(app.project()).len(), left);
+    }
+    assert_eq!(notes(app.project()), steps);
+    assert!(!app.is_modified());
+}
+
+#[test]
 fn a_deleted_note_keeps_its_place_until_the_save_leaves_it_out() {
     let dir = Dir::new("compact");
     let (mut app, path) = open_fixture(&dir);
