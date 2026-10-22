@@ -5,12 +5,13 @@
 //! in the engine once they are read from the binary. The double biquad
 //! takes `f32` samples too and keeps its state in `f64`.
 //!
-//! [`curve`] is the one FL-specific part: the envelope curve that both the
-//! engine and the plugins draw.
+//! [`curve`] and [`halfband`] are FL-specific: the envelope curve that both
+//! the engine and the plugins draw, and the 2x resampler FL's plugins share.
 
 pub mod additive;
 pub mod biquad;
 pub mod curve;
+pub mod halfband;
 pub mod interpolator;
 pub mod resample;
 
