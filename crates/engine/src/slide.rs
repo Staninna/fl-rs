@@ -25,6 +25,10 @@
 //!
 //! The note's fine pitch is not in `InitLevels.Pitch` (FL keeps it in
 //! `rec+0x1e0`), and neither is a slide note's.
+//!
+//! An arpeggiator with slide on moves `rec+0x1e0` of the note it sounds
+//! ([`crate::arp`]). That adds to what slides do, and [`Slides::glide`]
+//! takes it.
 
 use crate::clock::Clock;
 use crate::sequence::Played;
@@ -36,6 +40,9 @@ pub(crate) struct Slides {
     tracks: Vec<Track>,
     /// The steps of the slides that are over, as [`Step`]s.
     steps: Vec<Step>,
+    /// The notes an arpeggiator glides, by their id, and the cents it
+    /// has them at from each tick on, on top of what slides do.
+    glides: Vec<(usize, Vec<(u64, f32)>)>,
 }
 
 /// A step of a slide: from output sample `at` on, note `id` is `cents` off
@@ -128,12 +135,52 @@ impl Slides {
         true
     }
 
-    /// Every step of every slide, the steps of a note in the order they
-    /// come. A step on or past the sample its note stops sounding on is
-    /// left out.
+    /// The note `id`, the last one handed to [`Slides::note`], is moved by
+    /// an arpeggiator to `points`: from each tick on, this many cents off
+    /// the pitch it started at.
+    pub fn glide(&mut self, id: usize, points: &[(u64, f32)]) {
+        self.glides.push((id, points.to_vec()));
+    }
+
+    /// Every step of every slide and glide, the steps of a note in the
+    /// order they come. A step on or past the sample its note stops
+    /// sounding on is left out. A note that slides and glides is at the
+    /// sum of the two.
     pub fn steps(mut self, clock: &Clock) -> Vec<Step> {
         for track in &mut self.tracks {
             finish(track, u64::MAX, clock, &mut self.steps);
+        }
+        for (id, points) in std::mem::take(&mut self.glides) {
+            let Some(track) = self.tracks.iter().find(|t| t.id == id) else {
+                continue;
+            };
+            let slides: Vec<(usize, f32)> = (self.steps.iter())
+                .filter(|step| step.id == id)
+                .map(|step| (step.at, step.cents))
+                .collect();
+            self.steps.retain(|step| step.id != id);
+            let glides = points
+                .iter()
+                .map(|&(tick, cents)| (clock.sample(tick), cents));
+            // Both in the order they come: walk them together.
+            let mut changes: Vec<(usize, Option<f32>, Option<f32>)> = (slides.iter())
+                .map(|&(at, cents)| (at, Some(cents), None))
+                .chain(glides.map(|(at, cents)| (at, None, Some(cents))))
+                .collect();
+            changes.sort_by_key(|change| change.0);
+            let (mut slide, mut glide) = (0.0, 0.0);
+            for (k, &(at, s, g)) in changes.iter().enumerate() {
+                slide = s.unwrap_or(slide);
+                glide = g.unwrap_or(glide);
+                let last_here = changes.get(k + 1).is_none_or(|next| next.0 != at);
+                if last_here && at < track.done {
+                    self.steps.push(Step {
+                        id,
+                        at,
+                        cents: slide + glide,
+                    });
+                }
+            }
         }
         self.steps
     }

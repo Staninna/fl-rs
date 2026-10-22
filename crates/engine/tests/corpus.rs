@@ -45,6 +45,10 @@
 //! The approximated line counts the hosted slots whose plugin stands in
 //! for a thing its state asks for, by what the plugin says of it.
 //!
+//! A project's unplayed arpeggiators are its channels with a note in the
+//! 10 seconds whose arpeggiator asks for a part the engine does not build.
+//! Their notes play as they are.
+//!
 //! The sidechain line counts the sidechain inputs the hosted plugins
 //! listen to, each an insert and an insert that sends to it, and the slots
 //! whose plugin is handed one.
@@ -173,8 +177,9 @@ fn every_project_renders_its_first_10_seconds() {
         eprintln!(
             "{name}: notes {} voices {} clips {} stretched {} unresolved {} unsupported {} \
              skipped {} automation {} unsupported targets {} hosted slots {} unhosted {} \
-             generators {} unhosted {} approximated generators {} approximated {} latency {} \
-             delayed inserts {} peak {peak:.3} with FL's curves {fl_peak:.3}",
+             generators {} unhosted {} approximated generators {} approximated {} \
+             unplayed arpeggiators {} latency {} delayed inserts {} peak {peak:.3} with FL's \
+             curves {fl_peak:.3}",
             out.notes,
             out.voices,
             out.clips,
@@ -190,6 +195,7 @@ fn every_project_renders_its_first_10_seconds() {
             out.unhosted_generators.values().sum::<usize>(),
             out.approximated_generators.values().sum::<usize>(),
             out.approximated_slots.values().sum::<usize>(),
+            out.unplayed_arpeggiators.values().sum::<usize>(),
             out.latency,
             out.delayed_inserts,
         );
@@ -201,6 +207,10 @@ fn every_project_renders_its_first_10_seconds() {
             (
                 "approximated generators",
                 format!("{:?}", out.approximated_generators),
+            ),
+            (
+                "unplayed arpeggiators",
+                format!("{:?}", out.unplayed_arpeggiators),
             ),
         ];
         for (what, list) in gaps.iter().filter(|(_, list)| list != "{}") {
