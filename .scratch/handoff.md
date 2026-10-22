@@ -1,3 +1,16 @@
+# Handoff, 2026-10-23, perf
+
+Branch `claude/perf`. Two speedups that keep every one of the profile harness's 165 hashes, and a benchmark block in the README.
+
+- Maximus's FIR crossover runs its three bands and two channels in one loop over the taps, on one history kept twice over so the taps read it without wrapping. Each of the six sums keeps its order. It was the costliest function in Square a Saw - Oxygen (24%, through the Maximus inside Harmor); that project went from 0.9x to 1.1x realtime. Harmor, Harmless and Autogun all build a Maximus for their compression.
+- Parametric EQ 2 runs both channels of a filter in the same loop, so their recursions overlap.
+- The profile harness plays each project once cold, every call timed, then `--warmup N` rounds (2) untimed, then the round it reports. Each line gives the cold round's speed and slowest call too, and the hash covers every round.
+- `tools/bench.py` writes the README's bench block from a harness run; CI runs `--check` on it. It cannot run the harness: CI has no FL Studio. A per-plugin benchmark (each effect and generator on fixed input, with no corpus) was asked about and not built.
+
+Tried and dropped, each measured on Oxygen and five other heavy projects: fat LTO with one codegen unit (no faster, Oxygen ran 15% more instructions), `-C target-cpu=x86-64-v3` (same hashes, under 10% and within the noise, and it shuts out CPUs without AVX2), and summing Harmor's partial bank four lanes wide or a run of samples at a time (no faster; the user accepted low-bit changes in Harmor for speed, but none was found).
+
+Where the time goes now, over the 12 slowest projects (`perf record`, one thread): Pitcher's detector 6% (already SSE, an AMDF over the whole frame every sample), Harmor's bank and tick 10%, Reeverb 2 6% (no single hot spot), Maximus's bands 5%, of which its saturator's `pow` 4%, Parametric EQ 2 4%. Harmor's tick calls libm's `log2f` per partial and `ShapeTable::clamped` calls `roundf` per partial; both are calls on baseline x86-64.
+
 # Handoff, 2026-10-22, UI look
 
 The windows look more like FL's: drawing only, no change to what a click or a key does. The piano roll has a piano keyboard, darker black-key rows, and notes with an outline, a key name and a shade by velocity (a dark channel colour is lifted). Mixer faders fill the window's height under a strip number. Playlist clips have a title strip over a body that shows a pattern's notes or an automation curve. Steps are drawn as buttons, and the front tab joins its window. The README piano roll picture opens Wavvyy Synth on "Outro Synth" so that it has notes.

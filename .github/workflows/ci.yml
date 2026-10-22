@@ -23,6 +23,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       # The plugins port.rs names and the ones docs/plugins.md calls built agree.
       - run: python3 -I tools/progress.py --check
+      # The README's benchmark block is there and holds a table.
+      - run: python3 -I tools/bench.py --check
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
   test:
