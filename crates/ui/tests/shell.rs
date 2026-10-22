@@ -390,6 +390,7 @@ fn the_window_keys_show_and_hide_their_windows() {
     assert!(harness.query_by_label("Mixer").is_none());
     harness.key_press(egui::Key::F5);
     harness.run();
-    assert!(harness.query_by_label("Playlist").is_none());
+    // With every window closed, the welcome screen lists their keys.
+    assert!(harness.query_by_label("No window is open").is_some());
     assert!(harness.state().is_empty());
 }

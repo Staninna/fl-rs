@@ -21,6 +21,7 @@ mod channel_rack;
 mod mixer;
 mod piano_roll;
 mod playlist;
+mod theme;
 mod top_bar;
 mod widgets;
 mod windows;
@@ -411,15 +412,26 @@ pub struct UiState {
 /// Draw the whole window: the top bar, the status line and the docked
 /// windows between them.
 pub fn shell(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
-    shortcuts(ui, out);
+    theme::apply(ui.ctx());
+    shortcuts(ui, state, out);
     egui::Panel::top("top bar").show(ui, |ui| top_bar::show(ui, state, out));
     egui::Panel::bottom("status").show(ui, |ui| status(ui, state));
     egui::CentralPanel::no_frame().show(ui, |ui| windows::show(ui, state, out));
 }
 
 /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo, Ctrl+S saves. On a Mac
-/// they go with Cmd.
-fn shortcuts(ui: &mut egui::Ui, out: &mut Vec<Command>) {
+/// they go with Cmd. Space plays and stops, as in FL, unless a text field
+/// has the keys.
+fn shortcuts(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
+    if !ui.ctx().egui_wants_keyboard_input()
+        && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+    {
+        out.push(if state.playing {
+            Command::Stop
+        } else {
+            Command::Play
+        });
+    }
     use egui::{Key, KeyboardShortcut, Modifiers};
     let ctrl = Modifiers::COMMAND;
     // A shortcut matches with Shift held too, so the one that wants Shift
