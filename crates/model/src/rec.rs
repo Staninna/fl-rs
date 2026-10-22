@@ -51,6 +51,10 @@ pub mod control {
     pub const CHANNEL_PAN_OFFSET: u16 = 0x10;
     /// Channel volume multiplier, 229 @4, 0..=25600 with 12800 at unity.
     pub const CHANNEL_VOLUME_MULTIPLIER: u16 = 0x11;
+    /// The arpeggiator's time, 215 @52, 450..=1447 (`docs/arpeggiator.md`).
+    pub const CHANNEL_ARP_TIME: u16 = 0x303;
+    /// The arpeggiator's gate, 215 @56, 0..=48.
+    pub const CHANNEL_ARP_GATE: u16 = 0x304;
 }
 
 /// The highest insert index. FL keeps the "current" track there.
@@ -187,8 +191,8 @@ impl RecTarget {
 
     /// The lowest and the highest raw value of the control, for the
     /// controls the engine plays: insert volume, pan, stereo separation,
-    /// EQ and send level, channel volume, pan, pitch, pan offset and volume multiplier, and
-    /// the tempo. `None` for any other.
+    /// EQ and send level, channel volume, pan, pitch, pan offset and volume multiplier,
+    /// the arpeggiator's time and gate, and the tempo. `None` for any other.
     ///
     /// The mixer and channel ranges are the dispatcher's clamps in
     /// `docs/rec-225.md`. The tempo's is FL's 10 to 522 BPM. No clamp was
@@ -201,8 +205,8 @@ impl RecTarget {
     /// (`docs/mixer-insert.md`).
     ///
     /// A channel's pitch is the dispatcher's fixed -4800..=4800 cents, and
-    /// its pan offset and volume multiplier the range of their knobs in
-    /// FL's channel settings form (`docs/rec-channel.md`).
+    /// its pan offset, volume multiplier and arpeggiator controls the range
+    /// of their knobs in FL's channel settings form (`docs/rec-channel.md`).
     pub fn raw_range(&self) -> Option<(i32, i32)> {
         let sends = control::SEND..=control::SEND + LAST_INSERT;
         match *self {
@@ -233,6 +237,8 @@ impl RecTarget {
                 control::CHANNEL_PITCH => Some((-4800, 4800)),
                 control::CHANNEL_PAN_OFFSET => Some((-6400, 6400)),
                 control::CHANNEL_VOLUME_MULTIPLIER => Some((0, 25_600)),
+                control::CHANNEL_ARP_TIME => Some((450, 1447)),
+                control::CHANNEL_ARP_GATE => Some((0, 48)),
                 _ => None,
             },
             _ => None,
@@ -436,19 +442,21 @@ mod tests {
         assert_eq!(range(0x0002_0004), Some((-4800, 4800)));
         assert_eq!(range(0x0002_0010), Some((-6400, 6400)));
         assert_eq!(range(0x0002_0011), Some((0, 25_600)));
+        assert_eq!(range(0x0002_0303), Some((450, 1447)));
+        assert_eq!(range(0x0002_0304), Some((0, 48)));
         assert_eq!(range(id(1, 0, control::SEPARATION)), Some((-64, 64)));
         assert_eq!(range(id(1, 0, control::EQ_GAIN + 2)), Some((-1800, 1800)));
         assert_eq!(range(id(1, 0, control::EQ_FREQUENCY)), Some((0, 65_536)));
         assert_eq!(range(id(1, 0, control::EQ_WIDTH + 1)), Some((0, 65_536)));
         // A fourth EQ band, a slot's mix, a plugin parameter, the main volume,
-        // a channel's mod X and a channel's arpeggio time.
+        // a channel's mod X and a channel's arpeggio repeat.
         for other in [
             id(1, 0, control::EQ_GAIN + 3),
             id(1, 3, control::SLOT_MIX),
             id(1, 3, 0x8000),
             0x4000_0000,
             0x0002_0002,
-            0x0002_0303,
+            0x0002_0305,
         ] {
             assert_eq!(range(other), None, "{other:#x}");
         }
