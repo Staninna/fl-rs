@@ -40,6 +40,8 @@ The user is working at this machine. Open no windows and play no sound: no `carg
 - Read the DSP from the binary rather than guessing. Where you approximate, say so in the row and in the plugin's `fidelity()`.
 - The audio path allocates nothing. Size buffers in `set_state` and `set_sample_rate`. `process`, `tick`, `set_tempo` and `set_param` run on the audio thread (tempo automation calls `set_tempo` mid-song), so they must not allocate.
 
+- If your change shows in the app (a window, a widget, the colours), draw the README's screenshots again and commit them with it: `FL_RS_CORPUS="<FL Studio>/Data" cargo test -p ui --test screenshots -- --ignored`. Look at them first. `CLAUDE.md` has the rest.
+
 ## Report
 
 End by delivering your report: under 300 words, saying what plays, what is approximated, corpus numbers before and after, every file you touched outside your own with the lines you changed there, and anything left open. A report that never arrives costs a round trip, so send it before you stop.

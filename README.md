@@ -4,6 +4,19 @@
 
 A cross-platform DAW in Rust that opens FL Studio projects. It plays them by rebuilding FL's stock plugins from FL's own binaries, one plugin at a time.
 
+## Screenshots
+
+The app as it looks now, playing FL's Future House demo song. `crates/ui/tests/screenshots.rs` draws these; see Tests for how to run it again.
+
+| | |
+|---|---|
+| ![The start screen](docs/screenshots/start.png) | ![The playlist](docs/screenshots/playlist.png) |
+| Start: no window open, and the keys that open each one | Playlist (F5) |
+| ![The channel rack](docs/screenshots/channel-rack.png) | ![The piano roll](docs/screenshots/piano-roll.png) |
+| Channel rack (F6) | Piano roll (F7) |
+| ![The browser](docs/screenshots/browser.png) | ![The mixer](docs/screenshots/mixer.png) |
+| Browser (F8) | Mixer (F9) |
+
 ## Progress
 
 <!-- progress:start -->
@@ -118,6 +131,10 @@ Set `FL_RS_CORPUS` to run the corpus tests too. Without it they skip themselves.
 On Linux the build needs the ALSA headers (`libasound2-dev` on Debian and Ubuntu). The tests that play through the output device skip themselves when there is none.
 
 The `ui` snapshot test draws through wgpu and needs an adapter. Without a GPU, Mesa's lavapipe will do (`mesa-vulkan-drivers`). After a change that is meant to show, write the snapshot again with `UPDATE_SNAPSHOTS=true cargo test -p ui`.
+
+The README's screenshots are written by an ignored test, from FL's Future House demo song. Run it after any change to how the app looks, and commit the pictures with the change:
+
+    FL_RS_CORPUS="<FL Studio>/Data" cargo test -p ui --test screenshots -- --ignored
 
 The corpus render plays every shipped project offline and prints how many have sound, which generators stay silent and which effects are passed through. It takes about three minutes in release:
 
