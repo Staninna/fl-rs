@@ -737,26 +737,30 @@ fn visit(
 /// does without, as Vocodex and Fruity Limiter do by listening to their
 /// own input. `docs/rec-225.md` has the addresses.
 ///
-/// A plugin's second output, which is Fruity Stereo Shaper's difference,
-/// is added to the bus of the insert its number counts to among the
-/// inserts its own sends to, in rising order from 1, the last of them for
-/// a higher number. It goes in as it leaves the plugin: the send's level,
-/// the slot's mix level and the insert's volume and pan are not on it. FL
-/// hands the plugin that insert's own buffer (`FUN_0132bb50`). How FL
+/// A plugin's second output, which is Fruity Stereo Shaper's difference
+/// or what Fruity Send sends, is added to the bus of the insert its
+/// number counts to among the inserts its own sends to, in rising order
+/// from 1, the last of them for a higher number. It goes in as it leaves
+/// the plugin: the send's level, the slot's mix level and the insert's
+/// volume and pan are not on it. FL hands the plugin that insert's own
+/// buffer (`FUN_0132bb50`). How FL
 /// counts to it is inferred from the "Left - Right splitter" preset, whose
 /// 2 is then the first insert after the master.
 ///
 /// A generator that is late is not made up for: it comes in with the
-/// voices of its insert, as late as it says. None is late so far.
+/// voices of its insert, as late as it says. Harmless, Harmor, Autogun,
+/// Ogun and the Patcher generator say they are.
 ///
-/// A plugin with [`Effect::controller_outputs`], which is Fruity Peak
-/// Controller, is told every tick of the song by [`Mixer::tick`], which
-/// hands back the outputs that moved. An insert with such a plugin that
-/// drives a link is in the mixer whether sound reaches it or not, because
-/// the plugin's LFO and its base levels drive their controls in silence
-/// too. A slot that is switched off, or on an insert that is, hears of no
-/// tick: that FL leaves it out is inferred from the plugin putting its LFO
-/// back in step when it is switched on.
+/// A plugin with [`Effect::controller_outputs`], a controller such as
+/// Fruity Peak Controller, Control Surface or the Envelope, Formula,
+/// Keyboard and X-Y Controllers, is told every tick of the song by
+/// [`Mixer::tick`], which hands back the outputs that moved. An insert
+/// with such a plugin that drives a link is in the mixer whether sound
+/// reaches it or not, because a controller drives its controls in silence
+/// too, as Peak Controller's LFO and base levels do. A slot that is
+/// switched off, or on an insert that is, hears of no tick: that FL leaves
+/// it out is inferred from Peak Controller putting its LFO back in step
+/// when it is switched on.
 ///
 /// The strips sit in runs that send nothing to each other, the strips one
 /// step from a strip with no route in first. A block brings into every
