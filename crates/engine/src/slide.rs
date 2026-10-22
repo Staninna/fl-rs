@@ -143,17 +143,18 @@ impl Slides {
     }
 
     /// Every step of every slide and glide, the steps of a note in the
-    /// order they come. A step on or past the sample its note stops
-    /// sounding on is left out. A note that slides and glides is at the
-    /// sum of the two.
+    /// order they come. A slide's step on or past the sample its note
+    /// stops sounding on is left out; a glide's steps are all kept, since
+    /// the arpeggiator makes them only while the note is held. A note that
+    /// slides and glides is at the sum of the two.
     pub fn steps(mut self, clock: &Clock) -> Vec<Step> {
         for track in &mut self.tracks {
             finish(track, u64::MAX, clock, &mut self.steps);
         }
         for (id, points) in std::mem::take(&mut self.glides) {
-            let Some(track) = self.tracks.iter().find(|t| t.id == id) else {
+            if !self.tracks.iter().any(|t| t.id == id) {
                 continue;
-            };
+            }
             let slides: Vec<(usize, f32)> = (self.steps.iter())
                 .filter(|step| step.id == id)
                 .map(|step| (step.at, step.cents))
@@ -172,8 +173,12 @@ impl Slides {
             for (k, &(at, s, g)) in changes.iter().enumerate() {
                 slide = s.unwrap_or(slide);
                 glide = g.unwrap_or(glide);
+                // No cut where the note would stop sounding unbent: a
+                // glide down makes a sampler voice last longer, and the
+                // voice ends where it runs off its sample or is let go of
+                // whatever steps are left.
                 let last_here = changes.get(k + 1).is_none_or(|next| next.0 != at);
-                if last_here && at < track.done {
+                if last_here {
                     self.steps.push(Step {
                         id,
                         at,
@@ -269,6 +274,20 @@ mod tests {
         assert_eq!(gone.len(), 10);
         assert!(gone.iter().all(|(at, _)| *at < 10_000));
         assert_eq!(gone[0], (7500, 12.5));
+    }
+
+    #[test]
+    fn a_glide_keeps_its_steps_past_where_the_unbent_voice_would_end() {
+        // A sampler voice held for two bars that its sample would play
+        // through in 24000 samples at the speed it starts at. A slide
+        // arpeggio takes it down two octaves at sample 12000, which makes
+        // it last longer, and back up at 24000.
+        let clock = clock();
+        let mut slides = Slides::default();
+        slides.note(0, 0, &played(0, Some(768), 84, 0, false), 24_000);
+        slides.glide(0, &[(48, -2400.0), (96, 0.0)]);
+        let steps = slides.steps(&clock);
+        assert_eq!(cents(&steps, 0), [(12_000, -2400.0), (24_000, 0.0)]);
     }
 
     #[test]
