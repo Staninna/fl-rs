@@ -56,6 +56,20 @@ pub enum Command {
     /// that is previewed stops too.
     Stop,
     Seek(Ticks),
+    /// Play the pattern in pattern mode from the first tick up to the
+    /// second and back, or with `None` the whole of it.
+    SetLoopRange(Option<(Ticks, Ticks)>),
+    /// Start a key of a channel, as a held key of FL's keyboard does, at a
+    /// velocity from 0 to 128. It sounds beside whatever the project is
+    /// doing, until the `NoteOff` of the key.
+    NoteOn {
+        channel: u16,
+        key: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        key: u8,
+    },
     /// Switch between pattern mode and song mode.
     ToggleSongMode,
     /// Switch between stopping at the end of the song and starting over.
@@ -374,6 +388,9 @@ pub struct UiState {
     pub looping: bool,
     /// The index of the pattern that plays in pattern mode.
     pub pattern: u16,
+    /// The ticks the pattern plays round in pattern mode, from the first
+    /// up to the second, when it does not play the whole of it.
+    pub loop_range: Option<(Ticks, Ticks)>,
     /// FL's `Data` directory or its install directory, when the app was
     /// told one: the first root of the browser.
     pub data_root: Option<PathBuf>,

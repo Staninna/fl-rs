@@ -248,6 +248,11 @@ impl Voice {
         self.follow
     }
 
+    /// The left and right gain the voice plays at.
+    pub fn gains(&self) -> (f32, f32) {
+        self.gains
+    }
+
     /// Left and right gain from the next sample on.
     pub fn set_gains(&mut self, gains: (f32, f32)) {
         self.gains = gains;

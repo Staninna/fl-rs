@@ -56,6 +56,16 @@
 //! chosen, Snap to scale in the Tools menu moves the notes outside it to
 //! the nearest key in it, the lower one when two are as near.
 //!
+//! A press on the keyboard plays its key through the channel until the
+//! button is let go, and a drag along it plays each key it comes to. A
+//! press on a note with the draw, paint or select tool plays the note at
+//! its velocity in the same way, and a press where the draw or paint tool
+//! adds a note plays that key: FL's piano roll does both. While the
+//! pattern plays in pattern mode the play cursor runs across the notes,
+//! and the view turns a page when the cursor leaves it. A drag along the
+//! ruler sets the ticks the pattern plays round, snapped, and a click on
+//! the ruler plays the whole pattern again.
+//!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
 
@@ -258,6 +268,15 @@ struct Memory {
     /// Where the piano roll was drawn and in which frame, for
     /// [`keys`], which runs before it.
     area: Option<(Rect, u64)>,
+    /// The key the keyboard plays while its button is held.
+    keyboard: Option<u8>,
+    /// The key a press on the notes plays while the button is held.
+    pressed: Option<u8>,
+    /// Whether the press on the notes that is held was looked at for a key
+    /// to play.
+    heard: bool,
+    /// The tick a drag along the ruler began on.
+    range: Option<u64>,
 }
 
 impl Default for Memory {
@@ -276,6 +295,10 @@ impl Default for Memory {
             drag: None,
             paint: None,
             area: None,
+            keyboard: None,
+            pressed: None,
+            heard: false,
+            range: None,
         }
     }
 }
@@ -820,6 +843,14 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     memory.top = memory.top.clamp(0.0, (tall - area.height()).max(0.0));
 
     let scale = memory.beat / grid.beat as f32;
+    // The view follows the play cursor a page at a time, as FL's does.
+    if state.playing && !state.song_mode && memory.drag.is_none() {
+        let at = state.position as f32;
+        let shown = area.width().max(1.0) / scale;
+        if at < memory.left || at >= memory.left + shown {
+            memory.left = at;
+        }
+    }
     let time = Timeline {
         origin: area.left(),
         left: memory.left,
@@ -844,6 +875,9 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         scale: memory.scale.map(|(root, scale)| (root, scale.keys(root))),
     };
     roll.backdrop(ui, ruler, area, keyboard);
+    let ruler = ruler.with_min_x(area.left());
+    roll.ruler(ui, ruler, area, state.loop_range, &mut memory, out);
+    roll.keyboard(ui, keyboard, &mut memory, out);
     roll.notes(ui, area, &mut memory, out);
     roll.lane(ui, gutter, lane, &mut memory, out);
 
@@ -1015,6 +1049,100 @@ impl Roll<'_> {
         }
     }
 
+    /// The keys down the left, which play the channel while a button is
+    /// held on them.
+    fn keyboard(&self, ui: &Ui, keyboard: Rect, memory: &mut Memory, out: &mut Vec<Command>) {
+        let id = memory_id().with("keyboard");
+        let response = ui.interact(keyboard, id, Sense::drag());
+        let label = format!("{} keyboard", channel_name(self.channel));
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
+        let held =
+            response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        let key = pointer.filter(|_| held).and_then(|pos| {
+            let key = self.view.key(pos.y).clamp(0, TOP_KEY);
+            u8::try_from(key).ok()
+        });
+        if key != memory.keyboard {
+            let channel = self.channel.index;
+            if let Some(key) = memory.keyboard {
+                out.push(Command::NoteOff { key });
+            }
+            if let Some(key) = key {
+                let velocity = Note::default().velocity;
+                out.push(Command::NoteOn {
+                    channel,
+                    key,
+                    velocity,
+                });
+            }
+            memory.keyboard = key;
+        }
+        if let Some(key) = memory.keyboard {
+            let top = self.view.y(i32::from(key));
+            let plate = Rect::from_min_max(
+                pos2(keyboard.left(), top + 0.5),
+                pos2(keyboard.right(), top + KEY - 0.5),
+            );
+            let painter = ui.painter_at(keyboard);
+            let lit = ui.visuals().selection.bg_fill.gamma_multiply(0.8);
+            painter.rect_filled(plate, 0.0, lit);
+        }
+    }
+
+    /// The ruler's range: drawn over the ruler and the notes, and set by a
+    /// drag along the ruler.
+    fn ruler(
+        &self,
+        ui: &Ui,
+        ruler: Rect,
+        area: Rect,
+        range: Option<(u64, u64)>,
+        memory: &mut Memory,
+        out: &mut Vec<Command>,
+    ) {
+        let time = self.view.time;
+        let id = memory_id().with("ruler");
+        let response = ui.interact(ruler, id, Sense::click_and_drag());
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Loop range"));
+        let tick = |x: f32| snap(time.tick(x), self.step).max(0) as u64;
+        if response.drag_started_by(PointerButton::Primary)
+            && let Some(press) = ui.input(|input| input.pointer.press_origin())
+        {
+            memory.range = Some(tick(press.x));
+        }
+        let pointer = response.interact_pointer_pos();
+        let dragged = memory.range.zip(pointer).map(|(from, pos)| {
+            let to = tick(pos.x);
+            (from.min(to), from.max(to))
+        });
+        if response.drag_stopped() {
+            memory.range = None;
+            if let Some((from, to)) = dragged.filter(|(from, to)| from < to) {
+                out.push(Command::SetLoopRange(Some((from, to))));
+            }
+        }
+        if response.clicked() && range.is_some() {
+            out.push(Command::SetLoopRange(None));
+        }
+        let shown = if memory.range.is_some() {
+            dragged
+        } else {
+            range
+        };
+        if let Some((from, to)) = shown {
+            let span = |rect: Rect| {
+                let (left, right) = (time.x(from as f32), time.x(to as f32));
+                Rect::from_x_y_ranges(left..=right, rect.y_range())
+            };
+            let fill = ui.visuals().selection.bg_fill;
+            ui.painter_at(ruler)
+                .rect_filled(span(ruler), 0.0, fill.gamma_multiply(0.6));
+            ui.painter_at(area)
+                .rect_filled(span(area), 0.0, fill.gamma_multiply(0.08));
+        }
+    }
+
     /// The channel's notes, and the clicks and drags on them.
     fn notes(&self, ui: &Ui, area: Rect, memory: &mut Memory, out: &mut Vec<Command>) {
         let (view, time, own) = (self.view, self.view.time, &self.own);
@@ -1050,6 +1178,41 @@ impl Roll<'_> {
         }
 
         let pressed = ui.input(|input| input.pointer.press_origin());
+        // A press plays the note it is on, or the one it is adding, until
+        // the button is let go.
+        let held =
+            response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
+        if held && !memory.heard {
+            memory.heard = true;
+            let note = pressed.and_then(|press| {
+                let new = Note::default().velocity;
+                match (tool, self.at(press)) {
+                    _ if modifiers.command => None,
+                    (Tool::Draw | Tool::Paint | Tool::Select, Some((_, note, _))) => {
+                        u8::try_from(note.key).ok().map(|key| (key, note.velocity))
+                    }
+                    (Tool::Draw | Tool::Paint, None) => {
+                        let key = view.key(press.y).clamp(0, TOP_KEY);
+                        u8::try_from(key).ok().map(|key| (key, new))
+                    }
+                    _ => None,
+                }
+            });
+            if let Some((key, velocity)) = note {
+                memory.pressed = Some(key);
+                out.push(Command::NoteOn {
+                    channel,
+                    key,
+                    velocity,
+                });
+            }
+        }
+        if !held {
+            memory.heard = false;
+            if let Some(key) = memory.pressed.take() {
+                out.push(Command::NoteOff { key });
+            }
+        }
         let primary = response.drag_started_by(PointerButton::Primary);
         let started = primary || response.drag_started_by(PointerButton::Secondary);
         if started && let Some(press) = pressed {
