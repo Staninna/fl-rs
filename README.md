@@ -141,11 +141,32 @@ The corpus render plays every shipped project offline and prints how many have s
 
     cargo test --release -p engine --test corpus -- --nocapture
 
-The profile harness times every shipped project the way the app plays it: 20 s from the start and 10 s from a quarter, a half and three quarters in, in calls of 512 frames. Per project it prints how many times faster than realtime it plays, its 99th percentile and slowest call against the 10.7 ms a call may take, how many calls ran over, and a hash of everything it put out:
+The profile harness times every shipped project the way the app plays it: 20 s from the start and 10 s from a quarter, a half and three quarters in, in calls of 512 frames. It plays them once cold, every call timed, then twice to warm up (`--warmup N`), then once more timed. Per project it prints how many times faster than realtime the last round plays, its 99th percentile and slowest call against the 10.7 ms a call may take, how many calls ran over, the same for the cold round, and a hash of everything it put out:
 
     FL_RS_CORPUS="<FL Studio>/Data" taskset -c 2 cargo run --release -p engine --example profile
 
 `--frames 1024` sets the call size, `--whole` plays each song once from start to end, and a word keeps the projects whose path contains it. A change meant to keep the sound must keep every hash. Compare hashes taken at the same call size on the same machine: some plugins work once per block, so a different call size sounds a little different, and each OS's maths library rounds `sin` and `pow` its own way. The numbers move with a laptop's clock, so compare medians of three runs pinned to one core.
+
+Pipe a run into `python3 -I tools/bench.py` and it writes the block below. CI has no FL Studio to run the harness on, so the block holds the numbers of the last run someone committed.
+
+<!-- bench:start -->
+The profile harness at `9814eb0`, 165 projects in calls of 512 frames (10.67 ms each), each on one core. Cold is the first round of a project, every call timed; warm is the round after 2 more. Warm, 20 projects have a call that runs over. The 10 slowest:
+
+| Project | Warm | p99 call | Worst call | Calls over | Cold | Cold worst call |
+|---|---:|---:|---:|---:|---:|---:|
+| Astes - Bien Duro | 0.9x | 435% | 471% | 2372 | 1.0x | 653% |
+| Bombs Away ft KARRA - I'm Awake | 0.9x | 419% | 485% | 2022 | 1.0x | 1339% |
+| Square a Saw - Oxygen (Tevlo Vocals Resynthesized) | 1.0x | 174% | 231% | 1700 | 1.1x | 251% |
+| Chan Gibbons x Ceebeaats - Time | 1.1x | 133% | 138% | 1401 | 1.2x | 139% |
+| Purps On The Beat Feat Luclover - Stroll Up | 1.3x | 142% | 218% | 274 | 1.3x | 304% |
+| Atthar Feat Mehran Abbasi & Elise Chantelle - Right Night feeling | 1.3x | 127% | 147% | 504 | 1.4x | 751% |
+| Olbaid - Harmless Essentials | 1.3x | 266% | 305% | 1255 | 1.0x | 360% |
+| Square a Saw - Lightning (VEELA Vocals Resynthesized) | 1.4x | 119% | 134% | 768 | 1.3x | 115% |
+| Synth_dfr - Overcome - Sytrus | 1.4x | 122% | 153% | 229 | 1.4x | 152% |
+| Olbaid - Sytrus Essentials | 1.5x | 129% | 136% | 481 | 1.5x | 139% |
+
+A call's time is a share of the time it plays. `tools/bench.py` writes this block from a run of the harness.
+<!-- bench:end -->
 
 ## Running
 
