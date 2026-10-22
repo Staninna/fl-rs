@@ -222,10 +222,16 @@ pub(crate) struct Arpeggiated {
 
 /// The song with the notes of every channel whose arpeggiator is on played
 /// through it. `None` when no channel with a note has one on.
+///
+/// With a `stop`, the arpeggios are worked out up to that tick and no
+/// further: nothing they start is there or later, and what they sound
+/// there is let go of there. A render that ends before the tick hears the
+/// same as without it.
 pub(crate) fn arpeggiate(
     project: &Project,
     song: &Song,
     automation: &Automation,
+    stop: Option<u64>,
 ) -> Option<Arpeggiated> {
     let mut channels = BTreeMap::new();
     let mut unbuilt = BTreeMap::new();
@@ -257,6 +263,9 @@ pub(crate) fn arpeggiate(
     let mut run = Run::new(ppq, |channel, gate, tick| {
         automation.arp_at(channel, gate, tick as f64)
     });
+    if let Some(stop) = stop {
+        run.stop = i64::try_from(stop).unwrap_or(NEVER);
+    }
     // A slide note starts no voice, and bends the arpeggio's notes as it
     // would any others.
     let mut notes = Vec::with_capacity(song.notes.len());
@@ -384,6 +393,9 @@ struct Run<F> {
     notes: Vec<(Settings, Played)>,
     out: Vec<(Played, Option<usize>)>,
     glides: Vec<Vec<(u64, f32)>>,
+    /// The tick the run stops on: nothing starts there or later, and a
+    /// note that still sounds is let go of there.
+    stop: i64,
 }
 
 impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
@@ -397,6 +409,7 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             notes: Vec::new(),
             out: Vec::new(),
             glides: Vec::new(),
+            stop: NEVER,
         }
     }
 
@@ -417,7 +430,7 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             return (self.out, self.glides);
         };
         let mut tick = first.1.tick as i64;
-        loop {
+        while tick < self.stop {
             // Each tick FL lets go of the voices whose note has ended
             // (`FUN_00d0bac0`), starts the notes due (`FUN_00d293d0`), and
             // then runs the arpeggios (`FUN_00d0cbb0`, `FUN_00d2ab30`).
@@ -439,6 +452,12 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             match due.chain(coming).min() {
                 Some(at) => tick = at.max(tick + 1),
                 None => break,
+            }
+        }
+        // Past a cutoff nothing is heard, so what sounds there ends.
+        if self.stop != NEVER {
+            for at in 0..self.out.len() {
+                self.end(at, self.stop);
             }
         }
         for voice in &mut self.voices {
@@ -1042,6 +1061,30 @@ mod tests {
         let (out, _) = run.finish();
         let velocities: Vec<_> = out.iter().map(|(p, _)| p.note.velocity).collect();
         assert_eq!(velocities, [30, 90]);
+    }
+
+    #[test]
+    fn a_cutoff_stops_the_arpeggios_and_keeps_what_comes_before_it() {
+        // Two bars of a chord, cut after 100 ticks.
+        let whole = run(settings(1, 2), &chord());
+        let mut run = Run::new(96, |_, _, _| None);
+        run.stop = 100;
+        for played in &chord() {
+            run.add(settings(1, 2), played);
+        }
+        let (cut, _) = run.finish();
+        let mut cut: Vec<_> = (cut.iter())
+            .map(|(p, _)| (p.tick, p.length.unwrap(), p.note.key))
+            .collect();
+        cut.sort();
+        // Nothing starts at the cutoff or after it, and what starts
+        // before it is the same, let go of by the cutoff at the latest.
+        let before: Vec<_> = (whole.iter())
+            .filter(|n| n.0 < 100)
+            .map(|&(tick, length, key)| (tick, length.min(100 - tick), key))
+            .collect();
+        assert_eq!(cut, before);
+        assert_eq!(cut.len(), 5);
     }
 
     #[test]

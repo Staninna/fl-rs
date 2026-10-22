@@ -150,10 +150,22 @@ impl Graph {
     ) -> Result<Self, Error> {
         let (pattern, sample_rate, limit, plugin_dir) = mode;
         let (clock, automation) = timeline(project, song, sample_rate, limit)?;
+        // A render that stops early needs the arpeggios up to its limit
+        // alone: up to the first tick that falls on it or after.
+        let stop = (limit != usize::MAX).then(|| {
+            let mut tick = clock.tick(limit);
+            while tick > 0 && clock.sample(tick - 1) >= limit {
+                tick -= 1;
+            }
+            while clock.sample(tick) < limit {
+                tick += 1;
+            }
+            tick
+        });
         // The channels whose arpeggiator is on play its notes in place of
         // their own.
         let arpeggiated = arpeggiate
-            .then(|| arp::arpeggiate(project, song, &automation))
+            .then(|| arp::arpeggiate(project, song, &automation, stop))
             .flatten();
         let song = arpeggiated.as_ref().map_or(song, |arp| &arp.song);
         let unbuilt = arpeggiated.as_ref().map(|arp| &arp.unbuilt);
