@@ -2,7 +2,7 @@
 
 Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a render-test project exists for it in `Data/System/Render tests/`, and how many of the 165 shipped projects use it (by event 201 name). Sizes are the x64 DLL. Status column is ours; empty means not started.
 
-Corpus render at `d807176`: 122 of 165 shipped projects have sound with the stock plugins built so far, and 82 of 165 play in full. 1112 of 1147 effect slots on inserts that sound reaches are hosted, and 209 of 227 generator channels with notes play.
+Corpus render at `3a689d2`: 123 of 165 shipped projects have sound with the stock plugins built so far, and 83 of 165 play in full. 1112 of 1147 effect slots on inserts that sound reaches are hosted, and 210 of 227 generator channels with notes play.
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
