@@ -1,15 +1,16 @@
 # Handoff, 2026-10-22
 
-Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every workspace test with the corpus and `progress.py --check` pass at the head. Corpus render at `d807176`: 122 of 165 projects have sound and 82 play in full, up from 112 and 33 when this branch began. 1112 of 1147 reached effect slots are hosted, and 209 of 227 generator channels with notes play.
+Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every workspace test with the corpus and `progress.py --check` pass at the head. Corpus render at `22151e9`: 123 of 165 projects have sound and 83 play in full, up from 112 and 33 when this branch began. 1112 of 1147 reached effect slots are hosted, and 210 of 227 generator channels with notes play.
 
 ## On this branch
 
 - Perf: the mixer runs the strips of each wave of the routing graph on a worker pool (`crates/engine/src/pool.rs`, `mix.rs`; `FL_RS_THREADS` sets its size, 1 is serial). Every harness hash is unchanged. The sine bank is FL's AVX kernel to its sum order and restart period (`dsp::additive`).
-- New ports, each with its doc under `docs/plugins/`: Center, Mute 2, Phase Inverter, GMS, MiniSynth, BeepMap, Drumaxx, FL Slayer, Fruity Slicer 2, Kepler Exo, Fruity Granulizer, Wave Traveller, Fruity 7 Band EQ, Emphasizer (shell; LimiterLite is missing from the install), Patcher, and the Envelope, Formula, Keyboard and Voltage controllers.
+- New ports, each with its doc under `docs/plugins/`: Center, Mute 2, Phase Inverter, GMS, MiniSynth, BeepMap, Drumaxx, FL Slayer, Fruity Slicer 2, Kepler Exo, Fruity Granulizer, Wave Traveller, Fruity 7 Band EQ, Emphasizer (shell; LimiterLite is missing from the install), Patcher, Morphine, Sakura, and the Envelope, Formula, Keyboard and Voltage controllers.
 - Larger pieces: Sytrus's unison, waveshapers, effects, filters, plucked operators, oversampling, global envelopes and portamento; Harmor's envelope sustain weights, release and arpeggiator, shared envelopes and global LFOs (what is left is under 3.3 of `docs/plugins/harmor.md`); linear phase for Parametric EQ 2 and Frequency Splitter; FL's sample interpolator (`dsp::interpolator`, at a render quality that is inferred); note colour, slide notes and live channel pitch for generators; automation targets that FL plays by setting nothing, Tension in controller formulas, and the sampler filter's mod X/Y (`docs/automation-234.md` lists what the render still counts unsupported).
+- Piano roll (`crates/ui/src/piano_roll.rs`, `model::note_tools`): paint and slice tools, a Tools menu (glue, quantize, chop, arpeggiate, strum, snap to scale), a snap menu, scale highlighting, note preview through the channel (`crates/engine/src/live.rs`, commands on the transport's ring), a play cursor that follows and a loop range from the ruler. Not done: a slanted slice, the tools' settings dialogs, a ruler click to seek. A sampler's preview stops hard on release, and the preview was never heard through a real device here.
 - `tools/`: a script that renders every demo project to WAV, and a record of the commit each demo rating was made with.
 
-## Left half done, with notes in `.scratch/notes/`
+## Left for later, with notes in `.scratch/notes/`
 
 - Morphine is registered and documented (`docs/plugins/morphine.md`, level Gaps); `notes/morphine.md` lists what is left: the noise layer and release-loop jump not rechecked against the DLL, unison and per-note tuning left out.
 - Sakura is registered and plays bit for bit against its DLL under unicorn but for the runtime's f64 `pow` (`Port::Gaps`, `docs/plugins/sakura.md`). `sakura.md` lists what is left and how to run the harness in `sakura-emu/`.
