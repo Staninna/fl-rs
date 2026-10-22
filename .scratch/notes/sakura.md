@@ -52,3 +52,5 @@ channels, Lightning) and the render test `Sakura.flp`.
 Register it, find the drift with the harness, turn the probes into real
 tests, write the doc and the row, run the checks in
 `.scratch/agent-rules.md`.
+
+`sakura-emu/emu_sakura.py` used to send an event that fell inside a block at the next block's start. It now ends a block at the next event. The differences quoted above were measured before that change, so render them again before trusting them for a note-off that is not on a 512-frame boundary.

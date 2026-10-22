@@ -60,12 +60,14 @@ events.sort()
 done = 0
 out = []
 while done < frames:
-    n = min(block, frames - done)
     while events and events[0][0] <= done:
         _, kind, k = events.pop(0)
         e.call(0x180007a20, this, k, velocity if kind == 'on' else 0)
-    if release_at >= 0 and done <= release_at < done + n:
-        pass
+    # A block ends at the next event, so each one lands on its own frame
+    # whatever the block size.
+    n = min(block, frames - done)
+    if events:
+        n = min(n, events[0][0] - done)
     e.wr(obj, struct.pack('<QIII', data, 2, n, n))
     e.call(0x180030720, this, 0, 0)
     raw = e.rd(data, 8 * n)
