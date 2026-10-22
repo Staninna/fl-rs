@@ -111,7 +111,12 @@ impl Tape {
         while self.cursor < self.len {
             let i = self.at(self.cursor);
             let t = self.times[i];
-            if t >= self.pass {
+            // FL keeps each pass with the sample that crossed into the
+            // next one at its end, so the read head may use the first
+            // sample past the pass, but none after it.
+            if t >= self.pass
+                && (self.cursor == 0 || self.times[self.at(self.cursor - 1)] >= self.pass)
+            {
                 break;
             }
             if t >= want {
@@ -134,7 +139,8 @@ impl Tape {
             }
             self.cursor += 1;
         }
-        let step = (speed * self.step).min(0.2).max(0.0);
+        // No slower than a pass over the whole tape (`this+0x68`, 1 / size).
+        let step = (speed * self.step).min(0.2).max(1.0 / f64::from(self.size));
         let write = read * self.feedback + x;
         let mut now = step + self.now;
         if now >= 1.0 {
@@ -290,6 +296,8 @@ impl Band {
     /// (`FUN_1800dfa60`).
     fn design(kind: u8, hz: f32, db: f32, rate: f32) -> Self {
         let a = 10f32.powf(db * 0.05);
+        // FL's own constant (`DAT_180177208`), a little short of 2 pi.
+        #[allow(clippy::approx_constant)]
         let w = ((f64::from(hz) * 6.283_185) / f64::from(rate)) as f32;
         let w = w.clamp(0.0, 3.0);
         let sin = w.sin();
@@ -379,7 +387,8 @@ impl Fx {
     /// Make the lines for a rate (`FUN_1800ff570`).
     pub fn set_rate(&mut self, rate: f64) {
         self.rate = rate;
-        let n = rate * 0.02;
+        // 0.02 as an f32 widened (`DAT_180177088`): 881 samples at 44.1 kHz.
+        let n = rate * f64::from(0.02f32);
         self.chorus = vec![
             Tape::new((n * 1.1) as u32, 0.0),
             Tape::new((n * 0.854) as u32, 0.467),
@@ -405,11 +414,9 @@ impl Fx {
             tape.gain_target = wet;
             tape.rate = (speed * factor).max(0.0) / rate;
         }
-        let on = p[10] != 0.0;
-        if on != self.chorus_on {
-            self.chorus_on = on;
-            self.chorus.iter_mut().for_each(Tape::reset);
-        }
+        // The switch only gates the chorus (`FUN_1800f2c90`): its tapes
+        // keep what they held.
+        self.chorus_on = p[10] != 0.0;
         // The delay (`FUN_1800f3080` and the setters beside it).
         let t = f64::from(p[11]) * 0.95 + 0.05;
         let t = t * t * 0.5;
@@ -606,6 +613,35 @@ mod tests {
             );
         assert!((peak.0 as i32 - 511).abs() <= 2, "{peak:?}");
         assert!(peak.1 > 0.5);
+    }
+
+    #[test]
+    fn a_steady_signal_comes_back_whole_across_the_seams_of_the_passes() {
+        // FL keeps the sample that crossed into the next pass at the end of
+        // each, so the read head never runs off the end of one.
+        let mut tape = Tape::new(1000, 0.0);
+        tape.gain_target = 1.0;
+        tape.gain = 1.0;
+        let out: Vec<f32> = (0..3000).map(|_| tape.run(1.0)).collect();
+        assert!(out[600..].iter().all(|v| (v - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_tape_never_runs_slower_than_one_pass_over_its_room() {
+        let mut tape = Tape::new(100, 0.0);
+        tape.stretch(0.99);
+        tape.step = 0.0;
+        tape.run(0.0);
+        assert!((tape.now - 0.01).abs() < 1e-12, "{}", tape.now);
+    }
+
+    #[test]
+    fn the_chorus_tapes_are_sized_as_fl_sizes_them() {
+        let mut fx = Fx::default();
+        fx.set_rate(44_100.0);
+        let sizes: Vec<u32> = fx.chorus.iter().map(|t| t.size).collect();
+        assert_eq!(sizes, [970, 753, 881]);
+        assert!(fx.delay.iter().all(|t| t.size == 88_200));
     }
 
     #[test]

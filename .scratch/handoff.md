@@ -11,7 +11,8 @@ Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every w
 
 ## Left half done, with notes in `.scratch/notes/`
 
-- Morphine and Sakura (`morphine*.rs`, `sakura*.rs`): source files written, which built on the tree they were written on, but not in `lib.rs`, `generator.rs` or `port.rs`, so they are not compiled. `morphine.md` and `sakura.md` list the lines to add and what is untested. Sakura matched its DLL run under unicorn to about 3e-5.
+- Morphine is registered and documented (`docs/plugins/morphine.md`, level Gaps); `notes/morphine.md` lists what is left: the noise layer and release-loop jump not rechecked against the DLL, unison and per-note tuning left out.
+- Sakura (`sakura*.rs`): source files written, which built on the tree they were written on, but not in `lib.rs`, `generator.rs` or `port.rs`, so they are not compiled. `sakura.md` lists the lines to add and what is untested. Sakura matched its DLL run under unicorn to about 3e-5.
 - Harmor: `harmor-wip.patch` is a diff left uncommitted when usage ran out. It has not been built on this tree.
 - Fruity Convolver's EQ curve (`fruity-convolver.md`) and Transporter's DSP, TransientLooper, which is missing from the install (`transporter.md`). Slicex's declicker and Vintage Phaser's gaps are listed in their docs under `docs/plugins/`. FLEX is not started and has no note.
 - Toxic Biohazard and PoiZone are not started.
