@@ -38,9 +38,9 @@ Object fields:
 | 0x140 | i32 | oversampling factor in use (`2^0x13c`, from `FUN_00830030`) |
 | 0x144..0x14c | f32[3] | per-sample smoothed copies of 0x134, 0x130, 0x12c |
 | 0x150 / 0x154 | f32, i32 | peak hold for the display |
-| 0x158 | u8 | host rendering flag: forces 4x oversampling and the HQ lookup |
-| 0x15c | f32 | smoothing coefficient for 0x144.. |
-| 0x160 / 0x168 | ptr | upsampler, downsampler (`FUN_008300a0`, `FUN_00830140`) |
+| 0x158 | u8 | host rendering flag (Dispatcher 1, flag 2): forces 4 stages (16x) and the HQ lookup |
+| 0x15c | f32 | smoothing coefficient for 0x144.. (Dispatcher 4) |
+| 0x160 / 0x168 | ptr | upsampler, downsampler: `TOversampler` objects, run by `FUN_008300a0`, `FUN_00830140` (section 3.1) |
 | 0x170 | struct | DC remover: `+4` coefficient, `+8` 0.96, `+0x28..+0x40` four f64 states |
 | 0x1d8 | ptr | the `TMEnvelope` (VMT `0x00775f70`): the drawn curve |
 | 0x1e0 / 0x1e8 | ptr, i32 | the baked lookup table (i16, 2 guard entries) and its last index |
@@ -132,10 +132,22 @@ dry  = (post - wet) * pre * post                             -> 0x12c     // as 
 `REC_FromMIDI` uses Min/Max and 2^-30 (`0x00831ef0`). The display
 (`FUN_00831f50`) was not read.
 
-Oversampling (`FUN_00832300`): factor `2^p` where `p = 0x13c`, or `2^4`
-when the host is rendering (`0x158`); up- and downsampler objects are
-rebuilt (`FUN_0082ffa0`: `p` stages of a fixed half-band pair, 0xc0 bytes
-each, `PTR_DAT_0082f978`).
+Oversampling (`FUN_00832300`, on load and on Dispatcher 1): both
+oversamplers are rebuilt (`FUN_0082ffa0`) with `p = 0x13c` stages, or 4
+when the host is rendering (`0x158`), and `0x140 = 1 << p`
+(`FUN_00830030`). A stage is 0xc0 bytes, zeroed on every rebuild and on
+Dispatcher 2 (`FUN_00830040`). Section 3.1 has the filter.
+
+Smoothing (Dispatcher 4, `FPD_SetSampleRate`, `0x00830bf0`):
+
+```
+0x15c = (f32)(1 - Power(0.1, 1 / (f32)(rate * 0.005)))     // 0x00830f38 = 0.1, 0x00830f48 = 0.005 (f32), Power = FUN_004664d0, exp(y ln x)
+```
+
+that is, 90% of the way in 5 ms of frames at the song's rate. The glided
+gains `0x144`, `0x148`, `0x14c` are 0 from the constructor
+(`FUN_008313f0`) and nothing else sets them, so a state with smooth on
+fades in.
 
 Table bake (`FUN_00832ba0`, after every curve edit and on load):
 
@@ -186,12 +198,13 @@ a step.
 
 ```
 if visual on: peak-follow max(|L|, |R|) for the display (0x150, 0x154); GUI only
-if oversampling (0x13c > 0): buf = upsample(Source), n *= factor                       // FUN_008300a0, polyphase stages
+if oversampling (0x13c > 0): buf = upsample(Source), n *= 0x140                        // FUN_008300a0, section 3.1
 else: buf = Source
-if Smooth off:
+if Smooth off (SmoothCheckBox, GUI object +0x778, +0x48e):
     shape(buf -> out, 2n, table, last, dry, wet, pre)                                  // one of four, below
 else:
-    per frame: glide 0x144/0x148/0x14c towards pre/wet/dry with coefficient 0x15c, then shape that frame with the glided gains
+    per frame of buf: g += (target - g) * 0x15c in f32 for 0x144 <- pre, 0x148 <- wet, 0x14c <- dry,
+                      then shape that frame with the glided gains                      // at the oversampled rate
 if oversampling: Dest = downsample(out)                                                // FUN_00830140
 if Center (0x139): DC remover on Dest                                                  // FUN_00627af0
 
@@ -209,6 +222,9 @@ DC remover (FUN_00627af0, per channel, doubles):
     v += (x - m) * c1;  m += v;  v *= 0.96;  out = x - m                                 // c1 = 0x174 = host+0x20 * 2.2835e-5 (set on sample-rate change, 0x00830bf0), 0x178 = 0.96
 ```
 
+`host+0x20` is the renderer's `44100 / rate`, as Delay Bank's filters
+read it, so `c1 = 1.0070235 / rate`.
+
 The SSE variants (`FUN_0062c380`, `FUN_0062c500`, `FUN_0062c620`,
 `FUN_0062cc10`, `FUN_0062cd10`) are picked at start-up on CPU flags and do
 the same maths. The selection: HQ off and not rendering uses the nearest
@@ -223,6 +239,41 @@ Rounding is to nearest, clamping at the table ends is a hard clip: input
 beyond `1/pre` holds the curve's last value, which is why every "Soft clip"
 preset works as a clipper.
 
+### 3.1 The oversampler
+
+The class is the one Delay Bank, Love Philter, EQUO, Maximus and
+Parametric EQ 2 have; `crates/dsp/src/halfband.rs` rebuilds it.
+
+- `FUN_008300a0` (up): for each stage from the last to the first, the
+  kernel at `DAT_008b2010` doubles the block into the tail of the work
+  buffer, then the flush at `PTR_DAT_0089fe08` runs on the stage with a
+  count of 12, and `n` doubles.
+- `FUN_00830140` (down): `n` halves, the kernel at `DAT_008b2018` halves
+  the block, the last stage into `Dest`, and the same flush.
+- `FUN_00830260` fills the two pointers at startup: `FUN_0082fb70` and
+  `FUN_0082fd40` (SSE2, picked on CPU flag 0x100) or `FUN_0082fb00` /
+  `FUN_0082fcd0`, which only raise "Not implemented in i64/ARM".
+  `FUN_008301d0` copies the 13 doubles at `0x0089ee70` into a table
+  (`0x008b2020`), each twice for the two sides.
+- The kernels, per frame and side, in doubles: an allpass is `y = x1 +
+  (x - y1) c`. Up, the input goes through the path `0.14737711360104660,
+  0.48246854276970014, 0.88300502576937310` for the second output frame
+  and through `0.039151597734460045, 0.30264684832849340,
+  0.67461591854696390` for the first. Down, the first frame of a pair
+  goes through the first path, the second through the second, and the
+  output is `(second + first) * 0.5` (the 13th double). Each output is cut
+  to f32.
+- The flush (`FUN_0062ca40`, SSE) zeroes each of the stage's first 12
+  doubles, the six allpass outputs of each side, when its size is under
+  2^-24 (`0x0087e26c`). The inputs are not flushed.
+- Nothing reports latency: the Dispatcher sends no message to the host.
+  The filter is recursive; at low frequencies it is 1.65 frames of the
+  lower rate late going up and 1.15 going down.
+
+`tools/plugstate/halfband_emu.py` runs the two SSE kernels and the flush
+of this DLL under unicorn, and `dsp::halfband`'s test
+`the_dll_s_kernels_give_these_bits` has its output to the bit.
+
 ## 4. What stays unknown
 
 - `TMEnvelope.SaveRestore` (`FUN_0077e5f0`) also writes 16 bytes from
@@ -234,11 +285,6 @@ preset works as a clipper.
 - Mode 10 (smooth) end-slope formulas and the step counts of modes 3..6
   (`FUN_0077bd20`, constants `0x0077be10..0x0077be40`) were not reduced to
   closed form.
-- The host field `host+0x20` that scales the DC remover coefficient was not
-  identified (a sample-rate derived double; `c1` is about 1e-3 at 44.1 kHz
-  if it is `SR/1000`, tag `inferred`).
-- The oversampler filter coefficients (`PTR_DAT_0082f978` stage class) were
-  not read.
 - `GetName` display text, the Dispatcher's GUI IDs, `Idle_Public`.
 
 ## Corrections from the implementation (crates/plugins/src/waveshaper.rs)
@@ -247,4 +293,6 @@ preset works as a clipper.
 - Mode 6 signs are swapped against docs/automation-234.md.
 - The 3486-byte state is the "Fuzzy" preset.
 - A straight bipolar curve returns x·32767/32768, not the input bit for bit.
-- Oversampling is not implemented (its filters are unknown); those states report Approximate.
+- Oversampling is built (section 3.1, `dsp::halfband::Oversampler`) and so
+  is smooth modulation; FL's render-time switch to 16x and the HQ lookup is
+  not, since the engine plays as FL does live: the state decides.
