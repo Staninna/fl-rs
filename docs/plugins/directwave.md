@@ -282,13 +282,62 @@ attack or release coefficient, and above 1 both sides are divided by it.
 The zone effects follow (ring modulator, decimator, crusher, phaser), then the
 volume: per sample `L *= env * gainL` with the gains moving to their step's
 targets by `g = (g - t) * smooth + t + 1e-14`; they start on the targets.
-The dry level adds the voice into the part (as is at 1 or more), and each
-send adds it into an effect's buffer when that effect is on.
+The dry level adds the voice into the part, as is at 1 or more and squared
+below (`0x180033188`), and each send above 0 adds it, squared, into its
+effect's buffers when that effect is on (`0x1800330c3`): send 1 to the delay
+(`+0x28d`), send 2 to the chorus (`+0x290`), send 3 to the reverb (`+0x28f`).
+
+### 4.1 The program's effects
+
+The engine has one of each, run in this order for every part whose program
+has zones (so a program shared by several parts runs them once for each), on
+the step's sends, adding to the part's dry buffers (`ctx+0x84c`, `+0xc4c`).
+`ctx+0x14` is the rate, `ctx+0x24` the tempo. `n = rand() * 1e-14` is drawn
+once a sample by the delay and by the chorus; glides are `x = ((t - x) * (16
+/ rate) + n) + x`. A line is read through an allpass, `y = (f a + b) - f y`
+with `f = 1 - frac`, `a` the point at the read position and `b` the next
+(older) one; the write position counts down.
+
+- Delay (`FUN_180011f10`, state `engine+0xa8710`): two lines of 65536 points
+  (`+0x80`, `+0x40080`), the delay `+0x80080` gliding to
+  `max(rate * 60 / tempo * k0, rate * 0.001)` and the feedback `+0x80084` to
+  `k1`. Each side's feedback goes through a highpass at `cutoff(k2)` then a
+  lowpass at `cutoff(k3)`, `Q = sqrt(2) / 2`, one stage each
+  (`FUN_180014d50`, states `+0`, `+0x40` left, `+0x20`, `+0x60` right). Left
+  writes `filter(tapL * fb + (n + sendL))`, right `filter(tapR * fb + (n +
+  sendR))`; with the ping-pong flag `+0x28e` left takes `tapR` and right
+  `tapL * fb + n` with no send.
+- Chorus (`FUN_1800119c0`, state `engine+0x8a9050`): two lines of 16384
+  points, the delays gliding to `sin(phase) * depth + depth + centre` and
+  `sin(2 pi / 4 + phase) * ...`, `depth = k1^2 * 24 * rate / 1000 / 2`,
+  `centre = (k0^2 * 47.9 + 0.1) * rate / 1000`; the phase steps by `k2 * 2 pi *
+  k2 * 20 / rate` and wraps above `2 pi`; lines write `(tap * fb + send) + n`,
+  `fb` gliding to `k3`.
+- Reverb (`FUN_18002d0b0`, state `engine+0xaa9210`, lines from
+  `FUN_18002c9a0` when the rate changes): Dattorro's plate. Twelve lines of
+  `L * size / 20000` points, `L` = 142, 107, 379, 277 (input allpasses), 672,
+  4453, 1800, 3720 and 908, 4217, 2656, 3163 (the tank's halves),
+  `size = ((int)(k0 * 99 + 1) + 15) * rate / 115`, cleared when the size
+  changes; taps 266, 2974, 1913, 2496, 1690, 187, 1566 (left) and 353, 3627,
+  1728, 3173, 1811, 335, 621 (right), scaled the same. The input is `(sendR +
+  sendL) / 2` through a one-pole lowpass at 22 kHz and a first-order
+  highpass at 94.5 Hz; the predelay is 1 sample (its time is `rate * 0 *
+  0.001`). Diffusion `k2` gives the allpass gains `exp((L_a + L_b) / 2 / rate
+  * ln 0.001 / (k2 * c))` for c = 0.07, 0.35, 0.51 (0 when `k2` is 0); decay
+  `k3` gives `g = exp(loop / rate * ln 0.001 / ((199 k3^2 + 1) / 10))^0.25`.
+  FL then takes `one = g / g` (1) for the shelf's `q = min(1, one)` and its
+  lift `(one - 1) / 2` (0); the shelf is first order at 500 Hz, the damping a
+  one-pole at `(k1 * 216 + 5) * 100` Hz. Every buffer and sum order is in
+  `crates/plugins/src/directwave_fx.rs`.
+
+All three were run under unicorn (`tools/plugstate/directwave_fx_emu.py`, with
+the static initialisers' `2 pi = atanf(1) * 8` and `pi` set) and the Rust
+matches their output to the bit, with the DLL's own libm and with correctly
+rounded maths alike.
 
 ## 5. What stays unknown
 
-- The three effects (`FUN_180011f10`, `FUN_1800119c0`, the reverb
-  `FUN_18002d0b0`, read but not built), the program LFOs' fade, filter types
+- The program LFOs' fade, filter types
   6 and 7, the zone effects, stretching, tempo sync and the high quality
   interpolation (`FUN_18002f0d0`, `FUN_18002f620`).
 - Whether FL links velocity into `Final.Vol` for DirectWave. Nothing in the

@@ -283,9 +283,12 @@ the raw files; for a RIFF table `sample_paths` gives the files by full path
 and the host decodes them, and the `smpl` loops are read from the files'
 headers. Exact as above, with these left:
 
-- The voice's level is `Power(velocity gain, velsens)` with the engine
-  putting the channel's volume on after; FL raises the channel volume with
-  it. Approximate whenever `velsens` is not 1, which is every corpus state.
+- The voice's level is `Power(Final.Vol, velsens)` with `Final.Vol` the
+  note's velocity gain times `chan.Vol`, which the engine hands over with
+  `Generator::set_channel_volume` on load and whenever automation moves the
+  channel's volume; the voice divides by `chan.Vol`, since the engine puts
+  it on the plugin's output. Gen_Render works the gains out every block, so
+  a volume that moves under a note moves it as FL's does.
 - The RIFF files come decoded from the host, rounded to 16 bits. FL decodes
   the Vorbis itself.
 - Pitch is fixed at the trigger and a slide note sounds nothing; FL's
