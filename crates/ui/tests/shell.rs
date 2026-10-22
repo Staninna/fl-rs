@@ -101,6 +101,7 @@ fn state() -> UiState {
         last_error: Some("2 samples not found under /samples".to_owned()),
         busy: None,
         progress: None,
+        loop_range: None,
     }
 }
 

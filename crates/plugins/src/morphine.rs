@@ -24,9 +24,9 @@
 //!
 //! # What is not FL's
 //!
-//! See [`Generator::fidelity`] and the doc: the noise layer, the effects
-//! and the release-loop jump are approximated, unison and the per-note
-//! tuning a host can send are left out.
+//! See [`Generator::fidelity`] and the doc: the noise layer and the
+//! release-loop jump are approximated, unison and the per-note tuning a
+//! host can send are left out. The effects are read from the binary.
 
 use crate::morphine_fx::Fx;
 use crate::morphine_noise::{NoiseBlock, NoiseRun, NoiseSample};
@@ -1398,7 +1398,9 @@ impl Generator for Morphine {
     }
 
     fn fidelity(&self) -> Fidelity {
-        Fidelity::Approximate("Morphine noise layer, effects and release-loop jump approximated")
+        Fidelity::Approximate(
+            "Morphine noise layer and release-loop jump approximated, unison and per-note tuning left out",
+        )
     }
 }
 
@@ -1562,16 +1564,24 @@ mod tests {
             state.extend(chunk);
             states.push((path.display().to_string(), state));
         }
-        for (i, (file, state)) in states.iter().enumerate() {
+        // The states that drive, and switch on the chorus, the delay, the
+        // reverb and the equaliser, so the test is known to play each.
+        let mut effects = [0usize; 5];
+        for (file, state) in &states {
             let mut synth = Morphine::default();
             synth.set_resource_dir(&dir);
             synth.set_sample_rate(44_100.0);
             if let Err(error) = synth.set_state(state) {
                 panic!("{file}: {error}");
             }
-            // Every project state, and every tenth preset, plays.
-            if i >= saved.len() && !(i - saved.len()).is_multiple_of(10) {
-                continue;
+            for (count, on) in effects.iter_mut().zip([
+                synth.params[6] > 0.0,
+                synth.params[10] != 0.0,
+                synth.params[16] != 0.0,
+                synth.params[20] != 0.0,
+                synth.params[29] != 0.0,
+            ]) {
+                *count += usize::from(on);
             }
             synth.note_on(note(1, 60));
             let (mut left, mut right) = (vec![0.0; 22_050], vec![0.0; 22_050]);
@@ -1598,10 +1608,11 @@ mod tests {
             assert!(peak > 1e-4, "{file}: {peak}");
         }
         eprintln!(
-            "{fsts} fst, {} in projects, {} mrp",
+            "{fsts} fst, {} in projects, {} mrp; drive, chorus, delay, reverb, eq on in {effects:?}",
             saved.len() - fsts,
             mrps.len()
         );
+        assert!(effects.iter().all(|&n| n > 0), "{effects:?}");
         assert!(saved.len() - fsts >= 7);
         assert!(mrps.len() >= 300);
     }
