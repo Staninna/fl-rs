@@ -40,7 +40,7 @@
 use crate::automation::Automation;
 use crate::sequence::{Played, Song};
 use model::{Channel, Note, Project};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A tick that never comes: FL's `0x7fffffff`.
 const NEVER: i64 = i64::MAX;
@@ -235,9 +235,10 @@ pub(crate) fn arpeggiate(
 ) -> Option<Arpeggiated> {
     let mut channels = BTreeMap::new();
     let mut unbuilt = BTreeMap::new();
+    let mut off = BTreeSet::new();
     for played in &song.notes {
         let index = played.note.channel;
-        if channels.contains_key(&index) || unbuilt.contains_key(&index) {
+        if channels.contains_key(&index) || unbuilt.contains_key(&index) || off.contains(&index) {
             continue;
         }
         let Some(channel) = project.channel(index) else {
@@ -245,6 +246,7 @@ pub(crate) fn arpeggiate(
         };
         let settings = Settings::of(project, channel);
         if !settings.on() {
+            off.insert(index);
             continue;
         }
         match settings.unbuilt() {
@@ -268,18 +270,27 @@ pub(crate) fn arpeggiate(
     }
     // A slide note starts no voice, and bends the arpeggio's notes as it
     // would any others.
-    let mut notes = Vec::with_capacity(song.notes.len());
+    let mut kept = Vec::with_capacity(song.notes.len());
     for played in &song.notes {
         match channels.get(&played.note.channel) {
             Some(settings) if !played.note.slide() => run.add(*settings, played),
-            _ => notes.push((*played, None)),
+            _ => kept.push((*played, None)),
         }
     }
-    let (made, glides) = run.finish();
-    // The notes kept come first where two start together, as they came,
-    // then the arpeggios' in the order FL starts them.
+    let (mut made, glides) = run.finish();
+    // The notes kept stay in the order they came, which a pattern played
+    // on its own does not sort. The arpeggios' go in by tick, in the order
+    // FL starts them, after the notes kept that start with them.
+    made.sort_by_key(|(played, _)| played.tick);
+    let mut made = made.into_iter().peekable();
+    let mut notes = Vec::with_capacity(kept.len() + made.len());
+    for note in kept {
+        while let Some(first) = made.next_if(|(played, _)| played.tick < note.0.tick) {
+            notes.push(first);
+        }
+        notes.push(note);
+    }
     notes.extend(made);
-    notes.sort_by_key(|(played, _)| played.tick);
     let mut song = Song {
         notes: Vec::with_capacity(notes.len()),
         clips: song.clips.clone(),
@@ -430,24 +441,30 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             return (self.out, self.glides);
         };
         let mut tick = first.1.tick as i64;
+        // The voices not let go of, in the order FL makes them. One that
+        // is let go of has no steps left and is not looked at again.
+        let mut live: Vec<usize> = Vec::new();
         while tick < self.stop {
             // Each tick FL lets go of the voices whose note has ended
             // (`FUN_00d0bac0`), starts the notes due (`FUN_00d293d0`), and
             // then runs the arpeggios (`FUN_00d0cbb0`, `FUN_00d2ab30`).
-            for v in 0..self.voices.len() {
+            for &v in &live {
                 if !self.voices[v].released && tick >= self.voices[v].end {
                     self.release(v, tick);
                 }
             }
+            let made = self.voices.len();
             while let Some((settings, played)) = notes.get(next).filter(|n| n.1.tick as i64 == tick)
             {
                 self.start(*settings, played, tick);
                 next += 1;
             }
-            for v in 0..self.voices.len() {
+            live.extend(made..self.voices.len());
+            for &v in &live {
                 self.step(v, tick);
             }
-            let due = (self.voices.iter()).filter_map(|voice| self.due(voice, tick));
+            live.retain(|&v| !self.voices[v].released);
+            let due = (live.iter()).filter_map(|&v| self.due(&self.voices[v], tick));
             let coming = notes.get(next).map(|n| n.1.tick as i64);
             match due.chain(coming).min() {
                 Some(at) => tick = at.max(tick + 1),
@@ -622,7 +639,7 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             }
             self.touch(group);
         }
-        if self.voices[v].mode != 0 && self.groups[group].held.is_empty() {
+        if self.groups[group].held.is_empty() {
             self.end_child(v, tick);
         }
         if !keep && !self.voices[v].released {
@@ -677,12 +694,16 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
                     self.end(child, tick);
                 }
                 if self.voices[v].step <= tick {
-                    let start = self.voices[v].step;
                     self.advance(v);
                     let note = self.child_note(v);
                     self.voices[v].child = Some(self.out.len());
+                    // FL gives the note record the step's tick
+                    // (`rec+0x1d8`), which is behind this one only at a
+                    // step of 0 ticks. It reads that start for a length
+                    // alone (`FUN_0132af20`), and a step note has no end,
+                    // so the voice sounds from the tick it is made on.
                     let played = Played {
-                        tick: start as u64,
+                        tick: tick as u64,
                         length: None,
                         note,
                     };
@@ -1050,6 +1071,32 @@ mod tests {
         let out = run(settings, &chord());
         assert_eq!(out[..2], [(0, 3, 60), (6, 3, 64)]);
         assert_eq!(out.len(), 64);
+    }
+
+    #[test]
+    fn a_step_of_0_ticks_plays_a_note_a_tick() {
+        // At PPQ 24, 450 is 6 48ths of 6 ticks, which cut down to 0. The
+        // gate is a tick, and each step comes on the tick after it.
+        let settings = Settings {
+            time: 450,
+            ..settings(1, 1)
+        };
+        let mut run = Run::new(24, |_, _, _| None);
+        for played in [60, 64, 67].map(|key| note(0, 24, key, 100)) {
+            run.add(settings, &played);
+        }
+        let (out, _) = run.finish();
+        let mut out: Vec<_> = (out.iter())
+            .map(|(p, _)| (p.tick, p.length.unwrap(), p.note.key))
+            .collect();
+        out.sort();
+        assert_eq!(out[..4], [(0, 1, 60), (1, 1, 64), (2, 1, 67), (3, 1, 60)]);
+        assert_eq!(out.len(), 24);
+        assert!(
+            out.iter()
+                .enumerate()
+                .all(|(i, n)| n.0 == i as u64 && n.1 == 1)
+        );
     }
 
     #[test]

@@ -111,7 +111,7 @@ indexes under 131) and the Default preset has -1 there.
 | 17 | Output panning | -128..128 | 0 | -14..14 | loader, dfm, corpus, preset |
 | 18 | Output volume | -160..160 | 128 | 87..128 | loader, dfm, corpus, preset |
 | 19 | To next delay | -160..160 | 0 | 0..160 | loader, dfm, corpus, preset |
-| 132 | 2x oversampling (`OversampleBtn`) | 0, 1 | 0 | 0 (x63), 1 (x2) | loader, dfm, corpus |
+| 132 | 2x oversampling (`OversampleBtn`), the stage count | 0, 1 (button); read unchecked | 0 | 0 (x63), 1 (x2) | loader, dfm, corpus |
 
 A unit's 32 bytes, from byte `536 + 32 u`:
 
@@ -384,8 +384,10 @@ to the bit against these kernels run under unicorn
   and `sin_cos` stand in for Delphi's and may be an ulp off.
 - The 2x oversampling is built as section 3.2 has it, a frame at a time
   (`dsp::halfband::Oversampler`): each stage is a recursion of its own, so
-  that is FL's block-at-a-time result to the bit. A switch other than 0 or
-  1 is turned down.
+  that is FL's block-at-a-time result to the bit. FL takes the switch
+  unchecked as the stage count, so a 2 runs the units at 4x; the engine
+  does too, up to the half band's 4 stages, and turns down a switch below 0
+  or above 4.
 - Not built, and `fidelity` says so: the grain's shape (the window stays a
   raised cosine).
 - The gains glide over the block the host hands over. FL glides the feedback

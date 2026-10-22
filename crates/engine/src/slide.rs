@@ -32,6 +32,7 @@
 
 use crate::clock::Clock;
 use crate::sequence::Played;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The notes of a song as slides find them, and the slides.
 #[derive(Debug, Default)]
@@ -151,15 +152,29 @@ impl Slides {
         for track in &mut self.tracks {
             finish(track, u64::MAX, clock, &mut self.steps);
         }
-        for (id, points) in std::mem::take(&mut self.glides) {
-            if !self.tracks.iter().any(|t| t.id == id) {
+        let glides = std::mem::take(&mut self.glides);
+        if glides.is_empty() {
+            return self.steps;
+        }
+        // The slides' steps of the notes that glide, taken out by note in
+        // one pass, to be summed with the glides.
+        let known: BTreeSet<usize> = self.tracks.iter().map(|t| t.id).collect();
+        let glided: BTreeSet<usize> = (glides.iter().map(|(id, _)| *id))
+            .filter(|id| known.contains(id))
+            .collect();
+        let mut slid: BTreeMap<usize, Vec<(usize, f32)>> = BTreeMap::new();
+        self.steps.retain(|step| {
+            let moved = glided.contains(&step.id);
+            if moved {
+                slid.entry(step.id).or_default().push((step.at, step.cents));
+            }
+            !moved
+        });
+        for (id, points) in glides {
+            if !glided.contains(&id) {
                 continue;
             }
-            let slides: Vec<(usize, f32)> = (self.steps.iter())
-                .filter(|step| step.id == id)
-                .map(|step| (step.at, step.cents))
-                .collect();
-            self.steps.retain(|step| step.id != id);
+            let slides = slid.remove(&id).unwrap_or_default();
             let glides = points
                 .iter()
                 .map(|&(tick, cents)| (clock.sample(tick), cents));
