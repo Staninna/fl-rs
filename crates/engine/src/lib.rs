@@ -38,7 +38,9 @@
 //!    sidechain input is handed what the insert at that number puts out,
 //!    among the inserts that send to its own: a route at level 0 is FL's
 //!    sidechain, heard by the plugin and not in the mix.
-//!    [`Rendered::sidechain_slots`] counts those plugins.
+//!    [`Rendered::sidechain_slots`] counts those plugins. A number past
+//!    those inserts is handed nothing, as in FL, and the plugin does
+//!    without.
 //! 5. Automation. An automation clip plays where the playlist has an item
 //!    for its channel, and drives the controls its links bind it to: an
 //!    insert's volume, pan, stereo separation, EQ and send levels, the volume and pan of a sampler
@@ -83,8 +85,7 @@
 //! changes it, and where FL keeps its plugins, for the one that reads a
 //! file of FL's. [`Rendered::approximated_slots`] counts the hosted plugins
 //! that say they stand in for what FL's does with their state or lack a
-//! file, and the ones that ask for a sidechain input their insert does not
-//! have.
+//! file.
 //!
 //! A song ends where its last playlist item does, and [`song_length`] says
 //! where that is. An [`Engine`] stops there and lets its last voices play
@@ -215,8 +216,7 @@ pub struct Rendered {
     pub unhosted_slots: BTreeMap<String, usize>,
     /// The hosted slots whose plugin stands in for a thing its state asks
     /// for, by what [`plugins::Fidelity::Approximate`] says of it, and how
-    /// many slots each is in. A slot whose plugin asks for a sidechain
-    /// input that its insert does not have is here as well.
+    /// many slots each is in.
     pub approximated_slots: BTreeMap<&'static str, usize>,
     /// The sidechain inputs the hosted plugins listen to: every pair of
     /// an insert and an insert that sends to it which a plugin's state
