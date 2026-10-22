@@ -335,6 +335,10 @@ impl Rack {
             }
             return None;
         };
+        // The plugins a Patcher leaves out count as unhosted.
+        for inner in generator.unhosted() {
+            *self.unhosted.entry(inner.clone()).or_default() += 1;
+        }
         let (volume, pan) = voice::levels(channel);
         generator
             .set_channel_volume(curves.volume_adjust_gain(adjusts.0) * curves.volume_gain(volume));

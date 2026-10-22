@@ -75,13 +75,19 @@ def block():
     ]
     # FL ships a few names as both an effect and a generator; those get their kind.
     names = [cells[1] for cells in table]
+    # One port covers both kinds of such a name, so its rows say which kind
+    # is built, and at least one of them has to when it has a port.
+    implemented = {cells[1].lower() for cells in table if cells[5].startswith("implemented")}
     for kind, name, _, _, used, status in table:
         used = int(used)
-        shown = f"{name} {kind.lower()}" if names.count(name) > 1 else name
-        level = levels.pop(name.lower(), None)
-        built = level is not None
-        if built != status.startswith("implemented"):
-            said = "has a port" if built else "has no port"
+        twice = names.count(name) > 1
+        shown = f"{name} {kind.lower()}" if twice else name
+        level = levels.get(name.lower())
+        ported = level is not None
+        built = ported and (status.startswith("implemented") or not twice)
+        said_built = status.startswith("implemented") if not twice else name.lower() in implemented
+        if ported != said_built:
+            said = "has a port" if ported else "has no port"
             problems.append(f"{shown} {said} in port.rs, but docs/plugins.md says otherwise")
         rows.append((kind, used, built))
         if built:
@@ -90,7 +96,10 @@ def block():
             documented += bool(doc and (ROOT / doc[0]).exists())
         elif used:
             unbuilt.append(f"{shown} ({used})")
-    problems += [f"{name} has a port in port.rs but no row in docs/plugins.md" for name in levels]
+    rowed = {name.lower() for name in names}
+    problems += [
+        f"{name} has a port in port.rs but no row in docs/plugins.md" for name in levels if name not in rowed
+    ]
     assert not problems, "\n".join(problems)
     built = sum(b for _, _, b in rows)
     never = sum(1 for _, used, b in rows if not b and not used)
