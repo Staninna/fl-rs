@@ -23,9 +23,7 @@
 //!
 //! Approximated, and said in [`Generator::fidelity`]: nothing is null
 //! tested; IPP's `exp` and its CPU-specific random generators are taken to
-//! give what their generic paths give; a timbre seed 2 of 0, which draws a
-//! new seed for every note from a counter FL keeps per process, counts from
-//! 0 here; the qualities above the default keep its interpolator and leave
+//! give what their generic paths give; the qualities above the default keep its interpolator and leave
 //! out the oversampled output filter; portamento and
 //! the velocity-to-envelope mode 2 are left out.
 
@@ -705,7 +703,10 @@ pub struct Autogun {
     sg_state: Option<Vec<u8>>,
     sg: Option<Box<Maximus>>,
     missing_sg: bool,
-    /// The counter a seed 2 of 0 draws a new seed from (+0x244).
+    /// The counter a seed 2 of 0 draws a new seed from (+0x244). FL's
+    /// constructor (`0x0087eeb6`) calls `Randomize` and starts it at
+    /// `RandSeed`, which comes from the clock, so FL's own notes differ
+    /// from one run to the next; here it starts at 0.
     counter: i32,
     clock: u64,
     /// A voice's frames, interleaved, and twice that for the filter.
@@ -2199,11 +2200,6 @@ impl Generator for Autogun {
                 "Autogun quality other than normal",
                 "Ogun quality other than normal",
             )
-        } else if s.params[11] == 0 && s.params[9] > 0 {
-            say(
-                "Autogun timbre seed 2 drawn from a counter",
-                "Ogun timbre seed 2 drawn from a counter",
-            )
         } else if s.flag(PORTA) != 0 || s.flag(VEL_ENV) & 2 != 0 {
             say(
                 "Autogun portamento or velocity envelope mode",
@@ -2234,6 +2230,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }

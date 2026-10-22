@@ -4,16 +4,29 @@
 
 A cross-platform DAW in Rust that opens FL Studio projects. It plays them by rebuilding FL's stock plugins from FL's own binaries, one plugin at a time.
 
+## Screenshots
+
+The app as it looks now, playing FL's Future House demo song. `crates/ui/tests/screenshots.rs` draws these; see Tests for how to run it again.
+
+| | |
+|---|---|
+| ![The start screen](docs/screenshots/start.png) | ![The playlist](docs/screenshots/playlist.png) |
+| Start: no window open, and the keys that open each one | Playlist (F5) |
+| ![The channel rack](docs/screenshots/channel-rack.png) | ![The piano roll](docs/screenshots/piano-roll.png) |
+| Channel rack (F6) | Piano roll (F7) |
+| ![The browser](docs/screenshots/browser.png) | ![The mixer](docs/screenshots/mixer.png) |
+| Browser (F8) | Mixer (F9) |
+
 ## Progress
 
 <!-- progress:start -->
 | FL's own plugins | done | of | |
 |---|---:|---:|---|
-| Instruments rebuilt | 15 | 51 | `██████░░░░░░░░░░░░░░` 29% |
-| Effects rebuilt | 36 | 90 | `████████░░░░░░░░░░░░` 40% |
-| Rebuilt and proven to sound identical to FL | 0 | 51 | `░░░░░░░░░░░░░░░░░░░░` 0% |
-| Rebuilt with nothing known to be missing | 20 | 51 | `████████░░░░░░░░░░░░` 39% |
-| Rebuilt and documented | 51 | 51 | `████████████████████` 100% |
+| Instruments rebuilt | 32 | 51 | `█████████████░░░░░░░` 62% |
+| Effects rebuilt | 68 | 90 | `███████████████░░░░░` 75% |
+| Rebuilt and proven to sound identical to FL | 0 | 100 | `░░░░░░░░░░░░░░░░░░░░` 0% |
+| Rebuilt with nothing known to be missing | 41 | 100 | `████████░░░░░░░░░░░░` 41% |
+| Rebuilt and documented | 100 | 100 | `████████████████████` 100% |
 
 Rebuilt means read out of FL's plugin binary and written again in Rust. No
 plugin is proven identical yet: that needs a null test against FL's own
@@ -21,11 +34,11 @@ render. The levels are explained under the plugin list below.
 
 | The 165 projects that come with FL | done | of | |
 |---|---:|---:|---|
-| Projects that make any sound | 112 | 165 | `██████████████░░░░░░` 67% |
-| Projects that play with nothing missing | 33 | 165 | `████░░░░░░░░░░░░░░░░` 20% |
-| Plugins they load that are rebuilt | 826 | 1006 | `████████████████░░░░` 82% |
-| Instrument channels with notes that play | 180 | 215 | `█████████████████░░░` 83% |
-| Mixer effects that run, on tracks audio reaches | 928 | 1028 | `██████████████████░░` 90% |
+| Projects that make any sound | 123 | 165 | `███████████████░░░░░` 74% |
+| Projects that play with nothing missing | 83 | 165 | `██████████░░░░░░░░░░` 50% |
+| Plugins they load that are rebuilt | 973 | 1006 | `███████████████████░` 96% |
+| Instrument channels with notes that play | 210 | 227 | `███████████████████░` 92% |
+| Mixer effects that run, on tracks audio reaches | 1112 | 1147 | `███████████████████░` 96% |
 | Projects saved back unchanged, byte for byte | 165 | 165 | `████████████████████` 100% |
 
 These count only what FL's own projects contain, so 100% here is not 100%
@@ -57,10 +70,10 @@ Every plugin by how close the rebuild is to FL's, the ones FL's projects use
 most first:
 
 - **Identical** (0), a null test against FL's own render matches sample for sample: none yet.
-- **Exact** (20), every part read from the binary and rebuilt, nothing known to be missing: Fruity Limiter, Fruity Reeverb 2, Fruity Delay 3, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Fruity Filter, BassDrum, BooBass, Fruity Fast LP.
-- **Exact with gaps** (25), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, Maximus, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Fruity PanOMatic, FPC, Fruity Love Philter, DirectWave, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Frequency Splitter, Fruit Kick, Drumpad.
-- **Approximate** (6), the sound itself is an approximation: Sytrus, Harmless, Harmor, Slicex, Autogun, Ogun.
-- **Not rebuilt** (53), with how many of FL's projects use each: Control Surface (17), FLEX (15), Patcher effect (12), Patcher generator (12), ZGameEditor Visualizer (9), Wave Candy (7), Fruity NoteBook 2 (6), Emphasis (5), Vintage Chorus (5), Fruity Slicer (5), GMS (5), Edison (4), Frequency Shifter (4), Fruity Flanger (4), Morphine (4), Distructor (3), Fruity Parametric EQ (3), Fruity Phaser (3), Fruity X-Y Controller (3), Low Lifter (3), Fruity Envelope Controller (3), Kepler (3), MIDI Out (3), Sakura (3), Fruity Free Filter (2), Fruity NoteBook (2), Fruity Wrapper effect (2), Hardcore (2), Transporter (2), Fruity Granulizer (2), Fruity Wrapper generator (2), Minisynth (2), Toxic Biohazard (2), Wave Traveller (2), Emphasizer (1), Fruity Bass Boost (1), Fruity Delay (1), Fruity Formula Controller (1), Fruity HTML NoteBook (1), Fruity Reeverb (1), Fruity Scratcher (1), Fruity Send (1), Fruity Squeeze (1), Fruity Vocoder (1), Fruity dB Meter (1), Razer Chroma (1), Vintage Phaser (1), BeepMap (1), Drumaxx (1), Fruity DrumSynth Live (1), Fruity Keyboard Controller (1), Fruity Voltage Controller (1), PoiZone (1). 37 more no project uses.
+- **Exact** (41), every part read from the binary and rebuilt, nothing known to be missing: Fruity Limiter, Maximus, Fruity Reeverb 2, Fruity Delay 3, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity PanOMatic, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Wave Candy, Fruity NoteBook 2, Fruity Filter, Fruity Flanger, Fruity Parametric EQ, Fruity Phaser, Low Lifter, BassDrum, BooBass, Fruity Fast LP, Fruity Free Filter, Fruity NoteBook, Fruity Bass Boost, Fruity Delay, Fruity HTML NoteBook, Fruity Reeverb, Fruity Squeeze, Fruity dB Meter, Razer Chroma, Fruity 7 Band EQ, Fruity Center, Fruity Mute 2, Fruity Phase Inverter.
+- **Exact with gaps** (54), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Sytrus, Harmless, FPC, Fruity Love Philter, DirectWave, Control Surface, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Patcher effect, Patcher generator, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, ZGameEditor Visualizer, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Emphasis, Vintage Chorus, Fruity Slicer, GMS, Edison, Frequency Shifter, Morphine, Frequency Splitter, Fruity X-Y Controller, Fruit Kick, Fruity Envelope Controller, Kepler, Sakura, Fruity Wrapper effect, Drumpad, Fruity Granulizer, Minisynth, Wave Traveller, Emphasizer, Fruity Formula Controller, Fruity Send, Vintage Phaser, BeepMap, Drumaxx, Fruity DrumSynth Live, Fruity Keyboard Controller, FL Slayer, Fruity Slicer 2.
+- **Approximate** (5), the sound itself is an approximation: Harmor, Slicex, Autogun, Ogun, Kepler Exo.
+- **Not rebuilt** (11), with how many of FL's projects use each: FLEX (15), Distructor (3), MIDI Out (3), Hardcore (2), Transporter (2), Fruity Wrapper generator (2), Toxic Biohazard (2), Fruity Scratcher (1), Fruity Vocoder (1), Fruity Voltage Controller (1), PoiZone (1). 30 more no project uses.
 
 The levels live in `crates/plugins/src/port.rs`, and CI fails when it and
 `docs/plugins.md` disagree on what is rebuilt.
@@ -74,8 +87,8 @@ The levels live in `crates/plugins/src/port.rs`, and CI fails when it and
 - `crates/model`: the project as Rust types (channels, patterns, arrangements, inserts), converted from and back to the event stream without losing an event.
 - `crates/dsp`: gain, pan, biquad and interpolating sample readers.
 - `crates/plugins`: FL Studio's stock plugins, rebuilt from `docs/plugins/`, behind an `Effect` trait and a `Generator` trait. [Progress](#progress) lists the ones built so far and `docs/plugins.md` keeps the score. The sample players read their samples from FL's own install or the project's files at runtime. The engine runs the effects in the mixer's slots, and a Peak Controller's outputs drive whatever the project links them to.
-- `crates/engine`: offline renderer and realtime playback, with plugin delay compensation and hosting for the stock generators and effects in `crates/plugins`, including sidechain inputs. Sequences the playlist and plays sampler channels and audio clips, to a buffer or through cpal to the default output device; every shipped project renders, and [Progress](#progress) says how many have sound. Automation clips drive channel and insert volume and pan, send levels and the tempo.
-- `crates/ui`: the windows as egui panels. They draw a project and a transport position, and emit commands. So far: the top bar with transport, and a playlist with move, resize, mute, delete and duplicate edits under undo. The channel rack has LEDs, knobs, insert targets and the step sequencer with a velocity lane. The mixer has strips with faders, pans, meters, sends, routing and the slot panel. The piano roll draws, selects, moves, resizes, mutes and deletes notes with a lane for velocity, pan, fine pitch, release and mod X/Y. The browser is a tree of samples, projects and presets under FL's data directory and the project's folder: a double click plays a sample or opens a project, and a sample dragged onto the channel rack goes to a channel or makes a new one.
+- `crates/engine`: offline renderer and realtime playback, with plugin delay compensation and hosting for the stock generators and effects in `crates/plugins`, including sidechain inputs. Sequences the playlist and plays sampler channels and audio clips, to a buffer or through cpal to the default output device, where a pattern can loop a range of itself and one channel takes notes live beside the song; every shipped project renders, and [Progress](#progress) says how many have sound. Each insert runs its EQ, stereo separation, polarity and swap as FL does. Automation clips drive channel and insert volume and pan, an insert's separation and EQ, send levels and the tempo.
+- `crates/ui`: the windows as egui panels. They draw a project and a transport position, and emit commands. So far: the top bar with transport, and a playlist with move, resize, mute, delete and duplicate edits under undo. The channel rack has LEDs, knobs, insert targets and the step sequencer with a velocity lane. The mixer has strips with faders, pans, meters, sends, routing and the slot panel. The piano roll draws, paints, slices, selects, moves, resizes, mutes and deletes notes with a lane for velocity, pan, fine pitch, release and mod X/Y, and its Tools menu glues, quantizes, chops, arpeggiates, strums and snaps them to a scale, each one undo step. It snaps to FL's choices from none to a bar, darkens the keys outside a chosen scale, plays a key or a note through the channel while it is held, follows the play cursor, and a drag along its ruler sets the range a pattern loops. The browser is a tree of samples, projects and presets under FL's data directory and the project's folder: a double click plays a sample or opens a project, and a sample dragged onto the channel rack goes to a channel or makes a new one.
 - `apps/fl-rs`: the desktop app. It opens a project on a worker thread, plays it through the engine, saves it back and renders it to WAV.
 - `docs/parity.md`: how much of the `.flp` event dictionary is understood.
 - `docs/plugins.md`: the 141 stock plugins, which have render tests, how many shipped projects use each, and the status of each. `docs/plugins/*.md` hold the per-plugin maps and `docs/plugins/host-voice.md` the host side of the voice path (pan law, pitch reference, velocity).
@@ -118,6 +131,10 @@ Set `FL_RS_CORPUS` to run the corpus tests too. Without it they skip themselves.
 On Linux the build needs the ALSA headers (`libasound2-dev` on Debian and Ubuntu). The tests that play through the output device skip themselves when there is none.
 
 The `ui` snapshot test draws through wgpu and needs an adapter. Without a GPU, Mesa's lavapipe will do (`mesa-vulkan-drivers`). After a change that is meant to show, write the snapshot again with `UPDATE_SNAPSHOTS=true cargo test -p ui`.
+
+The README's screenshots are written by an ignored test, from FL's Future House demo song. Run it after any change to how the app looks, and commit the pictures with the change:
+
+    FL_RS_CORPUS="<FL Studio>/Data" cargo test -p ui --test screenshots -- --ignored
 
 The corpus render plays every shipped project offline and prints how many have sound, which generators stay silent and which effects are passed through. It takes about three minutes in release:
 

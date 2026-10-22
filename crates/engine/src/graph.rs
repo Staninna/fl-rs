@@ -9,7 +9,8 @@ use crate::generator::{Cue, Rack};
 use crate::mix::{Mixer, Told};
 use crate::sample::Sample;
 use crate::sequence::{self, Song};
-use crate::voice::{self, Follow, Voice};
+use crate::slide::Slides;
+use crate::voice::{self, Voice};
 use crate::{Curves, Error, levels};
 use model::{Channel, ChannelKind, Project};
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,6 +135,9 @@ impl Graph {
         let mut rack = Rack::default();
         rack.plugin_dir = plugin_dir.map(Path::to_path_buf);
         let mut played = BTreeSet::new();
+        // The slides of the sampler channels' notes, by channel and by
+        // the note's place in `events`.
+        let mut slides = Slides::default();
         let mut notes = 0;
         let mut len = clock.sample(song.end).min(limit);
         for note in &song.notes {
@@ -148,17 +152,36 @@ impl Graph {
             if channel.kind == Some(ChannelKind::Plugin) {
                 let insert = target_insert(channel);
                 let timing = (sample_rate, slowest, project.header.ppq);
-                let adjust = voice::adjust(project, channel);
-                let Some(place) = rack.place(channel, insert, timing, adjust, curves) else {
+                let adjusts = (
+                    voice::adjust(project, channel),
+                    voice::pan_offset(project, channel),
+                );
+                let Some(place) = rack.place(channel, insert, timing, adjusts, curves) else {
                     continue;
                 };
+                if automation.drives_pitch(channel.index) {
+                    rack.follow_pitch(place);
+                }
+                // A slide note starts no voice: it bends the notes that
+                // sound.
+                if note.note.slide() {
+                    rack.slide(place, note, &clock);
+                    continue;
+                }
                 let levels = levels::trigger(&note.note, channel, curves);
-                let done = rack.cue(place, note, start, &levels, levels::shift(channel), &clock);
+                // A clip on the channel's pitch moves the note as it starts.
+                let clip = automation.pitch_shift(channel.index, note.tick as f64);
+                let shift = (levels::shift(channel), clip);
+                let done = rack.cue(place, note, start, &levels, shift, &clock);
                 len = len.max(done.min(limit));
                 played.insert(insert);
                 continue;
             }
             if channel.kind != Some(ChannelKind::Sampler) || channel.enabled == Some(false) {
+                continue;
+            }
+            if note.note.slide() {
+                slides.slide(usize::from(channel.index), note, &clock);
                 continue;
             }
             let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) else {
@@ -178,12 +201,44 @@ impl Graph {
                 .map(|length| clock.sample(note.tick + length).saturating_sub(start));
             let insert = target_insert(channel);
             let level = levels.vol * curves.volume_adjust_gain(voice::adjust(project, channel));
-            let gains = gains(channel, level, levels.pan, curves);
+            let gains = gains(project, channel, level, levels.pan, curves);
             let voice = Voice::new(sample, insert, held, step, gains);
-            let voice = following(voice, channel, level, levels.pan, &automation);
+            let own = (levels.vol, levels.pan);
+            let mods = (levels.mod_x, levels.mod_y);
+            let voice = following(voice, channel, own, mods, sample_rate, &automation, curves);
             len = len.max(start.saturating_add(voice.frames()).min(limit));
             played.insert(insert);
+            let done = start.saturating_add(voice.frames());
+            slides.note(usize::from(channel.index), events.len(), note, done);
             events.push(Event { start, voice });
+        }
+        // A channel whose plugin drives a link is hosted whether a note
+        // reaches it or not.
+        for index in automation.controller_channels() {
+            let Some(channel) = project.channel(index) else {
+                continue;
+            };
+            let timing = (sample_rate, slowest, project.header.ppq);
+            let adjusts = (
+                voice::adjust(project, channel),
+                voice::pan_offset(project, channel),
+            );
+            rack.place(channel, target_insert(channel), timing, adjusts, curves);
+        }
+        // A voice that slides plays at the speed each step of its slides
+        // takes it to, from where the step falls in it.
+        let mut steps = slides.steps(&clock);
+        steps.sort_by_key(|step| step.id);
+        for of_one in steps.chunk_by(|a, b| a.id == b.id) {
+            let event = &mut events[of_one[0].id];
+            let bends: Vec<_> = (of_one.iter())
+                .map(|step| {
+                    let ratio = curves.pitch_ratio(f64::from(step.cents) / 100.0);
+                    (step.at - event.start, ratio)
+                })
+                .collect();
+            event.voice = event.voice.clone().bending(bends.into());
+            len = len.max(event.start.saturating_add(event.voice.frames()).min(limit));
         }
 
         // A clip plays its channel's sample for as long as the item is, at
@@ -215,11 +270,21 @@ impl Graph {
             let offset = f64::from(clip.offset_ms) * f64::from(sample.rate) / 1000.0;
             let insert = target_insert(channel);
             let adjust = curves.volume_adjust_gain(voice::adjust(project, channel));
-            let level = settings.gain * curves.clip_gain() * adjust;
-            let gains = gains(channel, level, settings.pan, curves);
+            let own = settings.gain * curves.clip_gain();
+            let level = own * adjust;
+            let gains = gains(project, channel, level, settings.pan, curves);
             let voice = Voice::new(sample, insert, Some(held), step, gains)
                 .starting_at(offset, settings.reversed);
-            let voice = following(voice, channel, level, settings.pan, &automation);
+            let own = (own, settings.pan);
+            let voice = following(
+                voice,
+                channel,
+                own,
+                (0.0, 0.0),
+                sample_rate,
+                &automation,
+                curves,
+            );
             // Trimmed to past the end of its sample, or no ticks long.
             if voice.finished() {
                 continue;
@@ -261,7 +326,7 @@ impl Graph {
                 hosted.generator.set_sample(&path, file);
             }
         }
-        let cues = rack.cues();
+        let cues = rack.cues(&clock);
         let approximated_generators = rack.approximated();
         mixer.host(rack.hosted);
         mixer.set_tempo(automation.tempo_at(0.0).unwrap_or(tempo));
@@ -333,28 +398,35 @@ fn cents(channel: &Channel) -> f64 {
 }
 
 /// Left and right gain of one voice at the volume and pan the channel's
-/// 219 has. `level` is a note's volume or a clip's gain, and `pan` is the
-/// note's or the clip's, from -1 to 1.
-fn gains(channel: &Channel, level: f32, pan: f32, curves: &dyn Curves) -> (f32, f32) {
-    let (volume, channel_pan) = voice::levels(channel);
-    voice::gains(volume, channel_pan, level, pan, curves)
-}
-
-/// The voice, set to follow its channel when a clip drives the channel's
-/// volume or pan.
-fn following(
-    voice: Voice,
+/// 219 has, with its 229's pan offset. `level` is a note's volume or a
+/// clip's gain, and `pan` is the note's or the clip's, from -1 to 1.
+fn gains(
+    project: &Project,
     channel: &Channel,
     level: f32,
     pan: f32,
+    curves: &dyn Curves,
+) -> (f32, f32) {
+    let (volume, channel_pan) = voice::levels(channel);
+    let channel_pan = channel_pan as i32 + voice::pan_offset(project, channel);
+    voice::gains(volume, channel_pan, level, pan, curves)
+}
+
+/// The voice, set to follow its channel when a clip drives one of the
+/// channel's levels. `own` is the voice's level, without the channel's
+/// volume multiplier, and its pan, and `mods` its mod X and mod Y, for the
+/// channel's filter at output rate `rate`.
+fn following(
+    voice: Voice,
+    channel: &Channel,
+    own: (f32, f32),
+    mods: (f32, f32),
+    rate: u32,
     automation: &Automation,
+    curves: &dyn Curves,
 ) -> Voice {
-    if !automation.follows(channel.index) {
-        return voice;
+    match automation.following(channel.index, own, mods, rate, curves) {
+        Some(follow) => voice.following(follow),
+        None => voice,
     }
-    voice.following(Follow {
-        channel: channel.index,
-        level,
-        pan,
-    })
 }

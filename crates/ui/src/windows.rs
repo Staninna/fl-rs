@@ -50,16 +50,60 @@ impl Window {
     }
 }
 
+/// The id the layout is kept under in egui's memory.
+fn layout_id() -> Id {
+    Id::new("fl-rs windows")
+}
+
+/// The windows a click in the top bar or on the welcome screen asked for
+/// this frame, which [`show`] handles as it does their keys.
+fn requests_id() -> Id {
+    Id::new("fl-rs window requests")
+}
+
+/// Show or hide `window` as its key does, from a button.
+pub(crate) fn toggle(ctx: &egui::Context, window: Window) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<Vec<Window>>(requests_id())
+            .push(window);
+    });
+}
+
+/// Whether `window` is the front tab of its group, as of the last frame.
+pub(crate) fn shown(ctx: &egui::Context, window: Window) -> bool {
+    ctx.data(|data| data.get_temp::<Layout<Window>>(layout_id()))
+        .is_some_and(|layout| in_view(&layout, window))
+}
+
+/// Whether the project has anything to show: a fresh app's has nothing.
+fn has_content(project: &model::Project) -> bool {
+    !project.channels.is_empty()
+        || !project.patterns.is_empty()
+        || project.arrangements.iter().any(|a| !a.items.is_empty())
+}
+
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
-    let id = Id::new("fl-rs windows");
+    let id = layout_id();
+    // The app starts with nothing open, on the welcome screen. The first
+    // project with anything in it opens the playlist, unless a window was
+    // opened by then.
     let mut layout: Layout<Window> = ui.data(|data| data.get_temp(id)).unwrap_or(Layout {
-        root: Some(Node::Tabs {
-            panels: vec![Window::Playlist],
-            active: 0,
-        }),
+        root: None,
         floating: Vec::new(),
     });
+    let greeted = Id::new("fl-rs opened a project");
+    if has_content(&state.project) && ui.data(|data| data.get_temp::<bool>(greeted)).is_none() {
+        ui.data_mut(|data| data.insert_temp(greeted, true));
+        if layout.panels().is_empty() {
+            press(&mut layout, Window::Playlist);
+        }
+    }
 
+    let requested: Vec<Window> =
+        ui.data_mut(|data| data.remove_temp(requests_id()).unwrap_or_default());
+    for window in requested {
+        press(&mut layout, window);
+    }
     for window in Window::ALL {
         if ui.input(|input| input.key_pressed(window.key())) {
             press(&mut layout, window);
@@ -78,9 +122,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     }
 
     if layout.panels().is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.weak("F5 playlist, F6 channel rack, F7 piano roll, F8 browser, F9 mixer");
-        });
+        welcome(ui, &mut layout, out);
     } else {
         let style = DockStyle::from_ui(ui);
         let drawn = DockArea::new(id).show(
@@ -103,6 +145,86 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         }
     }
     ui.data_mut(|data| data.insert_temp(id, layout));
+}
+
+/// The screen with no window open: the keys that open each one, which
+/// open it on a click too, and how to open a project.
+fn welcome(ui: &mut Ui, layout: &mut Layout<Window>, out: &mut Vec<Command>) {
+    use egui::{RichText, vec2};
+    let rect = ui.max_rect();
+    ui.painter()
+        .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+    let width = 320.0_f32.min(rect.width() - 32.0).max(120.0);
+    let height = 330.0;
+    let top = rect.top() + ((rect.height() - height) / 2.0).max(16.0);
+    let card = egui::Rect::from_min_size(
+        egui::pos2(rect.center().x - width / 2.0, top),
+        vec2(width, height),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+        egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .stroke(ui.visuals().window_stroke)
+            .corner_radius(6.0)
+            .inner_margin(18.0)
+            .show(ui, |ui| {
+                ui.set_width(width - 36.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("fl-rs")
+                            .size(28.0)
+                            .strong()
+                            .color(crate::theme::ACCENT),
+                    );
+                    ui.weak("No window is open");
+                });
+                ui.add_space(12.0);
+                for window in Window::ALL {
+                    let key = format!("{:?}", window.key());
+                    let row = ui.horizontal(|ui| {
+                        egui::Frame::new()
+                            .fill(ui.visuals().extreme_bg_color)
+                            .corner_radius(3.0)
+                            .inner_margin(vec2(6.0, 2.0))
+                            .show(ui, |ui| {
+                                ui.set_min_width(28.0);
+                                ui.label(
+                                    RichText::new(key)
+                                        .monospace()
+                                        .strong()
+                                        .color(crate::theme::READOUT),
+                                );
+                            });
+                        ui.label(window.name());
+                    });
+                    let click = ui.interact(
+                        row.response.rect,
+                        Id::new(("welcome", window.name())),
+                        egui::Sense::click(),
+                    );
+                    if click.hovered() {
+                        ui.painter().rect_stroke(
+                            row.response.rect.expand(2.0),
+                            3.0,
+                            egui::Stroke::new(1.0, crate::theme::ACCENT),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    if click.clicked() {
+                        press(layout, window);
+                    }
+                }
+                ui.add_space(12.0);
+                ui.separator();
+                ui.vertical_centered(|ui| {
+                    if ui.button("Open a project…").clicked() {
+                        out.push(Command::Choose(crate::Dialog::Open));
+                    }
+                    ui.weak("or double-click one in the browser (F8)");
+                    ui.weak("Space plays and stops");
+                });
+            });
+    });
 }
 
 /// What a window's key does: close the window when it is in view, and

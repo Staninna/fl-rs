@@ -28,3 +28,11 @@ When you find work in flight, build on it or pick something else, and tell the u
 ## Progress table
 
 The block between the progress markers in `README.md` is generated: `python3 -I tools/progress.py` writes it from `docs/plugins.md`, `docs/parity.md` and the port levels in `crates/plugins/src/port.rs`, and CI reruns it on every push to `main`. A plugin is built when it has a port there; CI fails when `port.rs` and the `docs/plugins.md` rows disagree. Change the docs, then run the script. Run the corpus render through it, `cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render`, and it records the render's counts in `docs/plugins.md`; commit that with the README.
+
+## Screenshots
+
+`docs/screenshots/*.png` are the README's pictures of the app. A change to how anything looks (a window, the top bar, the colours, a widget, the start screen, a new window) is not finished until they are drawn again and committed with it:
+
+    FL_RS_CORPUS="<FL Studio>/Data" cargo test -p ui --test screenshots -- --ignored
+
+Look at each picture before you commit it. A new window or screen gets a `shot(...)` line in `crates/ui/tests/screenshots.rs` and a cell in the README's Screenshots table. Write the `ui` snapshots again too (`UPDATE_SNAPSHOTS=true cargo test -p ui`).

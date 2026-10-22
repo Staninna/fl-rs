@@ -146,7 +146,12 @@ Tag = REC index (dfm). Ranges and defaults are in `autogun.rs` `RANGES` and
 b ^ b >> 13`, then the usual eight rounds, and the absolute value of the
 last word. TriggerVoice uses `k = 0x1e42` on `REC10 + key - 0x1f88` when
 "key to seed" is on, and `k = 0x1dbc` on `counter - 0x200e` for a seed 2 of
-0, counting the plugin's counter (+0x244) up a note at a time.
+0, counting the plugin's counter (+0x244) up a note at a time. The
+constructor starts the counter at `RandSeed` right after `Randomize`
+(`0x0087eeb6` calls `0x00409fb0`, which seeds from `QueryPerformanceCounter`
+and `Random(0x7fffffff)`; `0x0087eec9` reads `RandSeed` at `0x008a4010`), so
+it is the clock's, and FL's own render of such a note is different on every
+run and in every instance.
 
 Quality (`FUN_0087e750`, the +0x204 select) sets the interpolator (+0x268),
 the table's oversampling bits (+0x260, at least 1 when the richness is
@@ -300,9 +305,9 @@ and the post chain on `fl_fx.rs` and `maximus.rs`.
 Approximated: nothing has been null-tested against FL. IPP's `exp` (A11 and
 A21) is plain `exp`, and the CPU-specific random paths are taken to match
 the generic one. The envelope runner is `harmor_art.rs`'s port of the same
-shared class. A seed 2 of 0 draws from a counter that starts at 0 here and
-at a process-wide value in FL, so the render test's notes differ from FL's
-note by note. Quality 0 reads with FL's linear interpolator
+shared class. A seed 2 of 0 draws from a counter that starts at 0 here; FL
+starts it from the clock when the plugin is made, so FL itself has no one
+sound for such a state to match. Quality 0 reads with FL's linear interpolator
 (`FUN_00610ef0`). Qualities 2, 3 and 4 keep the default's 6-point
 interpolator and leave out the output oversampling filter. Portamento (colour 14 notes),
 velocity-to-envelope mode 2 and the host's polyphony limit are left out;

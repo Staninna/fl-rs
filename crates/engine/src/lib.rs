@@ -22,11 +22,14 @@
 //!    channel plays when the [`plugins`] crate has its generator: every
 //!    note of the channel is a note on and a note off for the generator,
 //!    which keeps its own voices, and the channel's volume and pan go on
-//!    what it puts out.
+//!    what it puts out. A slide note starts no voice: it bends the notes
+//!    of its channel and its colour that sound to its key, a tick at a
+//!    time, on a sampler channel and on a plugin channel alike.
 //! 4. Mix. A channel's voices sum into the channel's insert. Each insert
-//!    runs its bus through the plugins in its effect slots, applies its
-//!    volume and pan and adds its bus to every insert it routes to, at that
-//!    route's send level. The master's bus with the main volume on it is
+//!    runs its bus through the plugins in its effect slots and its
+//!    three-band EQ, applies its volume, pan, stereo separation, polarity
+//!    and left-right swap, and adds its bus to every insert it routes to,
+//!    at that route's send level. The master's bus with the main volume on it is
 //!    the output. Nothing is clipped. Every insert keeps the peak of what
 //!    it puts out, for a meter to read. Where a plugin is late, every
 //!    other way to the master is held back by as much, so that all of
@@ -38,7 +41,7 @@
 //!    [`Rendered::sidechain_slots`] counts those plugins.
 //! 5. Automation. An automation clip plays where the playlist has an item
 //!    for its channel, and drives the controls its links bind it to: an
-//!    insert's volume, pan and send levels, the volume and pan of a sampler
+//!    insert's volume, pan, stereo separation, EQ and send levels, the volume and pan of a sampler
 //!    or audio clip channel, the tempo, and of an effect slot with a hosted
 //!    plugin its switch, its mix level and the plugin's parameters, which
 //!    [`Rendered::slot_targets`] counts. Of a plugin channel with a hosted
@@ -46,9 +49,10 @@
 //!    parameters. The controls are read at the
 //!    start of a block and stay as read until the next one: a block starts
 //!    on every 512th sample of the song and where a note or a clip starts.
-//!    The tempo is read on every 512th sample only. Every other control a
-//!    clip is bound to is counted in [`Rendered::unsupported_targets`], and
-//!    so is a clip bound to nothing. [`automation::Curve`] is the curve a
+//!    The tempo is read on every 512th sample only. A control of an effect
+//!    slot that holds no plugin changes nothing, and is left alone. Every
+//!    other control a clip is bound to is counted in
+//!    [`Rendered::unsupported_targets`], and so is a clip bound to nothing. [`automation::Curve`] is the curve a
 //!    clip draws.
 //! 6. Controllers. A hosted plugin that is an internal controller, which is
 //!    Fruity Peak Controller, works its outputs out once a tick of the
@@ -70,7 +74,7 @@
 //! the envelope is played, and its LFO is not. An audio clip is not
 //! time-stretched: its item's stretch is counted in
 //! [`Rendered::unsupported_stretch`] and the channel's own stretch settings
-//! are not read. An insert's EQ and stereo separation do nothing.
+//! are not read.
 //!
 //! An effect slot plays its plugin when the [`plugins`] crate has it, which
 //! [`Rendered::hosted_slots`] counts. Any other slot passes its input
@@ -103,16 +107,21 @@
 //! host gets from a note to the levels a voice plays by.
 
 pub mod automation;
+mod channel_filter;
 mod clock;
 mod curves;
 mod engine;
+mod eq;
 mod formula;
 mod generator;
 mod graph;
 mod levels;
+mod live;
 mod mix;
+mod pool;
 mod sample;
 mod sequence;
+mod slide;
 mod transport;
 mod voice;
 

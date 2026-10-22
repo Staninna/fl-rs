@@ -14,8 +14,13 @@
 //! |---|---|---|
 //! | 0 Level | 0 to 100 | 100 |
 //!
-//! A note's release, its two mods, its slide and its porta are not read. A
-//! slide note sounds like any other.
+//! A note's release, its two mods, its slide, its porta and its colour are
+//! not read. A slide note sounds like any other.
+//!
+//! [`Generator::set_note_pitch`] moves a note to the new pitch from the
+//! next frame on. The sine goes on from the phase it is at: frame `n`
+//! from there is `sin(2 pi * (phase + (f / rate) * n))`, the phase in
+//! turns where the pitch moved.
 
 use crate::{Generator, NoteOn, StateError, knob_value, read_state};
 use std::f64::consts::TAU;
@@ -37,6 +42,10 @@ struct Voice {
     id: u32,
     /// Turns of the sine a frame.
     step: f64,
+    /// The phase in turns at frame `since`, where the pitch last moved:
+    /// 0 at 0 until it does.
+    phase: f64,
+    since: usize,
     /// Left and right gain: the note's velocity and its pan.
     gains: (f32, f32),
     /// Frames it has played.
@@ -67,6 +76,12 @@ impl Default for TestSine {
 }
 
 impl TestSine {
+    /// Turns of the sine a frame for a note this many semitones above key
+    /// 69.
+    fn step(&self, semitones: f64) -> f64 {
+        440.0 * 2f64.powf(semitones / 12.0) / self.rate
+    }
+
     /// What one frame of a release is of the frame before it.
     pub fn decay(&self) -> f32 {
         0.001f64.powf(1.0 / self.tail() as f64) as f32
@@ -91,7 +106,9 @@ impl Generator for TestSine {
         let (left, right) = dsp::pan_linear(note.pan);
         self.voices.push(Voice {
             id: note.voice,
-            step: 440.0 * 2f64.powf(semitones / 12.0) / self.rate,
+            step: self.step(semitones),
+            phase: 0.0,
+            since: 0,
             gains: (note.velocity * left, note.velocity * right),
             played: 0,
             level: 1.0,
@@ -114,6 +131,15 @@ impl Generator for TestSine {
         }
     }
 
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        let step = self.step(f64::from(pitch) / 100.0 - 9.0);
+        for voice in self.voices.iter_mut().filter(|v| v.id == voice) {
+            voice.phase += voice.step * (voice.played - voice.since) as f64;
+            voice.since = voice.played;
+            voice.step = step;
+        }
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let level = self.level as f32 / 100.0;
         let decay = self.decay();
@@ -128,7 +154,12 @@ impl Generator for TestSine {
                 }
                 // A product and not a running sum, so a frame does not
                 // depend on where the blocks fall.
-                let sine = (TAU * voice.step * voice.played as f64).sin() as f32;
+                let sine = if voice.since == 0 && voice.phase == 0.0 {
+                    (TAU * voice.step * voice.played as f64).sin() as f32
+                } else {
+                    let turns = voice.phase + voice.step * (voice.played - voice.since) as f64;
+                    (TAU * turns).sin() as f32
+                };
                 let value = sine * voice.level * level;
                 *l += value * voice.gains.0;
                 *r += value * voice.gains.1;
@@ -177,6 +208,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -266,6 +298,29 @@ mod tests {
         sine.note_on(note(3, 60));
         sine.reset();
         assert_eq!(play(&mut sine, 4).0, [0.0; 4]);
+    }
+
+    #[test]
+    fn a_note_whose_pitch_moves_goes_on_from_the_phase_it_is_at() {
+        let mut sine = TestSine::default();
+        sine.note_on(note(1, 69));
+        sine.note_on(note(2, 57));
+        play(&mut sine, 100);
+        // Note 1 goes up an octave: cents from key 60.
+        sine.set_note_pitch(1, 2100.0);
+        sine.set_note_pitch(9, 0.0);
+        let (left, _) = play(&mut sine, 50);
+        let before = 440.0 / 48_000.0 * 100.0;
+        for (n, value) in left.iter().enumerate() {
+            let turns = before + 880.0 / 48_000.0 * n as f64;
+            let want = (TAU * turns).sin() as f32 + frame(57, 100 + n);
+            assert_eq!(*value, want, "frame {n}");
+        }
+        // Telling it the pitch it has changes nothing.
+        let mut same = TestSine::default();
+        same.note_on(note(1, 69));
+        same.set_note_pitch(1, 900.0);
+        assert_eq!(play(&mut same, 64).0[63], frame(69, 63));
     }
 
     #[test]

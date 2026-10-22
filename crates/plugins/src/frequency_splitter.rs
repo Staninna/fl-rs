@@ -35,12 +35,14 @@
 //! wheel and a line from 1 to +18 dB above it, glided to in 5 ms.
 //!
 //! Linear phase builds the low pass and the high pass as FIR filters from a
-//! curve of `s` dB an octave, -6 dB at the crossover, through an inverse FFT
-//! and a sine window, and the middle band is what the two leave of the
-//! input. It is `3 N / 4` frames late for an FFT of `N`, and a new setting
-//! fades in from the old filters.
+//! curve of `s` dB an octave, -6 dB at the crossover, by the engine's own
+//! convolver ([`crate::linear_phase`], the one Maximus and Parametric EQ 2
+//! ask for), and the middle band is what the two leave of the input. It is
+//! `3 N / 4` frames late for an FFT of `N`, and a new setting fades in from
+//! the old filters.
 
-use crate::{Effect, Fidelity, StateError, knob_value, state_version};
+use crate::linear_phase::{self, Convolver, Fft};
+use crate::{Effect, Fidelity, Output, StateError, knob_value, state_version};
 use std::f64::consts::{LOG2_E, PI, TAU};
 use std::ops::{Add, Mul, Sub};
 
@@ -77,8 +79,14 @@ const LINEAR: usize = 4;
 const BANDS: usize = 5;
 const QUALITY: usize = 6;
 const SPEED: usize = 7;
-/// The first of the three main output levels.
+/// The first of the three send levels and of the three main output
+/// levels.
+const SEND_LEVEL: usize = 8;
 const MAIN_LEVEL: usize = 11;
+
+/// How many frames of each band's send there is room for from the start.
+/// A longer block asks for more, once.
+const SEND_ROOM: usize = 4096;
 
 /// The newest version FL reads, and the highest target mixer track.
 const VERSION: i32 = 4;
@@ -512,149 +520,6 @@ impl Mul<f32> for C32 {
     }
 }
 
-/// A radix-2 FFT of any power of two up to the size it was made for. It
-/// scales neither way.
-#[derive(Debug, Clone, PartialEq)]
-struct Fft {
-    size: usize,
-    /// `e^(-2 pi i k / size)` for the first half of the turn.
-    twiddles: Vec<C32>,
-}
-
-impl Fft {
-    fn new(size: usize) -> Self {
-        let twiddles = (0..size / 2)
-            .map(|k| {
-                let (sin, cos) = (-TAU * k as f64 / size as f64).sin_cos();
-                C32 {
-                    re: cos as f32,
-                    im: sin as f32,
-                }
-            })
-            .collect();
-        Fft { size, twiddles }
-    }
-
-    fn run(&self, buffer: &mut [C32], inverse: bool) {
-        let n = buffer.len();
-        let mut j = 0;
-        for i in 1..n {
-            let mut bit = n >> 1;
-            while j & bit != 0 {
-                j ^= bit;
-                bit >>= 1;
-            }
-            j |= bit;
-            if i < j {
-                buffer.swap(i, j);
-            }
-        }
-        let mut len = 2;
-        while len <= n {
-            let half = len / 2;
-            let step = self.size / len;
-            for start in (0..n).step_by(len) {
-                for k in 0..half {
-                    let mut turn = self.twiddles[k * step];
-                    if inverse {
-                        turn.im = -turn.im;
-                    }
-                    let a = buffer[start + k];
-                    let b = buffer[start + k + half] * turn;
-                    buffer[start + k] = a + b;
-                    buffer[start + k + half] = a - b;
-                }
-            }
-            len <<= 1;
-        }
-    }
-}
-
-/// One FIR filter of the linear phase mode on both sides, run as FFT
-/// blocks of half its FFT: a block is filtered when it is full and comes
-/// out over the next, so the filter is `N / 2` frames late before its own
-/// `N / 4`.
-#[derive(Debug, Clone, PartialEq)]
-struct Convolver {
-    /// The filter's spectrum.
-    kernel: Vec<C32>,
-    /// The block before and the block being filled.
-    input: Vec<C32>,
-    /// The filtered block coming out.
-    output: Vec<C32>,
-    /// The place in the blocks.
-    at: usize,
-}
-
-impl Convolver {
-    fn new(max: usize) -> Self {
-        Convolver {
-            kernel: vec![C32::default(); max],
-            input: vec![C32::default(); max],
-            output: vec![C32::default(); max / 2],
-            at: 0,
-        }
-    }
-
-    /// `FUN_1801e2a50`: empty the blocks, and keep the filter.
-    fn clear(&mut self) {
-        self.input.fill(C32::default());
-        self.output.fill(C32::default());
-        self.at = 0;
-    }
-
-    /// `FUN_1801e2c90`: the filter for a magnitude on the FFT's bins. The
-    /// zero phase impulse of the magnitude, `N / 4` frames late, under a
-    /// sine window `N / 2` frames long.
-    fn design(&mut self, magnitudes: &[f32], n: usize, fft: &Fft, scratch: &mut [C32]) {
-        let (half, quarter) = (n / 2, n / 4);
-        let scratch = &mut scratch[..n];
-        for (k, bin) in scratch.iter_mut().enumerate() {
-            let re = magnitudes[if k <= half { k } else { n - k }];
-            *bin = C32 { re, im: 0.0 };
-        }
-        fft.run(scratch, true);
-        let per_n = 1.0 / n as f32;
-        let step = 1.0 / (half - 1) as f32;
-        let pi = std::f32::consts::PI;
-        for (i, tap) in self.kernel[..n].iter_mut().enumerate() {
-            *tap = if i < half {
-                let window = (i as f32 * pi * step).sin();
-                let re = window * scratch[(i + n - quarter) % n].re * per_n;
-                C32 { re, im: 0.0 }
-            } else {
-                C32::default()
-            };
-        }
-        fft.run(&mut self.kernel[..n], false);
-    }
-
-    /// `FUN_1801e2ad0`: take a frame and give the one the filter has for
-    /// it.
-    fn push(&mut self, frame: C32, n: usize, fft: &Fft, scratch: &mut [C32]) -> C32 {
-        let half = n / 2;
-        self.input[half + self.at] = frame;
-        let out = self.output[self.at];
-        self.at += 1;
-        if self.at == half {
-            self.at = 0;
-            let work = &mut scratch[..n];
-            work.copy_from_slice(&self.input[..n]);
-            fft.run(work, false);
-            for (bin, tap) in work.iter_mut().zip(&self.kernel[..n]) {
-                *bin = *bin * *tap;
-            }
-            fft.run(work, true);
-            let per_n = 1.0 / n as f32;
-            for (out, bin) in self.output[..half].iter_mut().zip(&work[half..]) {
-                *out = *bin * per_n;
-            }
-            self.input.copy_within(half..n, 0);
-        }
-        out
-    }
-}
-
 /// The magnitude curve of the linear phase low pass at `hz` with `slope`
 /// dB an octave, or with `high` of the high pass, on the bins of an FFT
 /// of `n` at `rate`: -6 dB at the crossover, the slope away from it on the
@@ -703,7 +568,7 @@ struct LinearPhase {
     max: usize,
     n: usize,
     fft: Fft,
-    scratch: Vec<C32>,
+    scratch: Vec<linear_phase::C32>,
     magnitudes: Vec<f32>,
     history: Vec<C32>,
     history_at: usize,
@@ -723,12 +588,16 @@ const FADE: i32 = 0x1000;
 
 impl LinearPhase {
     fn new(max: usize) -> Self {
-        let convolver = || Convolver::new(max);
+        let convolver = || {
+            let mut convolver = Convolver::default();
+            convolver.make_room(max);
+            convolver
+        };
         LinearPhase {
             max,
             n: 0,
             fft: Fft::new(max),
-            scratch: vec![C32::default(); max],
+            scratch: vec![linear_phase::C32::default(); max],
             magnitudes: vec![0.0; max / 2 + 1],
             history: vec![C32::default(); max],
             history_at: 0,
@@ -751,8 +620,7 @@ impl LinearPhase {
             self.designing = 0;
             self.history.fill(C32::default());
             for convolver in self.sets.iter_mut().flatten() {
-                convolver.kernel.fill(C32::default());
-                convolver.clear();
+                convolver.silence();
             }
         }
         let designing = self.designing;
@@ -780,7 +648,7 @@ impl LinearPhase {
         for _ in 0..n {
             let frame = self.history[self.history_at];
             for convolver in &mut self.sets[self.designing] {
-                convolver.push(frame, n, &self.fft, &mut self.scratch);
+                convolver.frame([frame.re, frame.im], n, &self.fft, &mut self.scratch);
             }
             self.history_at += 1;
             if self.history_at == n {
@@ -794,11 +662,15 @@ impl LinearPhase {
     fn bands(&mut self, set: usize, frame: C32, late: C32, two_bands: bool) -> [C32; 3] {
         let n = self.n;
         let [low, high] = &mut self.sets[set];
-        let low = low.push(frame, n, &self.fft, &mut self.scratch);
+        let mut run = |filter: &mut Convolver| {
+            let [re, im] = filter.frame([frame.re, frame.im], n, &self.fft, &mut self.scratch);
+            C32 { re, im }
+        };
+        let low = run(low);
         if two_bands {
             [low, C32::default(), late - low]
         } else {
-            let high = high.push(frame, n, &self.fft, &mut self.scratch);
+            let high = run(high);
             [low, (late - low) - high, high]
         }
     }
@@ -875,6 +747,14 @@ pub struct FrequencySplitter {
     gain_to: [f32; 3],
     gain: [f32; 3],
     glide: f32,
+    /// The send levels, as the main ones, and each band's send of the
+    /// last block, kept while a target is set.
+    send_to: [f32; 3],
+    send: [f32; 3],
+    sends: [[Vec<f32>; 2]; 3],
+    /// The host takes the sends where the targets say, as FL's Patcher
+    /// does.
+    routed: bool,
     crossovers: [Crossover; 3],
     linear: LinearPhase,
 }
@@ -901,6 +781,12 @@ impl Default for FrequencySplitter {
             gain_to: [0.0; 3],
             gain: [0.0; 3],
             glide: 1.0,
+            send_to: [0.0; 3],
+            send: [0.0; 3],
+            sends: std::array::from_fn(|_| {
+                [Vec::with_capacity(SEND_ROOM), Vec::with_capacity(SEND_ROOM)]
+            }),
+            routed: false,
             crossovers: [Crossover::default(); 3],
             linear: LinearPhase::new(fft_size(5, rate)),
         };
@@ -938,8 +824,7 @@ impl FrequencySplitter {
                 setting.fade_seconds = 10f32.powf(p + p) * f32::from_bits(0x3b03_126f);
             }
             MAIN_LEVEL.. => self.main_gain(index - MAIN_LEVEL),
-            // The send levels go with the sends.
-            _ => {}
+            SEND_LEVEL.. => self.send_gain(index - SEND_LEVEL),
         }
         self.setting = setting;
         let filters = Setting {
@@ -964,6 +849,17 @@ impl FrequencySplitter {
             1.0
         };
         self.gain_to[band] = level * on;
+    }
+
+    /// Where a send's level goes: its wheel, or nothing when its mute is
+    /// on. The engine's sends are taken to glide as its main outputs do.
+    fn send_gain(&mut self, band: usize) {
+        let level = level(share(
+            self.params[SEND_LEVEL + band],
+            RANGES[SEND_LEVEL + band],
+        ));
+        let on = if self.mutes[band] { 0.0 } else { 1.0 };
+        self.send_to[band] = level * on;
     }
 
     /// The filters for the setting, `FUN_1801e8190` on each crossover the
@@ -1067,8 +963,20 @@ impl Effect for FrequencySplitter {
             self.tune();
             self.dirty = false;
         }
-        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        let sends = self.targets.map(|target| target > 0);
+        for (band, send) in self.sends.iter_mut().enumerate() {
+            send[0].clear();
+            send[1].clear();
+            if sends[band] {
+                send[0].resize(left.len(), 0.0);
+                send[1].resize(left.len(), 0.0);
+            }
+        }
+        for (frame, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
             for (gain, to) in self.gain.iter_mut().zip(&self.gain_to) {
+                *gain += (to - *gain) * self.glide;
+            }
+            for (gain, to) in self.send.iter_mut().zip(&self.send_to) {
                 *gain += (to - *gain) * self.glide;
             }
             let bands = if self.setting.linear {
@@ -1082,6 +990,13 @@ impl Effect for FrequencySplitter {
             } else {
                 self.split(*l, *r)
             };
+            for (band, value) in bands.iter().enumerate() {
+                if sends[band] {
+                    let gain = self.send[band];
+                    self.sends[band][0][frame] = value.re * gain;
+                    self.sends[band][1][frame] = value.im * gain;
+                }
+            }
             let [low, mid, high] = bands;
             let [g0, g1, g2] = self.gain;
             *l = low.re * g0 + mid.re * g1 + high.re * g2;
@@ -1111,13 +1026,24 @@ impl Effect for FrequencySplitter {
         self.linear.clear();
     }
 
+    /// Each band whose target is set, at its send level, to the output
+    /// the target numbers.
+    fn outputs(&self, each: &mut Output<'_>) {
+        for (band, target) in self.targets.iter().enumerate() {
+            if *target > 0 {
+                let [left, right] = &self.sends[band];
+                each(*target as usize, left, right);
+            }
+        }
+    }
+
+    fn route_outputs(&mut self) {
+        self.routed = true;
+    }
+
     fn fidelity(&self) -> Fidelity {
-        if self.targets.iter().any(|target| *target > 0) {
+        if !self.routed && self.targets.iter().any(|target| *target > 0) {
             Fidelity::Approximate("Frequency Splitter's bands to other mixer tracks are not routed")
-        } else if self.setting.linear {
-            Fidelity::Approximate(
-                "Frequency Splitter's linear phase window and FFT blocks are inferred",
-            )
         } else {
             Fidelity::Exact
         }
@@ -1377,6 +1303,7 @@ mod tests {
     #[test]
     fn linear_phase_bands_add_up_to_the_input_late() {
         let mut plugin = with(&[(LINEAR, 1)], 0);
+        assert_eq!(plugin.fidelity(), Fidelity::Exact);
         assert_eq!(plugin.latency(), 1536);
         assert_eq!(plugin.max_latency(), 3 * 16_384 / 4);
         let late = plugin.latency();
@@ -1414,24 +1341,6 @@ mod tests {
         magnitudes(&mut high, 2048, 48_000.0, 1500.0, 24.0, true);
         for k in 1..1025 {
             assert!((curve[k] + high[k] - 1.0).abs() < 1e-5, "{k}");
-        }
-    }
-
-    #[test]
-    fn the_fft_goes_there_and_back() {
-        let fft = Fft::new(64);
-        let input: Vec<C32> = (0..16)
-            .map(|n| C32 {
-                re: (n as f32 * 0.3).sin(),
-                im: (n as f32 * 0.7).cos(),
-            })
-            .collect();
-        let mut work = input.clone();
-        fft.run(&mut work, false);
-        fft.run(&mut work, true);
-        for (a, b) in work.iter().zip(&input) {
-            assert!((a.re / 16.0 - b.re).abs() < 1e-5);
-            assert!((a.im / 16.0 - b.im).abs() < 1e-5);
         }
     }
 

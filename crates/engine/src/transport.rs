@@ -10,11 +10,17 @@
 //! The audio thread never allocates, frees, locks or waits. A graph it is
 //! done with goes back through a second ring, and the caller's thread frees
 //! it.
+//!
+//! Beside the song the audio thread plays the notes of one channel live:
+//! [`Transport::note_on`] builds what the channel needs on the caller's
+//! thread and sends it once, and from then on a note on and a note off are
+//! a command each, which the audio thread takes with the others.
 
 use crate::engine::{self, Engine, Mode, VOICES};
 use crate::graph::Graph;
+use crate::live::Live;
 use crate::mix::BLOCK;
-use crate::{Error, PreparedSamples, Ticks};
+use crate::{Approximate, Curves, Error, PreparedSamples, Ticks};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, I24, Sample, SampleFormat, SizedSample};
 use cpal::{Stream, StreamConfig, SupportedStreamConfig};
@@ -34,6 +40,20 @@ enum Command {
     Seek(Ticks),
     Loop(bool),
     Swap(Box<Graph>),
+    /// The ticks a pattern on its own plays round, see
+    /// [`Engine::set_range`].
+    Range(Option<(Ticks, Ticks)>),
+    /// The channel the live notes are on, in place of the one before.
+    Live(Box<Live>),
+    /// A key of the live channel starts, at a gain.
+    NoteOn(u8, f32),
+    NoteOff(u8),
+}
+
+/// What the audio thread is done with, for the caller's thread to free.
+enum Retired {
+    Graph(#[allow(dead_code)] Box<Graph>),
+    Live(#[allow(dead_code)] Box<Live>),
 }
 
 /// What the audio thread tells the caller's.
@@ -64,10 +84,15 @@ impl Default for InsertPeaks {
 struct Player {
     engine: Engine,
     commands: Consumer<Command>,
-    retired: Producer<Box<Graph>>,
+    retired: Producer<Retired>,
     shared: Arc<Shared>,
     left: [f32; BLOCK],
     right: [f32; BLOCK],
+    /// The channel played live, and the buffers it plays into before it
+    /// is added to the song's.
+    live: Option<Box<Live>>,
+    live_left: [f32; BLOCK],
+    live_right: [f32; BLOCK],
 }
 
 impl Player {
@@ -107,14 +132,33 @@ impl Player {
                 }
                 Ok(Command::Stop) => {
                     self.engine.stop();
+                    if let Some(live) = &mut self.live {
+                        live.stop();
+                    }
                     self.shared.playing.store(false, Ordering::Relaxed);
                 }
                 Ok(Command::Seek(ticks)) => self.engine.seek(ticks),
                 Ok(Command::Loop(on)) => self.engine.set_loop(on),
+                Ok(Command::Range(range)) => self.engine.set_range(range),
+                // This thread is the only one that pushes to the ring back,
+                // and it had room a moment ago.
                 Ok(Command::Swap(graph)) => {
-                    // This thread is the only one that pushes, and the ring
-                    // had room a moment ago.
-                    let _ = self.retired.push(self.engine.swap(graph));
+                    let _ = self.retired.push(Retired::Graph(self.engine.swap(graph)));
+                }
+                Ok(Command::Live(live)) => {
+                    if let Some(old) = self.live.replace(live) {
+                        let _ = self.retired.push(Retired::Live(old));
+                    }
+                }
+                Ok(Command::NoteOn(key, gain)) => {
+                    if let Some(live) = &mut self.live {
+                        live.note_on(key, gain);
+                    }
+                }
+                Ok(Command::NoteOff(key)) => {
+                    if let Some(live) = &mut self.live {
+                        live.note_off(key);
+                    }
                 }
                 Err(_) => break,
             }
@@ -122,6 +166,10 @@ impl Player {
         let (left, right) = (&mut self.left[..count], &mut self.right[..count]);
         let playing = self.engine.is_playing();
         self.engine.process(left, right);
+        if let Some(live) = self.live.as_deref_mut().filter(|live| live.sounding()) {
+            let spare = (&mut self.live_left[..], &mut self.live_right[..]);
+            live.add(left, right, spare);
+        }
         // Only the end of the song is told here. A caller that has just
         // asked for play would see any other store take it back.
         if playing && !self.engine.is_playing() {
@@ -156,12 +204,15 @@ pub struct Transport {
     // Dropped first: on ALSA that joins the audio thread.
     _stream: Stream,
     commands: Producer<Command>,
-    retired: Consumer<Box<Graph>>,
+    retired: Consumer<Retired>,
     shared: Arc<Shared>,
     project: Arc<Project>,
     samples: PreparedSamples,
     sample_rate: u32,
     mode: Mode,
+    /// The channel the audio thread plays live, and the project it was
+    /// built from.
+    live: Option<(u16, Arc<Project>)>,
 }
 
 impl Transport {
@@ -196,6 +247,9 @@ impl Transport {
             shared: Arc::clone(&shared),
             left: [0.0; BLOCK],
             right: [0.0; BLOCK],
+            live: None,
+            live_left: [0.0; BLOCK],
+            live_right: [0.0; BLOCK],
         };
         let format = config.sample_format();
         let config = config.config();
@@ -220,6 +274,7 @@ impl Transport {
             samples,
             sample_rate,
             mode: Mode::default(),
+            live: None,
         })
     }
 
@@ -300,6 +355,48 @@ impl Transport {
     /// before `ticks` is not picked up part-way.
     pub fn seek(&mut self, ticks: Ticks) -> Result<(), Error> {
         self.send(Command::Seek(ticks))
+    }
+
+    /// Play the pattern on its own from tick `range.0` up to tick
+    /// `range.1` and back, or with `None` the whole of it. See
+    /// [`Engine::set_range`].
+    pub fn set_range(&mut self, range: Option<(Ticks, Ticks)>) -> Result<(), Error> {
+        self.send(Command::Range(range))
+    }
+
+    /// Start a key of a channel beside the song, at a velocity from 0 to
+    /// 128, as a held key of FL's keyboard does, until
+    /// [`Transport::note_off`]. It plays whether the clock runs or not,
+    /// through the channel's generator or its sample and the inserts the
+    /// channel plays into. One channel plays live at a time.
+    ///
+    /// The first note of a channel, and the first after
+    /// [`Transport::set_project`], builds what the channel needs here, on
+    /// the caller's thread: its generator, as the song's graph does, and
+    /// its inserts with their effects. Those are not the song's, so an
+    /// effect's state is its own.
+    pub fn note_on(&mut self, channel: u16, key: u8, velocity: u8) -> Result<(), Error> {
+        let built = self
+            .live
+            .as_ref()
+            .is_some_and(|(live, project)| *live == channel && Arc::ptr_eq(project, &self.project));
+        if !built {
+            while self.retired.pop().is_ok() {}
+            let samples = &self.samples;
+            let found = |path: &str| Ok(samples.get(path));
+            let rate = self.sample_rate;
+            let live = Live::new(&self.project, channel, rate, samples.plugin_dir(), found)?;
+            self.send(Command::Live(Box::new(live)))?;
+            self.live = Some((channel, Arc::clone(&self.project)));
+        }
+        let gain = Approximate.velocity_gain(velocity) / Approximate.velocity_gain(100);
+        self.send(Command::NoteOn(key, gain))
+    }
+
+    /// End a key [`Transport::note_on`] started. A generator plays its
+    /// note's tail.
+    pub fn note_off(&mut self, key: u8) -> Result<(), Error> {
+        self.send(Command::NoteOff(key))
     }
 
     /// Play another project from the tick the clock is at, starting with
@@ -421,6 +518,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::tests::live;
     use crate::sample::Sample;
     use model::{Arrangement, Channel, ChannelKind, ItemSource, Note, Pattern, PlaylistItem};
 
@@ -469,8 +567,16 @@ mod tests {
     struct Halves {
         player: Player,
         commands: Producer<Command>,
-        retired: Consumer<Box<Graph>>,
+        retired: Consumer<Retired>,
         shared: Arc<Shared>,
+    }
+
+    /// The start of the first voice of a retired graph.
+    fn first_start(retired: Retired) -> usize {
+        match retired {
+            Retired::Graph(graph) => graph.events[0].start,
+            Retired::Live(_) => panic!("a live channel came back"),
+        }
     }
 
     fn halves(ticks: &[i32]) -> Halves {
@@ -484,6 +590,9 @@ mod tests {
             shared: Arc::clone(&shared),
             left: [0.0; BLOCK],
             right: [0.0; BLOCK],
+            live: None,
+            live_left: [0.0; BLOCK],
+            live_right: [0.0; BLOCK],
         };
         Halves {
             player,
@@ -582,11 +691,66 @@ mod tests {
         halves.player.fill(&mut data, 2);
         assert_eq!(halves.retired.slots(), 2);
         assert_eq!(halves.commands.slots(), COMMANDS - 1);
-        assert_eq!(halves.retired.pop().unwrap().events[0].start, 0);
+        assert_eq!(first_start(halves.retired.pop().unwrap()), 0);
         halves.player.fill(&mut data, 2);
         assert_eq!(halves.commands.slots(), COMMANDS);
-        assert_eq!(halves.retired.pop().unwrap().events[0].start, 250);
-        assert_eq!(halves.retired.pop().unwrap().events[0].start, 500);
+        assert_eq!(first_start(halves.retired.pop().unwrap()), 250);
+        assert_eq!(first_start(halves.retired.pop().unwrap()), 500);
+    }
+
+    #[test]
+    fn a_live_note_plays_beside_the_song_while_its_key_is_held() {
+        // The song is stopped, and the live channel plays 100 samples of
+        // 0.5 for a key.
+        let mut halves = halves(&[0]);
+        let mut data = [0f32; 2 * 600];
+        assert!(
+            halves
+                .commands
+                .push(Command::Live(Box::new(live())))
+                .is_ok()
+        );
+        assert!(halves.commands.push(Command::NoteOn(60, 1.0)).is_ok());
+        halves.player.fill(&mut data, 2);
+        let sounding = |data: &[f32]| data.iter().filter(|v| **v != 0.0).count();
+        assert_eq!(sounding(&data), 2 * 100);
+        assert!(data[0] > 0.0 && data[0] == data[1]);
+
+        // A note off ends it, and a new channel sends the old one back.
+        assert!(halves.commands.push(Command::NoteOn(60, 1.0)).is_ok());
+        assert!(halves.commands.push(Command::NoteOff(60)).is_ok());
+        assert!(
+            halves
+                .commands
+                .push(Command::Live(Box::new(live())))
+                .is_ok()
+        );
+        halves.player.fill(&mut data, 2);
+        assert_eq!(sounding(&data), 0);
+        assert!(matches!(halves.retired.pop(), Ok(Retired::Live(_))));
+
+        // Stop cuts it, and with the song playing the two add up.
+        assert!(halves.commands.push(Command::NoteOn(60, 1.0)).is_ok());
+        assert!(halves.commands.push(Command::Stop).is_ok());
+        halves.player.fill(&mut data, 2);
+        assert_eq!(sounding(&data), 0);
+        assert!(halves.commands.push(Command::Play).is_ok());
+        assert!(halves.commands.push(Command::NoteOn(60, 1.0)).is_ok());
+        halves.player.fill(&mut data, 2);
+        // The song's note is 0.5 on the left and -0.25 on the right.
+        assert_eq!((data[0], data[1]), (1.0, 0.25));
+    }
+
+    #[test]
+    fn a_range_goes_to_the_engine() {
+        let mut halves = halves(&[0, 2]);
+        assert!(halves.commands.push(Command::Range(Some((1, 3)))).is_ok());
+        assert!(halves.commands.push(Command::Play).is_ok());
+        let mut data = [0f32; 2 * 600];
+        halves.player.fill(&mut data, 2);
+        // The song plays on: a range is for a pattern on its own.
+        assert_eq!(data[0], 0.5);
+        assert_eq!(halves.shared.position.load(Ordering::Relaxed), 2);
     }
 
     #[test]

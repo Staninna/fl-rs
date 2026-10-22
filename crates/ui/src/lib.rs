@@ -9,10 +9,10 @@
 //! The state kept here is which windows are open and where they are docked,
 //! how far the playlist is zoomed and scrolled, which channel the channel
 //! rack has selected and which insert the mixer, and the drag that is under
-//! way, and for the piano roll its tool, its lane and how far it is zoomed
-//! and scrolled, and for the browser the folders it has read and which of
-//! them are open. It lives in egui's
-//! memory, so it lasts as long as the [`egui::Context`] does. Which
+//! way, and for the piano roll its tool, its lane, its snap, its scale and
+//! how far it is zoomed and scrolled, and for the browser the folders it
+//! has read and which of them are open. It lives in egui's memory, so it
+//! lasts as long as the [`egui::Context`] does. Which
 //! playlist items and which notes are selected is in the project: the
 //! `flags` of an item and of a note say so.
 
@@ -21,6 +21,7 @@ mod channel_rack;
 mod mixer;
 mod piano_roll;
 mod playlist;
+mod theme;
 mod top_bar;
 mod widgets;
 mod windows;
@@ -56,6 +57,20 @@ pub enum Command {
     /// that is previewed stops too.
     Stop,
     Seek(Ticks),
+    /// Play the pattern in pattern mode from the first tick up to the
+    /// second and back, or with `None` the whole of it.
+    SetLoopRange(Option<(Ticks, Ticks)>),
+    /// Start a key of a channel, as a held key of FL's keyboard does, at a
+    /// velocity from 0 to 128. It sounds beside whatever the project is
+    /// doing, until the `NoteOff` of the key.
+    NoteOn {
+        channel: u16,
+        key: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        key: u8,
+    },
     /// Switch between pattern mode and song mode.
     ToggleSongMode,
     /// Switch between stopping at the end of the song and starting over.
@@ -223,6 +238,52 @@ pub enum Edit {
         field: NoteField,
         value: u8,
     },
+    /// Add notes for this channel, each `length` ticks long, at the
+    /// positions and on the keys of `notes`: what the paint tool lays down
+    /// in one drag.
+    AddNotes {
+        channel: u16,
+        length: Ticks,
+        notes: Vec<(Ticks, u8)>,
+    },
+    /// Cut each note that tick `at` falls inside of in two, at `at`.
+    SliceNotes {
+        ids: Vec<NoteId>,
+        at: Ticks,
+    },
+    /// Join the notes on one key that touch or overlap into one.
+    GlueNotes {
+        ids: Vec<NoteId>,
+    },
+    /// Move each note's start to the nearest multiple of `step`, and with
+    /// `lengths` its length too.
+    QuantizeNotes {
+        ids: Vec<NoteId>,
+        step: Ticks,
+        lengths: bool,
+    },
+    /// Cut each note into pieces `step` ticks long.
+    ChopNotes {
+        ids: Vec<NoteId>,
+        step: Ticks,
+    },
+    /// Play each chord among the notes upwards, a note every `step` ticks.
+    ArpeggiateNotes {
+        ids: Vec<NoteId>,
+        step: Ticks,
+    },
+    /// Start each note of a chord `delay` ticks after the one under it.
+    StrumNotes {
+        ids: Vec<NoteId>,
+        delay: Ticks,
+    },
+    /// Move each note whose key is outside the scale to the nearest key in
+    /// it. `keys` has bit n set for the keys n semitones above a C that
+    /// are in the scale.
+    SnapNotesToScale {
+        ids: Vec<NoteId>,
+        keys: u16,
+    },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for
     /// `Undo` and no change to save.
@@ -283,7 +344,8 @@ impl Edit {
     /// Whether, in a drag, this edit takes the place of the edit of its
     /// kind that the drag sent before it. A move and a resize do: they
     /// are measured from where the drag began. So does a note that a drag
-    /// draws, which is one note however long the drag makes it. Every
+    /// draws, which is one note however long the drag makes it, and the
+    /// notes a drag paints, which are all of them so far. Every
     /// other edit says what a value is to be, and a drag that paints steps
     /// sends one for each.
     pub fn replaces_last(&self) -> bool {
@@ -292,6 +354,7 @@ impl Edit {
             Edit::MoveItems { .. }
                 | Edit::ResizeItems { .. }
                 | Edit::AddNote { .. }
+                | Edit::AddNotes { .. }
                 | Edit::MoveNotes { .. }
                 | Edit::ResizeNotes { .. }
         )
@@ -326,6 +389,9 @@ pub struct UiState {
     pub looping: bool,
     /// The index of the pattern that plays in pattern mode.
     pub pattern: u16,
+    /// The ticks the pattern plays round in pattern mode, from the first
+    /// up to the second, when it does not play the whole of it.
+    pub loop_range: Option<(Ticks, Ticks)>,
     /// FL's `Data` directory or its install directory, when the app was
     /// told one: the first root of the browser.
     pub data_root: Option<PathBuf>,
@@ -346,15 +412,26 @@ pub struct UiState {
 /// Draw the whole window: the top bar, the status line and the docked
 /// windows between them.
 pub fn shell(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
-    shortcuts(ui, out);
+    theme::apply(ui.ctx());
+    shortcuts(ui, state, out);
     egui::Panel::top("top bar").show(ui, |ui| top_bar::show(ui, state, out));
     egui::Panel::bottom("status").show(ui, |ui| status(ui, state));
     egui::CentralPanel::no_frame().show(ui, |ui| windows::show(ui, state, out));
 }
 
 /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo, Ctrl+S saves. On a Mac
-/// they go with Cmd.
-fn shortcuts(ui: &mut egui::Ui, out: &mut Vec<Command>) {
+/// they go with Cmd. Space plays and stops, as in FL, unless a text field
+/// has the keys.
+fn shortcuts(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
+    if !ui.ctx().egui_wants_keyboard_input()
+        && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+    {
+        out.push(if state.playing {
+            Command::Stop
+        } else {
+            Command::Play
+        });
+    }
     use egui::{Key, KeyboardShortcut, Modifiers};
     let ctrl = Modifiers::COMMAND;
     // A shortcut matches with Shift held too, so the one that wants Shift

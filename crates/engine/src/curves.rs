@@ -39,6 +39,35 @@ pub trait Curves {
     fn insert_cross(&self, _raw: i32) -> (f32, f32) {
         (0.0, 0.0)
     }
+    /// The direct gains and the gains across of an insert pan and stereo
+    /// separation, as their 225 records store them: the pan -6400..=6400
+    /// and the separation -64..=64, where below 0 separates and above 0
+    /// merges. Without a separation that is [`Curves::insert_pan`] and
+    /// [`Curves::insert_cross`].
+    ///
+    /// FL adds the separation's share to the share of each side's gain that
+    /// its pan feeds across, up to all of it, and splits that side's gain
+    /// anew (`FUN_0127b050`). Curves that do not say do that to the shares
+    /// their own pan has.
+    fn insert_spread(&self, pan: i32, separation: i32) -> ((f32, f32), (f32, f32)) {
+        let (direct, across) = (self.insert_pan(pan), self.insert_cross(pan));
+        if separation == 0 {
+            return (direct, across);
+        }
+        let share = separation_share(separation);
+        let side = |direct: f32, across: f32| {
+            let gain = direct + across;
+            let fed = if gain == 0.0 {
+                0.0
+            } else {
+                across / gain * 2.0
+            };
+            split(gain, (fed + share).min(1.0))
+        };
+        let (left, left_across) = side(direct.0, across.0);
+        let (right, right_across) = side(direct.1, across.1);
+        ((left, right), (left_across, right_across))
+    }
     /// Gain for a send level as its 225 record stores it: 0..=16000, where
     /// 12800 is unity.
     fn send_gain(&self, raw: i32) -> f32;
@@ -52,6 +81,35 @@ pub trait Curves {
     fn tracking_amount(&self, _raw: i32) -> f32 {
         0.0
     }
+}
+
+/// What a stereo separation adds to the share `f` of each side's gain that
+/// an insert feeds across, for the separation as its 225 record stores
+/// it, -64..=64. `FUN_0127b050`, in its floats:
+///
+/// ```text
+/// raw < 0:  raw / 64                         down to -1, which separates
+/// raw > 0:  (5^(raw / 64) - 1) / 4           up to 1, which merges
+/// ```
+///
+/// A side then keeps `1 - f / 2` of its gain and feeds `f / 2` across,
+/// so at 64 both outputs are the mean of the two inputs, and at -64 each
+/// is its own input at 1.5 less the other at 0.5. FL's hint calls below
+/// 0 "separated" and above 0 "merged" (`FUN_006a4ac0`).
+pub(crate) fn separation_share(raw: i32) -> f32 {
+    let at = raw.clamp(-64, 64) as f32 * (1.0 / 64.0);
+    match raw {
+        0 => 0.0,
+        ..0 => at,
+        _ => ((f64::from(at) * 5f64.ln()).exp() - 1.0) as f32 * 0.25,
+    }
+}
+
+/// A side's gain split into what it keeps and what it feeds across, for
+/// the share `f` of `FUN_0127b050`.
+fn split(gain: f32, share: f32) -> (f32, f32) {
+    let half = share * 0.5;
+    (gain * (1.0 - half), gain * half)
 }
 
 /// The raw value of a mixer fader at 0 dB.
@@ -131,7 +189,8 @@ impl Curves for Approximate {
 ///
 /// with 0 and 12800 hard-wired to 0 and 1, as `FUN_0127b050` has them. The
 /// send handler in the REC dispatcher computes the same thing. `K` is the
-/// float at `0x015f49ec`, which FL sets to ln 11 when it starts. That puts
+/// float at `0x015f49ec`, which FL sets to `(float)ln 11` when it starts
+/// (`0x6a6925`, in the initialiser that also sets ln 2 and ln 601). That puts
 /// 16000, where the fader ends, at 5.59 dB. Values past 16000 read as
 /// 16000.
 ///
@@ -177,6 +236,12 @@ impl Curves for Approximate {
 /// the gains across. An insert panned all the way left puts both of its
 /// inputs into its left output at -3 dB.
 ///
+/// The share of the near side, `1 - far`, is the `f` a stereo separation
+/// adds its own share to in [`Curves::insert_spread`], on both sides, and
+/// `FUN_0127b050` stops it at 1. The gain across goes from the far input:
+/// `0x6a13a0`, which runs the matrix, puts `+0x88` on the right input in
+/// the left output and `+0x8c` on the left input in the right output.
+///
 /// A voice's pan is [`Curves::pan_gains`]: `ComputeLRVol` at the voice's
 /// own level, with no factor and nothing across. So a note at velocity 100
 /// in the centre of a new channel plays its sample at 0.551 / sqrt(2) of
@@ -190,9 +255,10 @@ impl Curves for Approximate {
 ///
 /// - FL's sampler is not read. A note and a clip are taken to go through
 ///   it alike, with `FinalLevels.Vol` and `ComputeLRVol` and nothing more.
-/// - Which input the gain across carries is not read. It is taken to be
-///   the far one. The other way round, a hard pan would play the near
-///   input on both sides.
+/// - FL works an insert's gains out with its volume in them and glides
+///   them to a new setting over a block (`FUN_0067fd90`). Here the
+///   volume goes on after and a new setting holds from the block it is
+///   read in.
 /// - A tracking knob at 256 is taken to be 1. The scale of that knob is
 ///   not read.
 /// - Pitch is [`Approximate`]'s.
@@ -243,6 +309,26 @@ impl FlExact {
             }
         }
     }
+
+    /// [`FlExact::insert_matrix`] with a stereo separation on it, the way
+    /// `FUN_0127b050` has both: the pan gives the near side the share
+    /// `1 - far`, the separation adds its own to the share of both sides,
+    /// and no share goes past 1.
+    fn spread_matrix(pan: i32, separation: i32) -> ((f32, f32), (f32, f32)) {
+        let (left, right) = compute_lr_vol(pan as f32 / 6400.0, SQRT_2);
+        let added = separation_share(separation);
+        let left_share = match pan {
+            ..0 => 1.0 - right,
+            _ => 0.0,
+        };
+        let right_share = match pan {
+            1.. => 1.0 - left,
+            _ => 0.0,
+        };
+        let (left, left_across) = split(left, (left_share + added).min(1.0));
+        let (right, right_across) = split(right, (right_share + added).min(1.0));
+        ((left, right), (left_across, right_across))
+    }
 }
 
 impl Curves for FlExact {
@@ -290,6 +376,13 @@ impl Curves for FlExact {
 
     fn insert_cross(&self, raw: i32) -> (f32, f32) {
         Self::insert_matrix(raw).1
+    }
+
+    fn insert_spread(&self, pan: i32, separation: i32) -> ((f32, f32), (f32, f32)) {
+        match separation {
+            0 => Self::insert_matrix(pan),
+            _ => Self::spread_matrix(pan, separation),
+        }
     }
 
     fn send_gain(&self, raw: i32) -> f32 {
@@ -429,6 +522,96 @@ mod tests {
         }
         // The other curves feed nothing across.
         assert_eq!(Approximate.insert_cross(-6400), (0.0, 0.0));
+    }
+
+    #[test]
+    fn separation_is_linear_below_0_and_exponential_above() {
+        assert_eq!(separation_share(0), 0.0);
+        assert_eq!(separation_share(-64), -1.0);
+        assert_eq!(separation_share(-32), -0.5);
+        assert_eq!(separation_share(64), 1.0);
+        assert!((separation_share(32) - (5f32.sqrt() - 1.0) / 4.0).abs() < 1e-7);
+        assert_eq!(separation_share(-99), -1.0);
+        assert_eq!(separation_share(99), 1.0);
+    }
+
+    #[test]
+    fn without_a_separation_the_spread_is_the_pan() {
+        let curves: [&dyn Curves; 2] = [&Approximate, &FlExact];
+        for curves in curves {
+            for pan in [-6400, -3200, -1, 0, 1, 2500, 6400] {
+                let want = (curves.insert_pan(pan), curves.insert_cross(pan));
+                assert_eq!(curves.insert_spread(pan, 0), want, "{pan}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_separation_moves_each_side_s_share_across() {
+        // In the centre, all the way merged is the mean on both sides and
+        // all the way separated is 1.5 of a side less 0.5 of the other.
+        let curves: [&dyn Curves; 2] = [&Approximate, &FlExact];
+        for curves in curves {
+            assert_eq!(curves.insert_spread(0, 64), ((0.5, 0.5), (0.5, 0.5)));
+            assert_eq!(curves.insert_spread(0, -64), ((1.5, 1.5), (-0.5, -0.5)));
+        }
+        // On FL's curves a pan's share and the separation's add up, and
+        // no side feeds more than half its gain across.
+        let (law_left, law_right) = compute_lr_vol(-0.5, SQRT_2);
+        let added = separation_share(16);
+        let ((left, right), (left_across, right_across)) = FlExact.insert_spread(-3200, 16);
+        let share = (1.0 - law_right + added).min(1.0);
+        assert_eq!(left, law_left * (1.0 - share * 0.5));
+        assert_eq!(left_across, law_left * share * 0.5);
+        assert_eq!(right, law_right * (1.0 - added * 0.5));
+        assert_eq!(right_across, law_right * added * 0.5);
+        let ((left, _), (left_across, _)) = FlExact.insert_spread(-6400, 64);
+        assert_eq!((left, left_across), (FRAC_1_SQRT_2, FRAC_1_SQRT_2));
+        // The generic way gets FL's numbers from FL's pan, to the last bit
+        // or so.
+        struct Plain;
+        impl Curves for Plain {
+            fn pitch_ratio(&self, s: f64) -> f64 {
+                FlExact.pitch_ratio(s)
+            }
+            fn velocity_gain(&self, v: u8) -> f32 {
+                FlExact.velocity_gain(v)
+            }
+            fn volume_gain(&self, v: u32) -> f32 {
+                FlExact.volume_gain(v)
+            }
+            fn pan_gains(&self, p: f32) -> (f32, f32) {
+                FlExact.pan_gains(p)
+            }
+            fn insert_gain(&self, r: i32) -> f32 {
+                FlExact.insert_gain(r)
+            }
+            fn insert_pan(&self, r: i32) -> (f32, f32) {
+                FlExact.insert_pan(r)
+            }
+            fn insert_cross(&self, r: i32) -> (f32, f32) {
+                FlExact.insert_cross(r)
+            }
+            fn send_gain(&self, r: i32) -> f32 {
+                FlExact.send_gain(r)
+            }
+            fn slot_mix(&self, r: i32) -> f32 {
+                FlExact.slot_mix(r)
+            }
+        }
+        for (pan, separation) in [(-3200, 16), (4000, -20), (6400, 64), (-100, -64)] {
+            let (fl, plain) = (
+                FlExact.insert_spread(pan, separation),
+                Plain.insert_spread(pan, separation),
+            );
+            let gains = |s: ((f32, f32), (f32, f32))| [s.0.0, s.0.1, s.1.0, s.1.1];
+            for (fl, plain) in gains(fl).into_iter().zip(gains(plain)) {
+                assert!(
+                    (fl - plain).abs() < 1e-6,
+                    "{pan} {separation}: {fl} {plain}"
+                );
+            }
+        }
     }
 
     #[test]
