@@ -12,7 +12,7 @@ Corpus render at `22151e9`: 123 of 165 shipped projects have sound with the stoc
 | Generator | 3x Osc | 4247 | yes | 39 | implemented in crates/plugins (HQ engine exact: its tables are FL's to the bit, checked under an emulator; approximated: the custom shape plays the saw, FL's offline-render box filter not built, the noise seed is the plugin's own), docs/plugins/3x-osc.md |
 | Effect | Fruity Reeverb 2 | 3742 | yes | 38 | implemented in crates/plugins (network, taps, predelay and modulation follow the engine's listing sample for sample; coefficients follow the Delphi update in f64 and are not checked bit for bit), docs/plugins/fruity-reeverb-2.md |
 | Effect | Fruity Delay 3 | 3847 |  | 31 | implemented in crates/plugins, docs/plugins/fruity-delay-3.md |
-| Effect | Fruity WaveShaper | 5608 | yes | 29 | implemented in crates/plugins (oversampling approximated), docs/plugins/fruity-waveshaper.md |
+| Effect | Fruity WaveShaper | 5608 | yes | 29 | implemented in crates/plugins (curve table, HQ lookup, oversampling up to 16x, smooth modulation and Center exact), docs/plugins/fruity-waveshaper.md |
 | Effect | Fruity Stereo Shaper | 3711 | yes | 27 | implemented in crates/plugins, docs/plugins/fruity-stereo-shaper.md |
 | Effect | Fruity Peak Controller | 3949 |  | 26 | implemented in crates/plugins (controller outputs reach 227 links through the 230 formula, `Tension()` included; a link FL smooths is set at once), docs/plugins/fruity-peak-controller.md |
 | Effect | Fruity Soft Clipper | 3631 | yes | 23 | implemented in crates/plugins, docs/plugins/fruity-soft-clipper.md |
@@ -33,7 +33,7 @@ Corpus render at `22151e9`: 123 of 165 shipped projects have sound with the stoc
 | Effect | Fruity Compressor | 3635 | yes | 15 | implemented in crates/plugins, docs/plugins/fruity-compressor.md |
 | Effect | Transient Processor | 3878 | yes | 15 | implemented in crates/plugins (a shell around engine_x64.dll, read in full, exact), docs/plugins/transient-processor.md |
 | Generator | FLEX | 7929 | yes | 15 | mapped (shell state high; patches live in obfuscated .flexpack archives and the engine DLLs, not read), docs/plugins/flex.md |
-| Effect | Fruity Delay Bank | 3825 | yes | 13 | implemented in crates/plugins (routing, gains, delay lines, feedback modes, the per-unit input and feedback filters and plain grain exact; the 2x oversampler and shaped grain approximated), docs/plugins/fruity-delay-bank.md |
+| Effect | Fruity Delay Bank | 3825 | yes | 13 | implemented in crates/plugins (routing, gains, delay lines, feedback modes, the per-unit input and feedback filters, plain grain and the 2x oversampler exact; shaped grain approximated), docs/plugins/fruity-delay-bank.md |
 | Effect | Effector | 3639 | yes | 12 | implemented in crates/plugins (a shell around engine_x64.dll; the six effects the corpus picks, distortion, lo-fi, flanger, reverb, trance gate and vowel filter, exact, all 27 project states; the LFO resyncs to a song position the plugin counts itself, and effects 1, 6 and 10 read it once a host block where FL reads it once a block of its own; effects 3, 4, 5, 7, 9 and 11 unused in the corpus and passed through), docs/plugins/effector.md |
 | Effect | Fruity Balance | 3631 | yes | 12 | implemented in crates/plugins, docs/plugins/fruity-balance.md |
 | Effect | Fruity Multiband Compressor | 525 | yes | 12 | implemented in crates/plugins (a shell around comp_eng_x64.dll; both crossover types, compressor and limiter exact; FIR type has 52 frames latency), docs/plugins/fruity-multiband-compressor.md |

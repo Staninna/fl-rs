@@ -58,6 +58,7 @@
 
 use crate::{Effect, Fidelity, StateError, knob_value, state_version};
 use dsp::biquad::Coefficients64;
+use dsp::halfband;
 use std::f64::consts::{LN_2, LN_10, TAU};
 
 /// The plugin's event 201 name.
@@ -106,21 +107,6 @@ const TINY: f32 = 5.960_464_5e-8;
 
 /// How many frames go through at a time.
 const CHUNK: usize = 256;
-
-/// The two paths of FL's 2x resampler, from the DLL: three first-order
-/// allpasses each, at the lower rate.
-const PATHS: [[f64; 3]; 2] = [
-    [
-        0.147_377_113_601_046_6,
-        0.482_468_542_769_700_14,
-        0.883_005_025_769_373_1,
-    ],
-    [
-        0.039_151_597_734_460_045,
-        0.302_646_848_328_493_4,
-        0.674_615_918_546_963_9,
-    ],
-];
 
 /// A curve value as the gain or the pan it is: FL's `FUN_006ccb70`.
 fn to_gain(target: usize, value: f32) -> f32 {
@@ -246,34 +232,14 @@ fn scale_ramp(out: &mut [f32], start: f32, step: f32) {
     }
 }
 
-/// One first-order allpass of the resampler, a side each.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Allpass {
-    before: [f64; 2],
-    out: [f64; 2],
-}
-
-impl Allpass {
-    fn step(&mut self, side: usize, x: f64, c: f64) -> f64 {
-        let y = self.before[side] + (x - self.out[side]) * c;
-        self.before[side] = x;
-        self.out[side] = y;
-        y
-    }
-}
-
-/// One direction of FL's 2x resampler for both sides.
+/// One direction of FL's 2x resampler ([`dsp::halfband`]) for both sides,
+/// on frames stored side by side.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct HalfBand {
-    paths: [[Allpass; 3]; 2],
+    sides: [halfband::HalfBand; 2],
 }
 
 impl HalfBand {
-    fn path(&mut self, path: usize, side: usize, x: f64) -> f64 {
-        let stages = self.paths[path].iter_mut().zip(PATHS[path]);
-        stages.fold(x, |x, (stage, c)| stage.step(side, x, c))
-    }
-
     /// Two frames in `wide` for each in `input`, stereo side by side.
     fn up(&mut self, input: &[f32], wide: &mut [f32]) {
         for (frame, out) in input
@@ -283,9 +249,7 @@ impl HalfBand {
             .zip(wide.as_chunks_mut::<4>().0)
         {
             for side in 0..2 {
-                let x = f64::from(frame[side]);
-                out[side + 2] = self.path(0, side, x) as f32;
-                out[side] = self.path(1, side, x) as f32;
+                [out[side], out[side + 2]] = self.sides[side].up_one(frame[side]);
             }
         }
         self.flush();
@@ -300,9 +264,7 @@ impl HalfBand {
             .zip(out.as_chunks_mut::<2>().0)
         {
             for side in 0..2 {
-                let first = self.path(0, side, f64::from(pair[side]));
-                let second = self.path(1, side, f64::from(pair[side + 2]));
-                frame[side] = ((second + first) * 0.5) as f32;
+                frame[side] = self.sides[side].down_one([pair[side], pair[side + 2]]);
             }
         }
         self.flush();
@@ -310,13 +272,7 @@ impl HalfBand {
 
     /// FL zeroes an allpass's output under 2^-24 after every block.
     fn flush(&mut self) {
-        for stage in self.paths.as_flattened_mut() {
-            for out in &mut stage.out {
-                if out.abs() < f64::from(TINY) {
-                    *out = 0.0;
-                }
-            }
-        }
+        self.sides.iter_mut().for_each(halfband::HalfBand::flush);
     }
 }
 

@@ -60,6 +60,7 @@ use crate::parametric_eq_2_engine::{self, Decimator, Matched, RESAMPLER_LATENCY,
 use crate::parts::Matrix;
 use crate::{Effect, StateError, knob_value, read_state, state_version};
 use dsp::biquad::{Biquad64, Coefficients64, bandwidth_alpha, shelf_beta};
+use dsp::halfband::HalfBand;
 use std::f64::consts::{FRAC_1_SQRT_2, LN_2, LOG10_E, PI, TAU};
 
 /// The plugin's event 201 name.
@@ -393,96 +394,6 @@ impl Band {
             self.tail = self.tail.saturating_sub(frames).max(0);
             if self.tail == 0 {
                 self.state = Default::default();
-            }
-        }
-    }
-}
-
-/// One first-order allpass of the resampler: `y = x1 + (x - y1) * c`.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Allpass {
-    before: f64,
-    out: f64,
-}
-
-impl Allpass {
-    fn step(&mut self, x: f64, c: f64) -> f64 {
-        self.out = self.before + (x - self.out) * c;
-        self.before = x;
-        self.out
-    }
-}
-
-/// The coefficients of the resampler's two paths, from the DLL. Together
-/// the paths are a half-band low pass: going up the second path gives the
-/// first of each two samples, and going down it takes the second.
-const PATHS: [[f64; 3]; 2] = [
-    [
-        0.147_377_113_601_046_6,
-        0.482_468_542_769_700_14,
-        0.883_005_025_769_373_1,
-    ],
-    [
-        0.039_151_597_734_460_045,
-        0.302_646_848_328_493_4,
-        0.674_615_918_546_963_9,
-    ],
-];
-
-/// One side of FL's 2x resampler in one direction: two paths of three
-/// allpasses at the lower rate. Maximus's oversampler is the same one
-/// (`TPolyphase`, the same 13 doubles), a frame at a time.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct HalfBand {
-    paths: [[Allpass; 3]; 2],
-}
-
-impl HalfBand {
-    fn path(&mut self, path: usize, x: f64) -> f64 {
-        let stages = self.paths[path].iter_mut().zip(PATHS[path]);
-        stages.fold(x, |x, (stage, c)| stage.step(x, c))
-    }
-
-    /// Two samples in `wide` for each one in `input`.
-    pub(crate) fn up(&mut self, input: &[f32], wide: &mut [f32]) {
-        for (x, pair) in input.iter().zip(wide.as_chunks_mut::<2>().0) {
-            let x = f64::from(*x);
-            *pair = [self.path(1, x) as f32, self.path(0, x) as f32];
-        }
-        self.flush();
-    }
-
-    /// One sample in `out` for each two in `wide`.
-    pub(crate) fn down(&mut self, wide: &[f32], out: &mut [f32]) {
-        for (pair, y) in wide.as_chunks::<2>().0.iter().zip(out) {
-            let first = self.path(0, f64::from(pair[0]));
-            let second = self.path(1, f64::from(pair[1]));
-            *y = ((second + first) * 0.5) as f32;
-        }
-        self.flush();
-    }
-
-    /// The two samples at twice the rate for one sample, as `up` gives
-    /// them.
-    pub(crate) fn up_one(&mut self, x: f32) -> [f32; 2] {
-        let x = f64::from(x);
-        [self.path(1, x) as f32, self.path(0, x) as f32]
-    }
-
-    /// The sample at the lower rate for two at twice it, as `down` gives
-    /// it.
-    pub(crate) fn down_one(&mut self, pair: [f32; 2]) -> f32 {
-        let first = self.path(0, f64::from(pair[0]));
-        let second = self.path(1, f64::from(pair[1]));
-        ((second + first) * 0.5) as f32
-    }
-
-    pub(crate) fn flush(&mut self) {
-        for stage in self.paths.as_flattened_mut() {
-            for state in [&mut stage.before, &mut stage.out] {
-                if state.is_subnormal() {
-                    *state = 0.0;
-                }
             }
         }
     }
@@ -968,6 +879,7 @@ impl Effect for ParametricEq2 {
             } else {
                 self.up[0].up(l, wide_l);
                 self.up[1].up(r, wide_r);
+                self.up.iter_mut().for_each(HalfBand::flush_subnormal);
             }
             self.run(wide_l, wide_r);
             if engine {
@@ -976,6 +888,7 @@ impl Effect for ParametricEq2 {
             } else {
                 self.down[0].down(wide_l, l);
                 self.down[1].down(wide_r, r);
+                self.down.iter_mut().for_each(HalfBand::flush_subnormal);
             }
         }
         self.count(2 * len);

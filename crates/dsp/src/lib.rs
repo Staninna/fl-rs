@@ -4,14 +4,16 @@
 //! The double biquad takes `f32` samples too and keeps its state in `f64`.
 //! FL's pan law lives in the engine.
 //!
-//! Three parts are FL's own, read from its binaries: [`curve`], the
+//! Four parts are FL's own, read from its binaries: [`curve`], the
 //! envelope curve that both the engine and the plugins draw; [`interpolator`],
-//! the sample interpolator FL's plugins share; and [`additive`], the sine
-//! bank Image-Line's additive synths build their voices on.
+//! the sample interpolator FL's plugins share; [`halfband`], the 2x
+//! resampler FL's plugins share; and [`additive`], the sine bank
+//! Image-Line's additive synths build their voices on.
 
 pub mod additive;
 pub mod biquad;
 pub mod curve;
+pub mod halfband;
 pub mod interpolator;
 pub mod resample;
 
