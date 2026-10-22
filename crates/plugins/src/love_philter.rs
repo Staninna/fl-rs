@@ -90,6 +90,7 @@ use crate::parts::{Follower, glide, stereo_gains};
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value};
 use dsp::biquad::{Biquad64, Coefficients64};
 use dsp::curve::Point;
+use dsp::halfband::HalfBand;
 use std::f64::consts::{FRAC_PI_2, LN_2, PI, SQRT_2, TAU};
 
 /// The plugin's event 201 name.
@@ -173,21 +174,6 @@ const SHAPER: usize = 0x4000;
 /// most times the rate is doubled.
 const CHUNK: usize = 256;
 const DOUBLINGS: usize = 4;
-
-/// The allpasses of the half band filters: one chain's three and the
-/// other's.
-const HALF_BAND: [[f64; 3]; 2] = [
-    [
-        0.147_377_113_601_046_6,
-        0.482_468_542_769_700_14,
-        0.883_005_025_769_373_1,
-    ],
-    [
-        0.039_151_597_734_460_045,
-        0.302_646_848_328_493_4,
-        0.674_615_918_546_963_9,
-    ],
-];
 
 /// What Center gives its follower, as Fruity WaveShaper's does.
 const CENTER_PACE: f64 = 1.007_023_499_999_999_8;
@@ -794,56 +780,6 @@ impl Unit {
     }
 }
 
-/// One side of one half band filter: its two chains of three allpasses.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct HalfBand {
-    /// Each allpass's last input and last output.
-    input: [[f64; 3]; 2],
-    output: [[f64; 3]; 2],
-}
-
-impl HalfBand {
-    /// One sample through one chain.
-    fn chain(&mut self, chain: usize, x: f64) -> f64 {
-        let mut signal = x;
-        let (inputs, outputs) = (&mut self.input[chain], &mut self.output[chain]);
-        for (pass, coefficient) in HALF_BAND[chain].iter().enumerate() {
-            let out = inputs[pass] + (signal - outputs[pass]) * coefficient;
-            inputs[pass] = signal;
-            outputs[pass] = out;
-            signal = out;
-        }
-        signal
-    }
-
-    /// Double the rate of `from` into `to`, which is twice as long.
-    fn up(&mut self, from: &[f32], to: &mut [f32]) {
-        for (x, pair) in from.iter().zip(to.as_chunks_mut::<2>().0) {
-            let x = f64::from(*x);
-            *pair = [self.chain(1, x) as f32, self.chain(0, x) as f32];
-        }
-    }
-
-    /// Halve the rate of `from` into `to`, which is half as long.
-    fn down(&mut self, from: &[f32], to: &mut [f32]) {
-        for (pair, out) in from.as_chunks::<2>().0.iter().zip(to) {
-            let first = self.chain(0, f64::from(pair[0]));
-            let second = self.chain(1, f64::from(pair[1]));
-            *out = ((second + first) * 0.5) as f32;
-        }
-    }
-
-    /// What FL does after every block: a number too small for a double to
-    /// hold in full becomes 0.
-    fn flush(&mut self) {
-        for state in self.input.iter_mut().chain(&mut self.output).flatten() {
-            if state.is_subnormal() {
-                *state = 0.0;
-            }
-        }
-    }
-}
-
 /// The envelope follower: it goes after the louder side of what it hears,
 /// at one pace up and another down.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1211,7 +1147,7 @@ impl LovePhilter {
             for stage in (0..doublings).rev() {
                 scratch[..now].copy_from_slice(&input[..now]);
                 self.up[stage][side].up(&scratch[..now], &mut input[..now * 2]);
-                self.up[stage][side].flush();
+                self.up[stage][side].flush_subnormal();
                 now *= 2;
             }
             self.work.mix[side][..frames].fill(0.0);
@@ -1236,7 +1172,7 @@ impl LovePhilter {
             for stage in (0..doublings).rev() {
                 scratch[..now].copy_from_slice(&mix[..now]);
                 self.down[stage][side].down(&scratch[..now], &mut mix[..now / 2]);
-                self.down[stage][side].flush();
+                self.down[stage][side].flush_subnormal();
                 now /= 2;
             }
             block.copy_from_slice(&mix[..len]);

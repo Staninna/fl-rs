@@ -62,7 +62,7 @@ multiplies @0 and @4 by 100 for writers below 5.3.7).
 | 0x14 | mod Y offset | 229 @16, `chan+0x194` | -256..256 (`FResOfsWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
 | 0x103..0x125 | TS404 parameters | `*(chan+0x358) + 8 + 4n` | per knob | | no | loader, dfm |
 | 0x200..0x207 | echo delay: 0x200 feedback, 0x201 pan, 0x202 pitch, 0x203 echoes, 0x204 time, 0x205 mod Y, 0x206 mod X | `chan+0x200 + 4n` | per knob (`Delay*Wheel`, tags 512..518) | | no | loader, dfm |
-| 0x300..0x3FF | arpeggiator: 0x301 range, 0x303 time (450..1447), 0x304 gate (0..48), 0x305 repeat | `chan+0x2ac + 4n` (0x302 stored less 2, 0x305 at `chan+0x2e0`) | per knob (`Arp*`, tags 769..773) | | no | loader, dfm |
+| 0x300..0x3FF | arpeggiator: 0x300 direction, 0x301 range, 0x302 chord, 0x303 time (450..1447), 0x304 gate (0..48), 0x305 repeat (`docs/arpeggiator.md`) | `chan+0x2ac + 4n` (0x302 stored less 2, 0x305 at `chan+0x2e0`) | per knob (`Arp*`, tags 769..773) | 0x303: `FUN_00fea220` | 0x303 and 0x304 play from a clip | loader, dfm |
 | 0x500..0x5FF | key and velocity tracking: record `(c - 0x500) >> 4`, field `c & 0xf` | `chan+0x1b0 + 0x20 r + 4 f` | -256..256 (`Track*Wheel`, tags 1280..1282) | | no | loader, dfm |
 | 0x600..0x6FF | an automation clip's own LFO: 0x600 speed (512..65536), 0x601 tension, 0x602 skew, 0x603 pulse width, 0x604 level (-128..128) | the clip's `TACArticulator` | per knob (`ACLFO*`, tags 1536..1540) | | no | loader, dfm |
 | 0x1000..0x17FF | the instrument envelopes and LFOs: envelope `(c - 0x1000) >> 8`, field `c & 0xff` (2 predelay, 3 attack, 4 hold, 5 decay, 6 sustain, 7 release, 8 amount, 9 LFO predelay, ...) | `*(chan+0x330) + 0x198 + 0xa0 e + 4 f` | per knob (`Env*`, `LFO*`, tags 4098..4112) | | no | loader, dfm |
@@ -104,9 +104,14 @@ parameters 0, 0x12, 0x13 and 0x226).
   are read (every 512th sample and where a voice starts), and goes on from
   the frame it is at. Its end is where it runs off its sample, and it is
   made to last as long as the lowest pitch the clip can reach would take.
-  A hosted generator's note takes the channel's pitch as it starts and keeps
-  it: FL refreshes `FinalLevels.Pitch` of its sounding voices every tick,
-  and `plugins::Generator` has no call for that. An audio clip channel set
+  A hosted generator's note takes the channel's pitch as it starts. FL
+  refreshes `FinalLevels.Pitch` of its sounding voices every tick, and the
+  engine reads the clip on a plugin channel's pitch every tick and hands
+  each sounding note the new pitch (`plugins::Generator::set_note_pitch`).
+  BooBass, Fruity Granulizer, Harmless, Harmor, Sakura, Sytrus, 3x Osc and
+  Fruity Envelope Controller take it, and Patcher hands it to the
+  generators inside it. The other generators keep the pitch their notes
+  started with. An audio clip channel set
   to time stretch re-stretches its sample when the pitch moves
   (`FUN_00ff86f0`, `chan+0x2f0` not -1 or -2); the engine stretches nothing
   and plays a clip's pitch by its speed, the knob's included, as it did
@@ -118,6 +123,11 @@ parameters 0, 0x12, 0x13 and 0x226).
   Oxygen` channel 49 has one of 6400 and `Olbaid - Sytrus Essentials`
   channel 53 one of -3768.
 - Plugin parameters of old projects, through the rewrite above.
+- The arpeggiator's time (0x303) and gate (0x304) from a clip. The engine
+  plays a channel's arpeggiator (`docs/arpeggiator.md`), and reads the
+  clip at the tick of every step, where FL works the step out again.
+  Corpus: `nucleon - Harmless Galactic` channel 14 and `Mehran Abbasi -
+  With You` channels 12, 16, 17 and 20.
 
 Left out, and why:
 
@@ -131,14 +141,15 @@ Left out, and why:
   no level. Where a plugin channel's `+0x164` is set was not found, so the
   engine plays none of the four on a plugin channel: `Square a Saw -
   Oxygen` channel 51 (3x Osc) keeps its two clips on mod X unsupported.
-- Arpeggiator (0x303, 0x304), time stretch and formant (14, 15), the
-  instrument envelopes (0x1000..), tracking, delay, TS404: the engine plays
-  none of these parts of a channel.
+- Time stretch and formant (14, 15), the instrument envelopes
+  (0x1000..), tracking, delay, TS404: the engine plays none of these parts
+  of a channel. Nor the arpeggiator's direction, range, chord and repeat
+  (0x300..0x302, 0x305) from a clip, which no corpus clip drives, nor its
+  time and gate from a controller link: the arpeggios are worked out from
+  the song before it plays.
 - An automation clip's LFO (0x600, 0x604) when that clip's LFO is on. The
   engine plays a clip's envelope alone. A clip whose LFO is off, which
   every clip these drive in the corpus is, is played: see below.
-- Sytrus parameters: the engine's Sytrus has no parameter table, so the
-  Overcome links still have nothing to drive.
 
 ## Corpus
 

@@ -3526,14 +3526,14 @@ fn a_kick_ducks_the_tone_on_the_insert_it_sidechains() {
     let onset = dip(&out).unwrap();
     assert!((KICK..KICK + 12).contains(&onset), "{onset}");
 
-    // Without the route insert 2 has no input 1. The compressor hears the
-    // tone, which is 24 dB over its threshold all along, and the slot is
-    // counted.
+    // Without the route insert 2 has no input 1. FL's host hands no buffer
+    // for it, so the compressor hears the tone, which is 24 dB over its
+    // threshold all along. That is FL's, and the slot is not counted.
     let mut unrouted = ducked.clone();
     route(&mut unrouted, 1, &[0]);
     let out = render(&unrouted, &dir);
     assert_eq!((out.sidechain_routes, out.sidechain_slots), (0, 0));
-    assert_eq!(out.approximated_slots.values().sum::<usize>(), 1);
+    assert!(out.approximated_slots.is_empty());
     let low = db(level(&out, 48_000) / 0.5);
     assert!((low + 18.0).abs() < 0.5, "{low} dB");
 

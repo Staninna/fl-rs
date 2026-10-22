@@ -175,5 +175,6 @@ Elastique and the gap filler (a stretched slice is the old one cut or padded
 with silence to its new length), and section 3 with the release and the
 declick per frame rather than per tick and block ramp, and FL's interpolator
 at its default render quality, 16 taps a side (inferred, see
-`docs/plugins/fpc.md`). The other envelopes and the LFOs are read and not
-run; fidelity says so when a state has them on.
+`docs/plugins/fpc.md`). The other envelopes, the LFOs and the volume
+envelope's attack, hold and decay are read and not run; fidelity says so
+when a state has them on.

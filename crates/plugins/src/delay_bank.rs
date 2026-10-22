@@ -40,12 +40,19 @@
 //! shelves and peak, designed and run as FL does (`FUN_006debc0`,
 //! `FUN_005dc180`, `FUN_005dc9a0`).
 //!
-//! Not built: the 2x oversampling and the bend of the grain's shape. A
-//! state that has one of them on says so in [`Effect::fidelity`].
+//! With the 2x oversampling on, the input goes up through FL's half band
+//! ([`dsp::halfband`]), the units run at twice the song's rate (their
+//! times, grains, filters and glides all worked out for it, as FL tells
+//! its renderer the doubled rate), and the sum comes down through the half
+//! band again. FL reports no latency for it, and neither does this.
+//!
+//! Not built: the bend of the grain's shape. A state that has it says so
+//! in [`Effect::fidelity`].
 
 use crate::parts::{Matrix, glide, offset_frames, stereo_gains};
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value, state_version};
 use dsp::biquad::{Biquad64, Coefficients64};
+use dsp::halfband::{MAX_STAGES, Oversampler, WIDEST};
 use std::f64::consts::TAU;
 
 /// The plugin's event 201 name.
@@ -57,6 +64,7 @@ const GLOBALS: usize = 4;
 const EACH: usize = 16;
 /// The i32 the state has, the last of them the oversampling switch.
 const SAVED: usize = GLOBALS + EACH * UNITS + 1;
+const OVERSAMPLING: usize = SAVED - 1;
 /// The parameters a host can move: the last unit has no "to next".
 const PARAMS: usize = GLOBALS + EACH * UNITS - 1;
 
@@ -587,14 +595,28 @@ impl Unit {
     }
 }
 
+/// What the units keep for the length of a block: their gains' glides
+/// (input, output and feedback for each), where each grain is and how
+/// long it has to go, and the block's length at the units' rate.
+#[derive(Debug, Clone, Copy, Default)]
+struct Block {
+    ramps: [([f32; 4], [f32; 4]); UNITS * 3],
+    grain_left: [usize; UNITS],
+    grain_at: [usize; UNITS],
+    len: usize,
+}
+
 /// Fruity Delay Bank. A new one has FL's defaults: the first unit on,
 /// three steps of delay, ping-pong off, half of every echo fed back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DelayBank {
     params: [i32; SAVED],
+    /// The song's rate.
     rate: f32,
     tempo: f32,
     units: [Unit; UNITS],
+    /// The stage up and the stage down (`0x21d8`, `0x21e0`).
+    oversampler: Oversampler,
     /// The plugin's four wheels as gains.
     dry: f32,
     wet: f32,
@@ -614,6 +636,7 @@ impl Default for DelayBank {
             rate: 44_100.0,
             tempo: 140.0,
             units: Default::default(),
+            oversampler: Oversampler::default(),
             dry: 1.0,
             wet: 1.0,
             input: 1.0,
@@ -633,6 +656,18 @@ impl DelayBank {
     /// A unit's parameter.
     fn of(&self, unit: usize, which: usize) -> i32 {
         self.params[GLOBALS + EACH * unit + which]
+    }
+
+    /// How many times the rate is doubled: the state's switch
+    /// (`FUN_006dff00`).
+    fn stages(&self) -> usize {
+        self.params[OVERSAMPLING] as usize
+    }
+
+    /// The rate the units run at, which FL gives its renderer: the song's
+    /// times the oversampling.
+    fn unit_rate(&self) -> f32 {
+        self.rate * (1 << self.stages()) as f32
     }
 
     /// Work out everything the parameters, the switches, the rate and
@@ -657,7 +692,7 @@ impl DelayBank {
             let (time, offset) = (of(TIME), of(OFFSET));
             let wheels = |first: usize| [of(first), of(first + 1), of(first + 2)];
             let (in_wheels, fb_wheels) = (wheels(IN_FILTER), wheels(FB_FILTER));
-            let (input, wet, rate, tempo) = (self.input, self.wet, self.rate, self.tempo);
+            let (input, wet, rate, tempo) = (self.input, self.wet, self.unit_rate(), self.tempo);
             let unit = &mut self.units[at];
             // The renderer's `44100 / SR` (`+0x20`) times `2 pi`.
             let step = 44_100.0 / f64::from(rate) * TAU;
@@ -700,12 +735,102 @@ impl DelayBank {
         }
     }
 
+    /// One frame through the units, `frame` frames into a block of
+    /// `block.len` at the units' rate: the dry part and every unit's
+    /// output.
+    fn frame(
+        &mut self,
+        block: &mut Block,
+        frame: usize,
+        (dry_left, dry_right): (f32, f32),
+    ) -> (f32, f32) {
+        let mut wet = (dry_left * self.dry, dry_right * self.dry);
+        let mut before = (0.0, 0.0);
+        let mut send = 0.0;
+        for (at, unit) in self.units.iter_mut().enumerate() {
+            if !unit.enabled {
+                send = 0.0;
+                continue;
+            }
+            let [input, output, feedback] = [0, 1, 2].map(|k| {
+                let (start, step) = block.ramps[at * 3 + k];
+                std::array::from_fn::<f32, 4, _>(|g| start[g] + step[g] * frame as f32)
+            });
+            let mut x = Matrix::mix(&input, dry_left, dry_right);
+            if send != 0.0 {
+                x.0 += before.0 * send;
+                x.1 += before.1 * send;
+            }
+            // The input filter's place (`+0x358`): none with its mode
+            // at 0, else before the line or after the grain.
+            let in_filter = unit.filters[0][0] != 0;
+            if in_filter && !unit.post {
+                x = unit.bands[0].run(x);
+            }
+            if !unit.line.is_empty() {
+                let size = unit.line.len();
+                let write = (unit.at + unit.delay) % size;
+                unit.line[(write + unit.late[0]) % size][0] += x.0;
+                unit.line[(write + unit.late[1]) % size][1] += x.1;
+                let [out_left, out_right] = unit.line[unit.at];
+                // The feedback filter works on what leaves the line,
+                // after the first echo is taken from it.
+                let mut heard = (out_left, out_right);
+                if unit.filters[1][0] > 0 {
+                    heard = unit.bands[1].run(heard);
+                }
+                let mut back = Matrix::mix(&feedback, heard.0, heard.1);
+                if back.0.abs() < TINY {
+                    back.0 = 0.0;
+                }
+                if back.1.abs() < TINY {
+                    back.1 = 0.0;
+                }
+                x = if unit.first {
+                    (out_left, out_right)
+                } else {
+                    back
+                };
+                unit.line[unit.at] = [0.0; 2];
+                unit.line[write][0] += back.0;
+                unit.line[write][1] += back.1;
+                unit.at = (unit.at + 1) % size;
+                if unit.mode == INVERTED {
+                    x = (x.1, x.0);
+                }
+            }
+            if !unit.grain.is_empty() {
+                if block.grain_left[at] == 0 {
+                    while unit.grain_period <= unit.grain_phase {
+                        unit.grain_phase -= unit.grain_period;
+                    }
+                    let phase = unit.grain_phase.round_ties_even() as usize;
+                    block.grain_at[at] = phase % unit.grain.len();
+                    block.grain_left[at] =
+                        (unit.grain.len() - block.grain_at[at]).min(block.len - frame);
+                    unit.grain_phase += block.grain_left[at] as f64;
+                }
+                let shape = unit.grain[block.grain_at[at]];
+                x = (shape * x.0, shape * x.1);
+                block.grain_at[at] += 1;
+                block.grain_left[at] -= 1;
+            }
+            if in_filter && unit.post {
+                x = unit.bands[0].run(x);
+            }
+            let out = Matrix::mix(&output, x.0, x.1);
+            wet.0 += out.0;
+            wet.1 += out.1;
+            before = x;
+            send = unit.next;
+        }
+        wet
+    }
+
     /// What of the state this does not do, if anything.
     fn missing(&self) -> Option<&'static str> {
         let mut on = self.units.iter().filter(|unit| unit.enabled);
-        if self.params[SAVED - 1] > 0 {
-            Some("Delay Bank's 2x oversampling is not built")
-        } else if on.any(|u| !u.grain.is_empty() && u.grain_shape != 0) {
+        if on.any(|u| !u.grain.is_empty() && u.grain_shape != 0) {
             Some("Delay Bank's grain shape is not built: the grain is a raised cosine")
         } else {
             None
@@ -730,15 +855,22 @@ impl Effect for DelayBank {
         let mut params = [0; SAVED];
         for (param, word) in bytes[4..SWITCHES_AT].as_chunks::<4>().0.iter().enumerate() {
             let mut value = i32::from_le_bytes(*word);
-            if param < SAVED - 1 {
+            if param < OVERSAMPLING {
                 let unit = param >= GLOBALS && (param - GLOBALS) % EACH == TIME;
                 if unit && version < 16 {
                     value = value.saturating_mul(10);
                 }
-                let (min, max) = range(param);
-                if value < min || value > max {
-                    return Err(StateError::Range { param, value });
-                }
+            }
+            // FL takes the switch unchecked as the oversamplers' stage
+            // count (`FUN_006dff00`); its button sets 0 or 1. Past the
+            // stages the half band has room for, the state is refused.
+            let (min, max) = if param == OVERSAMPLING {
+                (0, MAX_STAGES as i32)
+            } else {
+                range(param)
+            };
+            if value < min || value > max {
+                return Err(StateError::Range { param, value });
             }
             params[param] = value;
         }
@@ -755,8 +887,10 @@ impl Effect for DelayBank {
             unit.first = bytes[30] != 0;
             unit.beats = bytes[31] != 0;
         }
-        // FL sets the units up, flushes them, and only then takes the
-        // parameters: the gains glide to them from where they were.
+        // FL builds the oversampler again (`FUN_006dff00`), sets the units
+        // up, flushes them, and only then takes the parameters: the gains
+        // glide to them from where they were.
+        self.oversampler.reset();
         for unit in &mut self.units {
             unit.flush();
         }
@@ -764,11 +898,13 @@ impl Effect for DelayBank {
         Ok(())
     }
 
-    /// The delay times are worked out for the rate. A rate that is not a
-    /// number above 0 is not taken.
+    /// The delay times are worked out for the rate, and the oversampler
+    /// is built again (`FUN_006dff00`). A rate that is not a number above
+    /// 0 is not taken.
     fn set_sample_rate(&mut self, hz: f32) {
         if hz.is_finite() && hz > 0.0 {
             self.rate = hz;
+            self.oversampler.reset();
             self.set();
             for unit in &mut self.units {
                 unit.flush();
@@ -784,112 +920,53 @@ impl Effect for DelayBank {
         }
     }
 
+    /// `Eff_Render` (`0x006e1380`): up when the oversampling is on, the
+    /// units, and down.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         if len == 0 {
             return;
         }
-        // The most a gain moves a frame, as FL's renderer has it.
-        let cap = 0.001 * 44_100.0 / self.rate;
-        let mut ramps = [([0.0; 4], [0.0; 4]); UNITS * 3];
-        let mut grain_left = [0usize; UNITS];
-        let mut grain_at = [0usize; UNITS];
+        let stages = self.stages();
+        // The units see a block `2^stages` times as long, and the most a
+        // gain moves a frame is for their rate, as FL's renderer has it.
+        let mut block = Block {
+            len: len << stages,
+            ..Block::default()
+        };
+        let cap = 0.001 * 44_100.0 / self.unit_rate();
         for at in 0..UNITS {
             if !self.units[at].enabled {
                 continue;
             }
             let feedback = self.feedback_gains(at);
             let unit = &mut self.units[at];
-            ramps[at * 3] = unit.input.ramp(cap, len);
-            ramps[at * 3 + 1] = unit.output.ramp(cap, len);
+            block.ramps[at * 3] = unit.input.ramp(cap, block.len);
+            block.ramps[at * 3 + 1] = unit.output.ramp(cap, block.len);
             if !unit.line.is_empty() {
                 unit.fb_target = feedback;
-                ramps[at * 3 + 2] = ramp(&mut unit.fb_current, feedback, cap, len);
+                block.ramps[at * 3 + 2] = ramp(&mut unit.fb_current, feedback, cap, block.len);
             }
         }
 
-        for (frame, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
-            let (dry_left, dry_right) = (*l, *r);
-            let mut wet = (dry_left * self.dry, dry_right * self.dry);
-            let mut before = (0.0, 0.0);
-            let mut send = 0.0;
-            for (at, unit) in self.units.iter_mut().enumerate() {
-                if !unit.enabled {
-                    send = 0.0;
-                    continue;
-                }
-                let [input, output, feedback] = [0, 1, 2].map(|k| {
-                    let (start, step) = ramps[at * 3 + k];
-                    std::array::from_fn::<f32, 4, _>(|g| start[g] + step[g] * frame as f32)
-                });
-                let mut x = Matrix::mix(&input, dry_left, dry_right);
-                if send != 0.0 {
-                    x.0 += before.0 * send;
-                    x.1 += before.1 * send;
-                }
-                // The input filter's place (`+0x358`): none with its mode
-                // at 0, else before the line or after the grain.
-                let in_filter = unit.filters[0][0] != 0;
-                if in_filter && !unit.post {
-                    x = unit.bands[0].run(x);
-                }
-                if !unit.line.is_empty() {
-                    let size = unit.line.len();
-                    let write = (unit.at + unit.delay) % size;
-                    unit.line[(write + unit.late[0]) % size][0] += x.0;
-                    unit.line[(write + unit.late[1]) % size][1] += x.1;
-                    let [out_left, out_right] = unit.line[unit.at];
-                    // The feedback filter works on what leaves the line,
-                    // after the first echo is taken from it.
-                    let mut heard = (out_left, out_right);
-                    if unit.filters[1][0] > 0 {
-                        heard = unit.bands[1].run(heard);
-                    }
-                    let mut back = Matrix::mix(&feedback, heard.0, heard.1);
-                    if back.0.abs() < TINY {
-                        back.0 = 0.0;
-                    }
-                    if back.1.abs() < TINY {
-                        back.1 = 0.0;
-                    }
-                    x = if unit.first {
-                        (out_left, out_right)
-                    } else {
-                        back
-                    };
-                    unit.line[unit.at] = [0.0; 2];
-                    unit.line[write][0] += back.0;
-                    unit.line[write][1] += back.1;
-                    unit.at = (unit.at + 1) % size;
-                    if unit.mode == INVERTED {
-                        x = (x.1, x.0);
-                    }
-                }
-                if !unit.grain.is_empty() {
-                    if grain_left[at] == 0 {
-                        while unit.grain_period <= unit.grain_phase {
-                            unit.grain_phase -= unit.grain_period;
-                        }
-                        let phase = unit.grain_phase.round_ties_even() as usize;
-                        grain_at[at] = phase % unit.grain.len();
-                        grain_left[at] = (unit.grain.len() - grain_at[at]).min(len - frame);
-                        unit.grain_phase += grain_left[at] as f64;
-                    }
-                    let shape = unit.grain[grain_at[at]];
-                    x = (shape * x.0, shape * x.1);
-                    grain_at[at] += 1;
-                    grain_left[at] -= 1;
-                }
-                if in_filter && unit.post {
-                    x = unit.bands[0].run(x);
-                }
-                let out = Matrix::mix(&output, x.0, x.1);
-                wet.0 += out.0;
-                wet.1 += out.1;
-                before = x;
-                send = unit.next;
+        let (left, right) = (&mut left[..len], &mut right[..len]);
+        if stages == 0 {
+            for (frame, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                (*l, *r) = self.frame(&mut block, frame, (*l, *r));
             }
-            (*l, *r) = wet;
+        } else {
+            let mut oversampler = self.oversampler;
+            for (n, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                let mut wide = [[0.0; 2]; WIDEST];
+                oversampler.up(stages, [*l, *r], &mut wide);
+                for (k, frame) in wide[..1 << stages].iter_mut().enumerate() {
+                    let (l, r) = self.frame(&mut block, (n << stages) + k, (frame[0], frame[1]));
+                    *frame = [l, r];
+                }
+                [*l, *r] = oversampler.down(stages, &mut wide);
+            }
+            oversampler.flush();
+            self.oversampler = oversampler;
         }
         for unit in &mut self.units {
             for band in &mut unit.bands {
@@ -920,7 +997,8 @@ impl Effect for DelayBank {
     }
 
     /// What FL's flush does: the lines empty, the grains at their start,
-    /// and every gain where the last block worked it out to be.
+    /// and every gain where the last block worked it out to be. The
+    /// oversampler keeps what it has (`FUN_006dfe30` leaves it).
     fn reset(&mut self) {
         for unit in &mut self.units {
             unit.flush();
@@ -937,6 +1015,7 @@ impl Effect for DelayBank {
 mod tests {
     use super::*;
     use crate::testing::{presets, state};
+    use dsp::halfband::HalfBand;
 
     /// What a unit's 32 bytes are: its switches.
     #[derive(Clone, Copy)]
@@ -1198,10 +1277,119 @@ mod tests {
         let filtered = Switches { in_filter: 4, ..ON };
         let mut plugin = with(&[filtered], &[]);
         assert_eq!(plugin.fidelity(), Fidelity::Exact);
+        // So is the oversampling, the state's last i32: a stage count,
+        // which FL's button sets to 0 or 1 and its loader takes as it is.
         let mut bytes = saved(&[ON], &[]);
         bytes[SWITCHES_AT - 4] = 1;
         plugin.set_state(&bytes).unwrap();
-        assert!(matches!(plugin.fidelity(), Fidelity::Approximate(text) if text.contains("2x")));
+        assert_eq!((plugin.stages(), plugin.fidelity()), (1, Fidelity::Exact));
+        bytes[SWITCHES_AT - 4] = 2;
+        plugin.set_state(&bytes).unwrap();
+        assert_eq!((plugin.stages(), plugin.fidelity()), (2, Fidelity::Exact));
+        assert_eq!(plugin.unit_rate(), 4.0 * plugin.rate);
+        // The grain's bend is not.
+        let shaped = Switches { grain: 2, ..ON };
+        let mut bytes = saved(&[shaped], &[]);
+        bytes[SWITCHES_AT + 25..SWITCHES_AT + 29].copy_from_slice(&64i32.to_le_bytes());
+        plugin.set_state(&bytes).unwrap();
+        assert!(matches!(plugin.fidelity(), Fidelity::Approximate(text) if text.contains("grain")));
+    }
+
+    /// A plugin at `hz` with this state, not run yet.
+    fn fresh(hz: f32, units: &[Switches], moves: &[(usize, i32)]) -> DelayBank {
+        let mut plugin = DelayBank::default();
+        plugin.set_sample_rate(hz);
+        plugin.set_state(&saved(units, moves)).unwrap();
+        plugin
+    }
+
+    #[test]
+    fn oversampled_the_units_run_at_twice_the_rate_between_the_half_bands() {
+        // The plugin at 44.1 kHz with the oversampling on is the input up
+        // through FL's half band, the plugin at 88.2 kHz without it on
+        // blocks twice as long, and the half band down, to the bit: the
+        // units' times, filters, grains and glides are worked out for the
+        // doubled rate.
+        let filtered = Switches {
+            in_filter: 1,
+            grain: 3,
+            first: false,
+            mode: 3,
+            ..ON
+        };
+        let units = [filtered, ON];
+        let moves = [
+            (at(0, IN_FILTER), 20_000),
+            (at(0, OFFSET), 100),
+            (at(0, NEXT), 90),
+            (at(1, TIME), 700),
+        ];
+        let mut both = moves.to_vec();
+        both.push((OVERSAMPLING, 1));
+        let mut over = fresh(44_100.0, &units, &both);
+        let mut plain = fresh(88_200.0, &units, &moves);
+        assert_eq!(over.latency(), 0);
+        assert_eq!(over.units[0].delay, plain.units[0].delay);
+        assert_eq!(over.units[0].grain, plain.units[0].grain);
+        assert_eq!(over.units[0].late, plain.units[0].late);
+        let input: Vec<f32> = (0..20_000)
+            .map(|n| ((n * 7919 % 1009) as f32 / 1009.0 - 0.5) * 0.8)
+            .collect();
+        let (mut up, mut down) = ([HalfBand::default(); 2], [HalfBand::default(); 2]);
+        for block in input.chunks(500) {
+            let sides = [block.to_vec(), block.iter().map(|x| -x).collect::<Vec<_>>()];
+            let [mut left, mut right] = sides.clone();
+            over.process(&mut left, &mut right);
+            let mut wide = [vec![0.0; 1000], vec![0.0; 1000]];
+            for (side, x) in sides.iter().enumerate() {
+                up[side].up(x, &mut wide[side]);
+                up[side].flush();
+            }
+            let [wl, wr] = &mut wide;
+            plain.process(wl, wr);
+            for (side, got) in [left, right].iter().enumerate() {
+                let mut want = vec![0.0; 500];
+                down[side].down(&wide[side], &mut want);
+                down[side].flush();
+                assert_eq!(*got, want, "side {side}");
+            }
+        }
+    }
+
+    #[test]
+    fn oversampled_an_echo_is_where_and_as_loud_as_it_is_without() {
+        // One echo of a click after 0.375 s, the first one left alone.
+        // At twice the rate the line is twice as long; out of the half
+        // bands the echo is the click again, under three frames late,
+        // with the dry click as late.
+        let moves = [(at(0, FB_VOL), 0), (OVERSAMPLING, 1)];
+        let mut plugin = fresh(44_100.0, &[ON], &moves);
+        assert_eq!(plugin.units[0].delay, 33_075);
+        assert_eq!(fresh(44_100.0, &[ON], &moves[..1]).units[0].delay, 16_538);
+        // The units' gains come up from 0 over 23 ms first.
+        for _ in 0..4 {
+            plugin.process(&mut [0.0; 512], &mut [0.0; 512]);
+        }
+        let mut left = vec![0.0; 20_000];
+        let mut right = vec![0.0; 20_000];
+        left[0] = 1.0;
+        right[0] = 1.0;
+        for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+            plugin.process(l, r);
+        }
+        let dry: f32 = left[..100].iter().sum();
+        let echo: f32 = left[16_400..16_700].iter().sum();
+        assert!((dry - 1.0).abs() < 1e-3, "{dry}");
+        assert!((echo - 1.0).abs() < 1e-3, "{echo}");
+        let peak = |range: std::ops::Range<usize>| {
+            range
+                .max_by(|a, b| left[*a].abs().total_cmp(&left[*b].abs()))
+                .unwrap()
+        };
+        assert!((1..4).contains(&peak(0..100)), "{}", peak(0..100));
+        let at = peak(16_400..16_700);
+        assert!((16_538..16_542).contains(&at), "{at}");
+        assert!(right == left);
     }
 
     /// The gain of coefficients at `turns` a sample.
@@ -1359,6 +1547,17 @@ mod tests {
                 value: 513
             })
         );
+        // The oversampling takes as many stages as the half band has.
+        for value in [-1, 5] {
+            let wrong = saved(&[ON], &[(OVERSAMPLING, value)]);
+            assert_eq!(
+                plugin.set_state(&wrong),
+                Err(StateError::Range {
+                    param: OVERSAMPLING,
+                    value
+                })
+            );
+        }
         // A wheel moves inside its range, and the last unit's "to next"
         // is no parameter.
         plugin.set_param(at(0, TIME), 9000.0);

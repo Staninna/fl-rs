@@ -108,7 +108,7 @@ put them.
   each, buttons and three knobs. Their links, most through formulas like
   `1-Input*0.8-0.2`, set parameters of the effects in slot 9 of the
   template's inserts and two of the master's; one or two set an insert's
-  stereo separation (control 8130), which the engine does not play.
+  stereo separation (control 8130), which the engine plays too.
 - `nucleon - Fruity Delay 3` and `nucleon - Transient Processor`: one
   button on parameter 0 at 1, linked to 14 slots' mix and to 6 effects'
   parameter 8.

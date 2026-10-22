@@ -988,7 +988,10 @@ pub struct Vocodex {
     mod_level: Ramp,
     car_level: Ramp,
     noise: f32,
+    /// The noise generator's seed between blocks (`+0x458`), and its run
+    /// in the block being played.
     seed: u32,
+    rand: IppRand,
     /// Frames of silence after which the plugin sleeps, `None` for never,
     /// and the count down to it.
     sleep_after: Option<i64>,
@@ -1018,7 +1021,8 @@ impl Default for Vocodex {
             mod_level: Ramp::default(),
             car_level: Ramp::default(),
             noise: 0.0,
-            seed: 0x2545_f491,
+            seed: 0,
+            rand: IppRand::default(),
             sleep_after: None,
             countdown: 0,
             ups: Default::default(),
@@ -1508,14 +1512,10 @@ impl Vocodex {
         // The noise on the carrier.
         let noisy = self.noise != 0.0;
         if noisy {
-            let a = self.noise;
+            // Left and right take turns, as FL's buffer is interleaved.
             for i in 0..n {
                 for side in 0..2 {
-                    self.seed ^= self.seed << 13;
-                    self.seed ^= self.seed >> 17;
-                    self.seed ^= self.seed << 5;
-                    let v = (self.seed as f32 / u32::MAX as f32) * 2.0 - 1.0;
-                    w.noisy[side][i] = v * a;
+                    w.noisy[side][i] = self.rand.next(self.noise);
                 }
             }
             let [l, r] = &mut w.noisy;
@@ -1678,6 +1678,67 @@ fn frames(side: &Sidechain, at: usize, n: usize) -> Option<(&[f32], &[f32])> {
     Some((side.left.get(at..at + n)?, side.right.get(at..at + n)?))
 }
 
+/// IPP's `ippsRandUniform_Direct_32f` in `Shared/dsp_ippv2_x64.dll`
+/// (generic code at `0x1815ed2e0`, the AVX2 one at `0x181645020` puts out
+/// the same numbers): one call's run of numbers from a 32-bit seed.
+///
+/// A call starts three words from the seed by the LCG `x * 69069 +
+/// 0x3c6ef373`: `x[0]` the seed, `x[-1]` the next and `x[-2]` the one
+/// after. Each number is then a subtract-with-borrow step, `x[n] = x[n-2] -
+/// x[n-3] + c` with the borrow `c` -1 to start, which takes 18 off and
+/// borrows when it comes out negative, plus a second LCG on the same
+/// constants from `0x436cbae9`. The sum, as an i32, scales to
+/// `[low, high]`. The call hands back its last `x` as the next seed, so
+/// two calls are not one long run.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct IppRand {
+    /// `x[n-3]`, `x[n-2]` and `x[n-1]`.
+    x: [u32; 3],
+    borrow: u32,
+    lcg: u32,
+}
+
+impl IppRand {
+    const MUL: u32 = 69_069;
+    const ADD: u32 = 0x3c6e_f373;
+    /// `2^-32` and a little more, as the DLL has it (`0x1824116c0`).
+    const SCALE: f64 = f64::from_bits(0x3df0_0000_0000_0007);
+
+    /// A call's run from `seed`.
+    fn new(seed: u32) -> Self {
+        let lcg = |x: u32| x.wrapping_mul(Self::MUL).wrapping_add(Self::ADD);
+        let next = lcg(seed);
+        IppRand {
+            x: [lcg(next), next, seed],
+            borrow: u32::MAX,
+            lcg: 0x436c_bae9,
+        }
+    }
+
+    /// The next number, uniform in `[-amp, amp]`.
+    fn next(&mut self, amp: f32) -> f32 {
+        let [a, b, c] = self.x;
+        let raw = b.wrapping_sub(a).wrapping_add(self.borrow);
+        let negative = (raw as i32) < 0;
+        self.borrow = if negative { u32::MAX } else { 0 };
+        let x = if negative { raw.wrapping_sub(18) } else { raw };
+        self.x = [b, c, x];
+        self.lcg = self.lcg.wrapping_mul(Self::MUL).wrapping_add(Self::ADD);
+        let v = x.wrapping_add(self.lcg) as i32;
+        // FL's (high - low) and (low + high) / 2, the latter 0 here.
+        let (low, high) = (-amp, amp);
+        let scale = f64::from(high - low) * Self::SCALE;
+        let offset = f64::from(low + high) * 0.5;
+        (f64::from(v) * scale + offset) as f32
+    }
+
+    /// The seed the call hands back: its last `x`, the seed itself when it
+    /// drew nothing.
+    fn seed(&self) -> u32 {
+        self.x[2]
+    }
+}
+
 /// `level` with base 3 and the gain envelope's halving: `(3^t - 1) / 2`.
 fn level3(t: f32) -> f32 {
     if t == 1.0 {
@@ -1778,12 +1839,16 @@ impl Effect for Vocodex {
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
+        // FL draws a block's noise in one call, whose run starts again
+        // from the seed the last call handed back.
+        self.rand = IppRand::new(self.seed);
         let mut at = 0;
         while at < len {
             let n = (len - at).min(CHUNK);
             self.chunk(at, &mut left[at..at + n], &mut right[at..at + n]);
             at += n;
         }
+        self.seed = self.rand.seed();
         self.mod_side.clear();
         self.car_side.clear();
     }
@@ -1822,6 +1887,9 @@ impl Effect for Vocodex {
         self.mod_pass.clear();
         self.car_pass.clear();
         self.noise_pass.clear();
+        // FL's reset (`FUN_008537a0`) puts the seed back at 0: on a state,
+        // a flush, a new mode and the slot's switch.
+        self.seed = 0;
         self.ups = Default::default();
         self.countdown = self.sleep_after.unwrap_or(0);
         self.wet.now = self.wet.target;
@@ -1841,8 +1909,6 @@ impl Effect for Vocodex {
             Fidelity::Approximate("band saturation is left out")
         } else if !state.maps.iter().all(Map::straight) {
             Fidelity::Approximate("a curved envelope segment is drawn straight")
-        } else if self.noise != 0.0 {
-            Fidelity::Approximate("the carrier's added noise is another generator's")
         } else {
             Fidelity::Exact
         }
@@ -2115,6 +2181,67 @@ mod tests {
         let mut plugin = Vocodex::default();
         assert_eq!(plugin.set_state(&1i32.to_le_bytes()), Ok(()));
         assert_eq!(plugin.state, State::default());
+    }
+
+    /// One call of the generator: `len` numbers from `seed`, and the seed
+    /// it hands back.
+    fn draw(seed: u32, amp: f32, len: usize) -> (Vec<u32>, u32) {
+        let mut rand = IppRand::new(seed);
+        let run = (0..len).map(|_| rand.next(amp).to_bits()).collect();
+        (run, rand.seed())
+    }
+
+    /// The numbers are the ones `ippsRandUniform_Direct_32f` of FL's
+    /// `dsp_ippv2_x64.dll` put out, its code run as it is, the generic
+    /// variant and the AVX2 one alike.
+    #[test]
+    fn the_noise_is_ipp_s_from_the_same_seed() {
+        let (run, seed) = draw(0, 0.25, 6);
+        let fl = [
+            0xbe7f_82aa,
+            0xbe3d_5bc1,
+            0xbe13_9b3d,
+            0xbd46_4ba7,
+            0xbd96_9522,
+            0x3df6_aea5,
+        ];
+        assert_eq!((run, seed), (fl.to_vec(), 0xb8e2_a088));
+        // An odd count, from the seed the last call handed back.
+        let (run, seed) = draw(seed, 0.25, 3);
+        assert_eq!(run, [0xbe61_448c, 0x3da8_2d2c, 0x3cc6_ed05]);
+        assert_eq!(seed, 0x5b93_a480);
+        let (run, seed) = draw(0x1234_5678, 1.0, 4);
+        let fl = [0x3ebe_1b5f, 0x3e83_047f, 0x3f26_8c70, 0xbf11_4543];
+        assert_eq!((run, seed), (fl.to_vec(), 0x8e60_aa23));
+        let (run, seed) = draw(seed, 1.0, 1024);
+        let fl = [0xbf45_a567, 0x3ef4_ccb2, 0xbda4_ea7c, 0xbe08_e8aa];
+        assert_eq!((&run[1020..], seed), (&fl[..], 0x0d3f_1be6));
+    }
+
+    /// FL draws a block's noise in one call over left and right in turn,
+    /// from the seed the last block handed back, and a reset puts the seed
+    /// back at 0.
+    #[test]
+    fn a_block_draws_its_noise_in_one_call() {
+        let mut plugin = bands_only();
+        plugin.set_param(6, 7600.0);
+        let a = plugin.noise;
+        assert!(a > 0.0);
+        let block = |plugin: &mut Vocodex, len: usize| {
+            let (mut l, mut r) = (vec![0.1; len], vec![0.1; len]);
+            plugin.process(&mut l, &mut r);
+        };
+        block(&mut plugin, 700);
+        let (_, seed) = draw(0, a, 1400);
+        assert_eq!(plugin.seed, seed);
+        block(&mut plugin, 100);
+        assert_eq!(plugin.seed, draw(seed, a, 200).1);
+        plugin.reset();
+        assert_eq!(plugin.seed, 0);
+        // No noise, no call: the seed stays.
+        plugin.set_param(6, 0.0);
+        block(&mut plugin, 100);
+        assert_eq!(plugin.seed, 0);
     }
 
     #[test]

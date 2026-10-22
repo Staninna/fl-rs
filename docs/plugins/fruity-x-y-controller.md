@@ -146,8 +146,8 @@ Three projects use it, 19 instances, 60 links from it:
 
 - Surround mix: 16 pads, "1" to "16", at X and Y 0.5, speed 2048. Each
   links X to its insert's pan, and Y twice through `Tension()` formulas to
-  its insert's sends to inserts 17 and 18, which have no route the engine
-  plays, so 16 links are applied and 32 counted unsupported.
+  its insert's sends to inserts 17 and 18. The engine reads `Tension()`,
+  so all 48 links are applied.
 - Touchscreen: "Low Pass" at (1.0, 0.5) and "High Pass" at (0, 0), speed
   1900, each X and Y to parameters 6 and 7 of the effect next to it on
   its insert (4 links, all applied).

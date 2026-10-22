@@ -2,6 +2,7 @@
 //! on the song's timeline.
 
 use model::{ChannelKind, ClipSettings, ItemSource, Note, Project, Trim};
+use std::collections::BTreeMap;
 
 /// One note placed on the song's timeline.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +54,10 @@ pub(crate) struct Song {
     pub automation: Vec<PlayedAutomation>,
     /// Where the last item ends, in ticks.
     pub end: u64,
+    /// The notes whose pitch an arpeggiator moves as they sound, by their
+    /// place in `notes`: from each tick on, the note is this many cents
+    /// off the pitch it started at ([`crate::arp`]).
+    pub glides: BTreeMap<usize, Vec<(u64, f32)>>,
 }
 
 /// Ticks in one bar. 17 and 18 are read as a time signature, 4/4 when the

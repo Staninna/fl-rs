@@ -27,7 +27,7 @@ When you find work in flight, build on it or pick something else, and tell the u
 
 ## Progress table
 
-The block between the progress markers in `README.md` is generated: `python3 -I tools/progress.py` writes it from `docs/plugins.md`, `docs/parity.md` and the port levels in `crates/plugins/src/port.rs`, and CI reruns it on every push to `main`. A plugin is built when it has a port there; CI fails when `port.rs` and the `docs/plugins.md` rows disagree. Change the docs, then run the script. Run the corpus render through it, `cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render`, and it records the render's counts in `docs/plugins.md`; commit that with the README.
+The block between the progress markers in `README.md` is generated: `python3 -I tools/progress.py` writes it from `docs/plugins.md`, `docs/parity.md`, `docs/event-dictionary.md` and the port levels in `crates/plugins/src/port.rs`, and CI reruns it on every push to `main` that touches one of them. A plugin is built when it has a port there; CI fails when `port.rs` and the `docs/plugins.md` rows disagree. Change the docs, then run the script. Run the corpus render through it, `cargo test --release -p engine --test corpus -- --nocapture 2>&1 | python3 -I tools/progress.py --render`, and it records the render's counts in `docs/plugins.md`; commit that with the README.
 
 ## Screenshots
 

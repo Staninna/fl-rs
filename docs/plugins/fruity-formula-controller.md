@@ -139,8 +139,8 @@ formulas send 0 once after a flush and never again.
 
 Astes - Raubana - LIFE has two, both with empty formulas. The first's
 output drives two parameters of the ZGameEditor Visualizer in slot 8 of
-the master, which the engine does not play (ZGameEditor has no parameters
-here), so its 2 links are counted unsupported.
+the master. They move only its pictures, so the engine plays the 2 links
+by setting nothing.
 
 ## What is not FL's
 

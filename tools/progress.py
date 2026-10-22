@@ -1,5 +1,5 @@
-"""Write the progress block in README.md from docs/plugins.md, docs/parity.md
-and the port levels in crates/plugins/src/port.rs.
+"""Write the progress block in README.md from docs/plugins.md, docs/parity.md,
+docs/event-dictionary.md and the port levels in crates/plugins/src/port.rs.
 
 Usage: python3 -I tools/progress.py
        python3 -I tools/progress.py --check
@@ -194,7 +194,7 @@ PROJECT = re.compile(
     r"^.+: notes \d+ voices \d+ clips \d+ stretched (\d+) unresolved (\d+) unsupported (\d+) "
     r"skipped \d+ automation \d+ unsupported targets (\d+) hosted slots \d+ unhosted (\d+) "
     r"generators \d+ unhosted (\d+) approximated generators (\d+) approximated (\d+) "
-    r".* peak ([\d.]+) "
+    r"unplayed arpeggiators (\d+) .* peak ([\d.]+) "
 )
 
 
