@@ -510,9 +510,8 @@ What runs at the band rate (`FUN_008415c0`, `FUN_00845750`,
 `FUN_008414f0`, with `os = 0x7c0` for bands 0..2 and 1 for MASTER):
 
 - delay `round(t * SR) * os`, detector window `max(delay, 1, round(t *
-  SR) * os)`; the attack, release 2 and release times `t * SR * os`
-  (unrounded in FL; the implementation rounds at the project rate before
-  multiplying, as it did for os 1).
+  SR) * os)`; the attack, release 2 and release times `t * SR * os`,
+  unrounded in FL and in the implementation.
 - the IIR sections at `w = 2 pi f / (SR * os)` (`FUN_00624b50` with the
   renderer `0xcc`).
 - the FIR crossover: `total = (round(SR * os * 0.004) | 1).max(5)` taps,
@@ -664,7 +663,9 @@ own `SaveRestoreState` (`FUN_00836420`, a version 3..7 Maximus loader), then
 are byte for byte the `.fst` states under Maximus's "Soundgoodizer
 presets". The implementation (`soundgoodizer.rs`) carries the four presets
 as parameters and curves and hosts them through `Maximus`. 97 states in
-the corpus projects.
+the corpus projects. The older build's render is not read: it is taken to
+run as `Maximus_x64.dll` does, which is why Soundgoodizer is rated exact
+with gaps where Maximus is exact.
 
 ## Corrections
 

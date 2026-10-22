@@ -1,8 +1,8 @@
 # FL's shared effect classes: TStereoFlanger, TDelay_32FS, TFruityReverb
 
-Harmless, Harmor and Sytrus link the same three Delphi classes for their
-chorus, delay and reverb. Fruity Flangus is `TStereoFlanger` with a plugin
-around it, and Fruity Reeverb 2 drives the reverb engine in
+Harmless, Harmor, Sytrus, Autogun and Ogun link the same three Delphi
+classes for their chorus, delay and reverb. Fruity Flangus is
+`TStereoFlanger` with a plugin around it, and Fruity Reeverb 2 drives the reverb engine in
 `Shared/Reverb_x64.dll` with modulation and early reflections on top.
 `crates/plugins/src/fl_fx.rs` ports the three classes once. Each plugin
 keeps its own front end: the tables or wheel maps, the dry and wet laws,
@@ -169,4 +169,8 @@ reads the tank and the taps.
 |---|---|---|---|
 | Fruity Flangus | the eight wheels, gain 1, its own ramped dry and wet | | |
 | Harmless (`harmless.md` section 8) | table of six wheels, `5^m` dry and wet, host block, sleeps with the voices | 192nds of a beat, one offset side, straight or ping-pong, kernels always run | table of eight settings, L + R, wet `level / 2` |
-| Harmor (`harmor.md` 4.3..4.5) | its REC wheels, signed wet, 384-frame chunks | filtered input or in-loop filters on `span`, three modes, 384-frame chunks | its own maps, smoothed wet |
+| Harmor (`harmor.md` 4.3..4.5) | its REC wheels, signed wet, 384-frame chunks | filtered input or in-loop filters on `span` (the port filters the input either way), three modes, 384-frame chunks | its own maps, smoothed wet |
+
+Sytrus (`sytrus.md` section 9) and Autogun and Ogun (`autogun.md` section
+5) use the three classes from `fl_fx.rs` too, behind front ends their own
+docs map.

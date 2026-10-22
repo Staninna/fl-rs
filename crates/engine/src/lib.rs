@@ -43,11 +43,12 @@
 //!    without.
 //! 5. Automation. An automation clip plays where the playlist has an item
 //!    for its channel, and drives the controls its links bind it to: an
-//!    insert's volume, pan, stereo separation, EQ and send levels, the volume and pan of a sampler
-//!    or audio clip channel, the tempo, and of an effect slot with a hosted
+//!    insert's volume, pan, stereo separation, EQ and send levels, the
+//!    volume, pan, pitch, pan offset and volume multiplier of a sampler or
+//!    audio clip channel, the tempo, and of an effect slot with a hosted
 //!    plugin its switch, its mix level and the plugin's parameters, which
 //!    [`Rendered::slot_targets`] counts. Of a plugin channel with a hosted
-//!    generator it drives the volume, the pan and the generator's
+//!    generator it drives the same five levels and the generator's
 //!    parameters. The controls are read at the
 //!    start of a block and stay as read until the next one: a block starts
 //!    on every 512th sample of the song and where a note or a clip starts.
@@ -56,8 +57,10 @@
 //!    other control a clip is bound to is counted in
 //!    [`Rendered::unsupported_targets`], and so is a clip bound to nothing. [`automation::Curve`] is the curve a
 //!    clip draws.
-//! 6. Controllers. A hosted plugin that is an internal controller, which is
-//!    Fruity Peak Controller, works its outputs out once a tick of the
+//! 6. Controllers. A hosted plugin that is an internal controller (Fruity
+//!    Peak Controller, Formula Controller, X-Y Controller and Control
+//!    Surface in an effect slot, Fruity Envelope Controller and Keyboard
+//!    Controller on a channel) works its outputs out once a tick of the
 //!    song, and the engine ends a block where a tick starts when it hosts
 //!    one. A 227 link from one of its outputs sets its control as the tick
 //!    starts: the output's 0 to 1, through the link's formula when it has
@@ -67,7 +70,7 @@
 //!    are played. [`automation`] has the rest.
 //!
 //! Layer channels are not played, and nor is a plugin channel whose
-//! generator the [`plugins`] crate lacks: none of FL's is built yet, and
+//! generator the [`plugins`] crate lacks:
 //! [`Rendered::unhosted_generators`] names the ones a song asks for. A
 //! generator hears of a note on the first sample of a block, because a
 //! block ends where the next note on or note off of a hosted channel is
@@ -197,7 +200,7 @@ pub struct Rendered {
     /// one for every clip without a link.
     pub unsupported_targets: usize,
     /// The 227 links whose source is an output of a controller plugin the
-    /// engine hosts, in the whole project: Fruity Peak Controller's
+    /// engine hosts, in the whole project, such as Fruity Peak Controller's
     /// Peak + LFO, Peak and LFO.
     pub controller_links: usize,
     /// The ones among them that drive a control the engine plays, which

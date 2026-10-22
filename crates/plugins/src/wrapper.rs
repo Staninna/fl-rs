@@ -9,9 +9,8 @@
 //! `0xf46490`). [`Wrapper`] does the same with the effect [`crate::by_name`]
 //! makes, and is the effect from then on.
 //!
-//! A wrapper that holds any other plugin, a third-party VST or one of FL's
-//! effects not built here, turns its state down, and its slot is passed
-//! through as before.
+//! A wrapper that holds any other plugin, a third-party VST say, turns its
+//! state down, and its slot is passed through as before.
 
 use crate::{Effect, Fidelity, StateError};
 use std::path::Path;
@@ -19,28 +18,29 @@ use std::path::Path;
 /// The plugin's event 201 name.
 pub const NAME: &str = "Fruity Wrapper";
 
-/// The effects FL's loader puts in place of their VST builds: the names a
-/// wrapper's state gives, each the name of the effect itself.
+/// The effects FL's loader puts in place of their VST builds: the name a
+/// wrapper's state gives, and the effect FL makes for it.
 /// `FLEngine_x64.dll` `0xaa2cb0` registers them, kind 0, with the
-/// conversion at `0xaa28e0`. Its 7 Band EQ entries, Newtone and the
-/// Soundfont Player are left out: the first is not built and the others
-/// convert another way.
-pub const NATIVE: [&str; 15] = [
-    "Fruity Balance",
-    "Fruity Bass Boost",
-    "Fruity Blood Overdrive",
-    "Fruity Center",
-    "Fruity Chorus",
-    "Fruity Compressor",
-    "Fruity Delay",
-    "Fruity Fast LP",
-    "Fruity Filter",
-    "Fruity Flanger",
-    "Fruity Free Filter",
-    "Fruity Mute 2",
-    "Fruity Phase Inverter",
-    "Fruity Phaser",
-    "Fruity Reeverb",
+/// conversion at `0xaa28e0`. Newtone and the Soundfont Player are left
+/// out: they are registered under kind 2 and convert another way.
+pub const NATIVE: [(&str, &str); 17] = [
+    ("Fruity 7 Band EQ", "Fruity 7 Band EQ"),
+    ("Fruity 7 Band Equalizer", "Fruity 7 Band EQ"),
+    ("Fruity Balance", "Fruity Balance"),
+    ("Fruity Bass Boost", "Fruity Bass Boost"),
+    ("Fruity Blood Overdrive", "Fruity Blood Overdrive"),
+    ("Fruity Center", "Fruity Center"),
+    ("Fruity Chorus", "Fruity Chorus"),
+    ("Fruity Compressor", "Fruity Compressor"),
+    ("Fruity Delay", "Fruity Delay"),
+    ("Fruity Fast LP", "Fruity Fast LP"),
+    ("Fruity Filter", "Fruity Filter"),
+    ("Fruity Flanger", "Fruity Flanger"),
+    ("Fruity Free Filter", "Fruity Free Filter"),
+    ("Fruity Mute 2", "Fruity Mute 2"),
+    ("Fruity Phase Inverter", "Fruity Phase Inverter"),
+    ("Fruity Phaser", "Fruity Phaser"),
+    ("Fruity Reeverb", "Fruity Reeverb"),
 ];
 
 /// Tags of the wrapper's state, read by `0xa9f840`.
@@ -220,12 +220,11 @@ impl Wrapper {
     }
 
     /// The effect a state puts in place of the VST it names, with that
-    /// VST's parameters. `None` when FL's loader would not swap it, or the
-    /// effect is not built.
+    /// VST's parameters. `None` when FL's loader would not swap it.
     fn swap(&self, wrapped: &Wrapped) -> Option<(&'static str, Box<dyn Effect>)> {
-        let name = NATIVE
+        let (_, name) = NATIVE
             .iter()
-            .find(|native| native.eq_ignore_ascii_case(&wrapped.name))?;
+            .find(|(from, _)| from.eq_ignore_ascii_case(&wrapped.name))?;
         if wrapped.kind != 0 {
             return None;
         }
@@ -511,13 +510,34 @@ mod tests {
     }
 
     #[test]
-    fn what_fl_does_not_swap_or_is_not_built_is_turned_down() {
+    fn both_7_band_names_are_fl_s_7_band_eq() {
+        let defaults = crate::by_name("Fruity 7 Band EQ").unwrap();
+        for name in ["Fruity 7 Band EQ", "Fruity 7 Band Equalizer"] {
+            let mut wrapper = Wrapper::default();
+            wrapper.set_state(&wrapping(name, &[1.0, 0.0])).unwrap();
+            assert_eq!(wrapper.held(), Some("Fruity 7 Band EQ"), "{name}");
+            assert_eq!(wrapper.param_count(), defaults.param_count());
+            // The first two parameters at the top and the bottom of their
+            // range; the rest stay at their defaults.
+            let mut probe = crate::by_name("Fruity 7 Band EQ").unwrap();
+            probe.set_param(0, f32::MAX);
+            probe.set_param(1, f32::MIN);
+            assert_eq!(wrapper.param(0), probe.param(0), "{name}");
+            assert_eq!(wrapper.param(1), probe.param(1), "{name}");
+            for index in 2..defaults.param_count() {
+                assert_eq!(wrapper.param(index), defaults.param(index));
+            }
+        }
+    }
+
+    #[test]
+    fn what_fl_does_not_swap_is_turned_down() {
         let mut wrapper = Wrapper::default();
         let mut refused = |bytes: &[u8]| wrapper.set_state(bytes).unwrap_err();
         assert_eq!(refused(&wrapping("Sylenth1", &[0.5])), StateError::Unhosted);
-        // One of FL's own the loader converts another way, not built here.
-        let eq = wrapping("Fruity 7 Band EQ", &[0.5]);
-        assert_eq!(refused(&eq), StateError::Unhosted);
+        // One of FL's own the loader converts another way.
+        let newtone = wrapping("Newtone", &[0.5]);
+        assert_eq!(refused(&newtone), StateError::Unhosted);
         // Only under kind 0.
         let chunk = chunk(&[0.5]);
         let other = state(&[
@@ -549,7 +569,8 @@ mod tests {
             let file = &saved.file;
             let wrapped = read(&saved.state).unwrap();
             assert_eq!(wrapped.kind, 0, "{file}");
-            assert!(NATIVE.contains(&wrapped.name.as_str()), "{file}");
+            let swapped = NATIVE.iter().any(|(from, _)| *from == wrapped.name);
+            assert!(swapped, "{file}");
             let params = wrapped.params.unwrap();
             let unit = |p: &f32| (0.0..=1.0).contains(p);
             assert!(params.iter().all(unit), "{file}");

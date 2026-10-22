@@ -27,7 +27,8 @@ lower-cased name by `0xaa3780`):
 | Fruity 7 Band EQ, Fruity 7 Band Equalizer | Fruity 7 Band EQ | 0 | `0xaa28e0` |
 | Fruity Balance, Bass Boost, Blood Overdrive, Center, Chorus, Compressor, Delay, Fast LP, Filter, Flanger, Free Filter, Mute 2, Phase Inverter, Phaser, Reeverb | the same name | 0 | `0xaa28e0` |
 
-`wrapper::NATIVE` is the last row.
+`wrapper::NATIVE` is the last two rows, each wrapped name paired with the
+effect FL makes for it.
 
 ## 2. When the loader swaps (`0xaa38d0`, called from `0xf46490`) `asm`
 
@@ -96,15 +97,15 @@ second instance so the first moves only to FL's values.
 
 ## 5. The corpus `corpus`
 
-| where | wrapped effect | uses | hosted |
-|---|---|---:|---|
-| render tests | Balance, Chorus, Compressor, Fast LP, Filter | 5 | yes |
-| render tests | Bass Boost, Center, Flanger, Free Filter, Mute 2, Phase Inverter, Phaser, Reeverb | 8 | no, not built |
-| Treben - Gimbal and Sinan - RawFL | Compressor x11, Chorus x2 | 13 | yes |
-| Treben - Gimbal and Sinan - RawFL | Flanger | 5 | no, not built |
-| JuiceBass - SeamlessR - Menagerie | Fast LP x2, Chorus x3 | 5 | yes |
+| where | wrapped effect | uses |
+|---|---|---:|
+| render tests | Balance, Bass Boost, Center, Chorus, Compressor, Fast LP, Filter, Flanger, Free Filter, Mute 2, Phase Inverter, Phaser, Reeverb | 13 |
+| Treben - Gimbal and Sinan - RawFL | Compressor x11, Chorus x2, Flanger x5 | 18 |
+| JuiceBass - SeamlessR - Menagerie | Fast LP x2, Chorus x3 | 5 |
 
-No channel holds a Fruity Wrapper: the generator row's two projects are
-these two songs' mixer slots. A wrapper that holds a plugin not built here
-or a third-party VST is turned down (`StateError::Unhosted`) and its slot
-is passed through.
+All 36 are hosted. No corpus state wraps the 7 Band EQ, Blood Overdrive or
+Delay; their swaps are built all the same. No channel holds a Fruity
+Wrapper: the generator row's two projects are these two songs' mixer
+slots. A wrapper that holds a third-party VST, or anything else FL's loader
+does not swap, is turned down (`StateError::Unhosted`) and its slot is
+passed through.

@@ -24,7 +24,8 @@
 //! with eight outputs: the three bands, each at its send level, and their
 //! sum at the main levels. The shell plays the sum and adds each band to
 //! the mixer track the state names for it, when it names one. This plays
-//! the sum. No state FL ships names a track.
+//! the sum, and hands each band with a target to [`Effect::outputs`],
+//! which a Patcher routes. No mixer-slot state FL ships names a track.
 //!
 //! A frequency wheel is `30 * 2^(9.0589 p)` Hz, 30 Hz to 16 kHz. A slope is
 //! 6, 12, 18, 24, 36, 48, 72 or 96 dB an octave, and picks a crossover: one

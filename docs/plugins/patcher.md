@@ -165,7 +165,8 @@ graph's order.
   their key range.
 
 Left out, each said in `fidelity()`: "To FL" ports other than the main
-output, MIDI ports, a node's root key and `+0x8c` (1 everywhere).
+output and MIDI ports. Also left out, and not said: a node's root key and
+`+0x8c` (1 everywhere).
 
 In FL's states, the plugins inside that are not built are Fruity X-Y-Z
 Controller (32 nodes) and Distructor (2): their targets keep the values

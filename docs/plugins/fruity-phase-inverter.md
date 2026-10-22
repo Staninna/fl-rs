@@ -2,7 +2,8 @@
 
 Recovered from `Fruity Phase Inverter_x64.dll` (FL Studio 2026, Delphi native
 plugin, image base 0x400000), headless Ghidra. Corpus: no project uses it
-natively; its render test holds it inside a Fruity Wrapper.
+natively; its render test holds it inside a Fruity Wrapper, which swaps
+this plugin in and plays it.
 
 ## How the plugin is wired
 
