@@ -116,6 +116,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::waveshaper::NAME, Port::Gaps),
     (crate::wrapper::NAME, Port::Gaps),
     (crate::xy_controller::NAME, Port::Gaps),
+    (crate::xyz_controller::NAME, Port::Gaps),
     (crate::zgameeditor::NAME, Port::Gaps),
     (crate::wave_traveller::NAME, Port::Gaps),
 ];
