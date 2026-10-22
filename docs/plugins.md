@@ -2,7 +2,7 @@
 
 Phase 4 checklist: every generator and effect FL Studio 26.1.7 ships, whether a render-test project exists for it in `Data/System/Render tests/`, and how many of the 165 shipped projects use it (by event 201 name). Sizes are the x64 DLL. Status column is ours; empty means not started.
 
-Corpus render at `d807176`: 122 of 165 shipped projects have sound with the stock plugins built so far, and 82 of 165 play in full. 1112 of 1147 effect slots on inserts that sound reaches are hosted, and 209 of 227 generator channels with notes play.
+Corpus render at `5640eeb-dirty`: 122 of 165 shipped projects have sound with the stock plugins built so far, and 82 of 165 play in full. 1112 of 1147 effect slots on inserts that sound reaches are hosted, and 209 of 227 generator channels with notes play.
 
 | kind | plugin | DLL KB | render test | used by projects | status |
 |---|---|---:|:---:|---:|---|
@@ -65,7 +65,7 @@ Corpus render at `d807176`: 122 of 165 shipped projects have sound with the stoc
 | Effect | Frequency Shifter | 3786 | yes | 4 | implemented in crates/plugins (the Engine_x64.dll shifters, HQ crossovers, Hilbert pair, ring modulator and tempo sync read in full and summed in its order; the CRT's sinf, sin, tanhf, powf and pow are Rust's; glides from the engine's defaults land when a state loads; tempo sync counts four steps a beat and the song's frames from the host's ticks), docs/plugins/frequency-shifter.md |
 | Effect | Fruity Filter | 3692 | yes | 4 | implemented in crates/plugins, docs/plugins/fruity-filter.md |
 | Effect | Fruity Flanger | 3629 | yes | 4 | implemented in crates/plugins (exact; a new sample rate empties the lines where FL keeps them), docs/plugins/fruity-flanger.md |
-| Generator | Morphine | 1704 |  | 4 | |
+| Generator | Morphine | 1704 |  | 4 | implemented in crates/plugins, exact with gaps (state chunk tree and `.mrp` presets, every parameter law, control-block timing, voices and glide, the four generators and their loops, morph line, envelopes and the twelve-route matrix, the 128-oscillator bank with its Catmull-Rom level curve, and the overdrive, chorus, delay, reverb and equaliser read from the DLL; approximated: the noise layer and the jump on a release inside a release loop; left out: unison and the per-note tuning a host sends; no null test), docs/plugins/morphine.md |
 | Effect | Distructor | 3571 |  | 3 | |
 | Effect | Frequency Splitter | 4284 |  | 3 | implemented in crates/plugins (IIR crossovers and linear phase by the engine convolver exact; bands to other mixer tracks not routed; inside a Patcher each band goes at its send level to the output its target numbers, as Bien Duro's and With You's do, its send levels taken to glide as the main levels do), docs/plugins/frequency-splitter.md |
 | Effect | Fruity Parametric EQ | 3727 | yes | 3 | implemented in crates/plugins, docs/plugins/fruity-parametric-eq.md |

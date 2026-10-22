@@ -9,11 +9,11 @@ A cross-platform DAW in Rust that opens FL Studio projects. It plays them by reb
 <!-- progress:start -->
 | FL's own plugins | done | of | |
 |---|---:|---:|---|
-| Instruments rebuilt | 30 | 51 | `████████████░░░░░░░░` 58% |
+| Instruments rebuilt | 31 | 51 | `████████████░░░░░░░░` 60% |
 | Effects rebuilt | 68 | 90 | `███████████████░░░░░` 75% |
-| Rebuilt and proven to sound identical to FL | 0 | 98 | `░░░░░░░░░░░░░░░░░░░░` 0% |
-| Rebuilt with nothing known to be missing | 41 | 98 | `████████░░░░░░░░░░░░` 41% |
-| Rebuilt and documented | 98 | 98 | `████████████████████` 100% |
+| Rebuilt and proven to sound identical to FL | 0 | 99 | `░░░░░░░░░░░░░░░░░░░░` 0% |
+| Rebuilt with nothing known to be missing | 41 | 99 | `████████░░░░░░░░░░░░` 41% |
+| Rebuilt and documented | 99 | 99 | `████████████████████` 100% |
 
 Rebuilt means read out of FL's plugin binary and written again in Rust. No
 plugin is proven identical yet: that needs a null test against FL's own
@@ -23,7 +23,7 @@ render. The levels are explained under the plugin list below.
 |---|---:|---:|---|
 | Projects that make any sound | 122 | 165 | `███████████████░░░░░` 73% |
 | Projects that play with nothing missing | 82 | 165 | `██████████░░░░░░░░░░` 49% |
-| Plugins they load that are rebuilt | 966 | 1006 | `███████████████████░` 96% |
+| Plugins they load that are rebuilt | 970 | 1006 | `███████████████████░` 96% |
 | Instrument channels with notes that play | 209 | 227 | `██████████████████░░` 92% |
 | Mixer effects that run, on tracks audio reaches | 1112 | 1147 | `███████████████████░` 96% |
 | Projects saved back unchanged, byte for byte | 165 | 165 | `████████████████████` 100% |
@@ -58,9 +58,9 @@ most first:
 
 - **Identical** (0), a null test against FL's own render matches sample for sample: none yet.
 - **Exact** (41), every part read from the binary and rebuilt, nothing known to be missing: Fruity Limiter, Maximus, Fruity Reeverb 2, Fruity Delay 3, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity PanOMatic, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Wave Candy, Fruity NoteBook 2, Fruity Filter, Fruity Flanger, Fruity Parametric EQ, Fruity Phaser, Low Lifter, BassDrum, BooBass, Fruity Fast LP, Fruity Free Filter, Fruity NoteBook, Fruity Bass Boost, Fruity Delay, Fruity HTML NoteBook, Fruity Reeverb, Fruity Squeeze, Fruity dB Meter, Razer Chroma, Fruity 7 Band EQ, Fruity Center, Fruity Mute 2, Fruity Phase Inverter.
-- **Exact with gaps** (52), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Sytrus, Harmless, FPC, Fruity Love Philter, DirectWave, Control Surface, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Patcher effect, Patcher generator, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, ZGameEditor Visualizer, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Emphasis, Vintage Chorus, Fruity Slicer, GMS, Edison, Frequency Shifter, Frequency Splitter, Fruity X-Y Controller, Fruit Kick, Fruity Envelope Controller, Kepler, Fruity Wrapper effect, Drumpad, Fruity Granulizer, Minisynth, Wave Traveller, Emphasizer, Fruity Formula Controller, Fruity Send, Vintage Phaser, BeepMap, Drumaxx, Fruity DrumSynth Live, Fruity Keyboard Controller, FL Slayer, Fruity Slicer 2.
+- **Exact with gaps** (53), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, 3x Osc, Fruity WaveShaper, Fruity Peak Controller, Sytrus, Harmless, FPC, Fruity Love Philter, DirectWave, Control Surface, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Patcher effect, Patcher generator, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, ZGameEditor Visualizer, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Emphasis, Vintage Chorus, Fruity Slicer, GMS, Edison, Frequency Shifter, Morphine, Frequency Splitter, Fruity X-Y Controller, Fruit Kick, Fruity Envelope Controller, Kepler, Fruity Wrapper effect, Drumpad, Fruity Granulizer, Minisynth, Wave Traveller, Emphasizer, Fruity Formula Controller, Fruity Send, Vintage Phaser, BeepMap, Drumaxx, Fruity DrumSynth Live, Fruity Keyboard Controller, FL Slayer, Fruity Slicer 2.
 - **Approximate** (5), the sound itself is an approximation: Harmor, Slicex, Autogun, Ogun, Kepler Exo.
-- **Not rebuilt** (13), with how many of FL's projects use each: FLEX (15), Morphine (4), Distructor (3), MIDI Out (3), Sakura (3), Hardcore (2), Transporter (2), Fruity Wrapper generator (2), Toxic Biohazard (2), Fruity Scratcher (1), Fruity Vocoder (1), Fruity Voltage Controller (1), PoiZone (1). 30 more no project uses.
+- **Not rebuilt** (12), with how many of FL's projects use each: FLEX (15), Distructor (3), MIDI Out (3), Sakura (3), Hardcore (2), Transporter (2), Fruity Wrapper generator (2), Toxic Biohazard (2), Fruity Scratcher (1), Fruity Vocoder (1), Fruity Voltage Controller (1), PoiZone (1). 30 more no project uses.
 
 The levels live in `crates/plugins/src/port.rs`, and CI fails when it and
 `docs/plugins.md` disagree on what is rebuilt.
