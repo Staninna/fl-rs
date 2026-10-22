@@ -277,6 +277,17 @@ A clip or a controller link on one of these is played by setting nothing:
 - A control of an automation clip's LFO when that clip's LFO is off
   (`docs/rec-channel.md`).
 
+## The arpeggiator's time and gate
+
+A clip on a channel's arpeggiator time (0x303, 450..1447) or gate (0x304,
+0..48) is played. The engine lays the arpeggios out from the song before
+it plays (`docs/arpeggiator.md`, `crates/engine/src/arp.rs`) and reads the
+clip at the tick of each step, which is where FL works out the next step
+from the two knobs. Nothing is set while the song plays. A controller link
+to either is counted unsupported, since it moves as the song plays. Corpus:
+`nucleon - Harmless Galactic` channel 14 in its first 10 seconds, and the
+clips on channels 12, 16, 17 and 20 of `Mehran Abbasi - With You` later on.
+
 ## What the corpus render still counts unsupported
 
 The corpus render counts the bindings and controller links of the first
@@ -291,18 +302,15 @@ The corpus render counts the bindings and controller links of the first
   `Sacco - Pumping objects`: the rebuilt Limiter has 18 parameters
   (`docs/plugins/fruity-limiter.md`), and what FL drives with these
   numbers is not read.
-- The arpeggiator's time (0x303) of `nucleon - Harmless Galactic` channel
-  14, whose arpeggiator is on: the engine has no arpeggiator.
 - A clip bound to nothing: `Asher Postman - Future House` channel 34. FL
   drives nothing from it either; the render counts it so that a clip whose
   link did not decode does not pass unseen.
 
-Past the first 10 seconds, the rest of the corpus adds: the arpeggiator
-time and gate of FLEX, 3x Osc and DrumSynth channels (`Mehran Abbasi -
-With You`), mod X on 3x Osc (`Square a Saw - Oxygen` channel 51, see
-`docs/rec-channel.md`), formant (control 15) on an audio clip channel
-(`Mehdi Ebrahiminejad - Never Out` channel 14: the engine stretches
-nothing), the amount of 3x Osc's pitch envelope (0x1408, `Treben - Gimbal
-and Sinan - RawFL`: the instrument envelopes of a channel are not played),
-the switch of a Transporter slot, which the engine does not host, and the
-other plugin parameters of unhosted or parameterless plugins.
+Past the first 10 seconds, the rest of the corpus adds: mod X on 3x Osc
+(`Square a Saw - Oxygen` channel 51, see `docs/rec-channel.md`), formant
+(control 15) on an audio clip channel (`Mehdi Ebrahiminejad - Never Out`
+channel 14: the engine stretches nothing), the amount of 3x Osc's pitch
+envelope (0x1408, `Treben - Gimbal and Sinan - RawFL`: the instrument
+envelopes of a channel are not played), the switch of a Transporter slot,
+which the engine does not host, and the other plugin parameters of
+unhosted or parameterless plugins.

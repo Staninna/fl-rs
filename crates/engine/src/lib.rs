@@ -12,7 +12,11 @@
 //!    song's timeline, each item showing its window of its pattern, and its
 //!    items on audio clip channels become clips. Muted items and muted
 //!    notes add nothing. A project with an empty playlist plays pattern 1
-//!    once. The notes and clips due in a block start their voices in it.
+//!    once. A channel whose arpeggiator is on plays the notes it starts in
+//!    place of its own, laid out tick by tick as FL's host does
+//!    (`docs/arpeggiator.md`); [`Rendered::unplayed_arpeggiators`] counts
+//!    the ones that ask for a part the engine does not build. The notes
+//!    and clips due in a block start their voices in it.
 //! 3. Voices. Every note on a sampler channel plays the channel's sample
 //!    from note-on for the note's length, at a speed set by its key, its
 //!    fine pitch and the channel's pitch, with velocity, channel volume and
@@ -110,6 +114,7 @@
 //! and [`render_with`] takes it. `docs/plugins/host-voice.md` says how FL's
 //! host gets from a note to the levels a voice plays by.
 
+mod arp;
 pub mod automation;
 mod channel_filter;
 mod clock;
@@ -240,6 +245,11 @@ pub struct Rendered {
     /// [`plugins::Fidelity::Approximate`] says of it, and how many channels
     /// each is on.
     pub approximated_generators: BTreeMap<&'static str, usize>,
+    /// The channels with a note inside the render whose arpeggiator is on
+    /// and asks for a part of FL's that the engine does not build, by that
+    /// part, and how many channels ask for each. Their notes play as they
+    /// are, not arpeggiated.
+    pub unplayed_arpeggiators: BTreeMap<&'static str, usize>,
     /// How many frames late the output is when the render starts: what the
     /// plugins on the latest way to the master add up to. Every other way
     /// there is held back to come out with it.
@@ -358,6 +368,7 @@ pub fn render_with_progress(
     let hosted_generators = graph.mixer.generators();
     let unhosted_generators = graph.unhosted_generators.clone();
     let approximated_generators = graph.approximated_generators.clone();
+    let unplayed_arpeggiators = graph.unplayed_arpeggiators.clone();
     let (latency, delayed_inserts) = (graph.mixer.latency(), graph.mixer.delayed());
 
     // A voice for every note and clip, so that none is ever stolen.
@@ -405,6 +416,7 @@ pub fn render_with_progress(
         hosted_generators,
         unhosted_generators,
         approximated_generators,
+        unplayed_arpeggiators,
         latency,
         delayed_inserts,
         unresolved: samples.unresolved(),
