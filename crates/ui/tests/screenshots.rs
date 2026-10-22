@@ -10,6 +10,7 @@
 
 use egui::{Key, vec2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use std::path::PathBuf;
 use std::sync::Arc;
 use ui::UiState;
@@ -37,16 +38,26 @@ fn state(project: model::Project, data: Option<PathBuf>) -> UiState {
 
 /// Draw the shell with `keys` pressed and save it as `name`.png.
 fn shot(name: &str, state: UiState, keys: &[Key]) {
+    shot_after(name, state, |harness| press(harness, keys));
+}
+
+fn press(harness: &mut Harness<'_, Vec<ui::Command>>, keys: &[Key]) {
+    for key in keys {
+        harness.key_press(*key);
+        harness.run();
+    }
+}
+
+/// Draw the shell, let `act` press keys and click, and save it as
+/// `name`.png.
+fn shot_after(name: &str, state: UiState, act: impl FnOnce(&mut Harness<'_, Vec<ui::Command>>)) {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshots");
     let mut harness = Harness::builder()
         .with_size(vec2(1280.0, 720.0))
         .with_theme(egui::Theme::Dark)
         .build_ui_state(move |ui, out| ui::shell(ui, &state, out), Vec::new());
     harness.run();
-    for key in keys {
-        harness.key_press(*key);
-        harness.run();
-    }
+    act(&mut harness);
     harness.run();
     harness
         .render()
@@ -75,7 +86,20 @@ fn screenshots() {
         state(load(), Some(data.clone())),
         &[Key::F6],
     );
-    shot("piano-roll", state(load(), Some(data.clone())), &[Key::F7]);
+    // The piano roll shows the Outro Synth pattern's lead, which the rack
+    // selects first.
+    let outro = UiState {
+        pattern: 8,
+        ..state(load(), Some(data.clone()))
+    };
+    shot_after("piano-roll", outro, |harness| {
+        press(harness, &[Key::F6]);
+        harness.get_by_label("Wavvyy Synth").click();
+        harness.run();
+        press(harness, &[Key::F6, Key::F7]);
+        // The pointer leaves, out of the picture's way.
+        harness.event(egui::Event::PointerGone);
+    });
     shot("browser", state(load(), Some(data.clone())), &[Key::F8]);
     shot("mixer", state(load(), Some(data.clone())), &[Key::F9]);
 }

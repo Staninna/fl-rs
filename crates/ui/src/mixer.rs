@@ -38,14 +38,17 @@ use std::collections::BTreeSet;
 
 /// The width of a strip.
 const STRIP: f32 = 54.0;
-/// The height of the plate with the insert's name.
+/// The height of the plate with the insert's name, and of the line with
+/// its number above it.
 const NAME: f32 = 18.0;
+const NUMBER: f32 = 11.0;
 const KNOB: f32 = 22.0;
 const LED: f32 = 12.0;
 /// The height of the arrow that makes a route.
 const ARROW: f32 = 12.0;
-/// The least and the most a fader is high.
-const FADER: (f32, f32) = (60.0, 180.0);
+/// The least and the most a fader is high. In between it takes the height
+/// of the window, as FL's does.
+const FADER: (f32, f32) = (60.0, 520.0);
 /// The width and the height of a fader's handle.
 const HANDLE: (f32, f32) = (18.0, 8.0);
 /// The width of a meter's bar.
@@ -232,13 +235,17 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
             ui.horizontal_top(|ui| {
-                let fixed = NAME + 2.0 * KNOB + LED + ARROW + 5.0 * GAP + 4.0;
+                let fixed = NUMBER + NAME + 2.0 * KNOB + LED + ARROW + 6.0 * GAP + 4.0;
                 let height = ui
                     .available_height()
                     .clamp(fixed + FADER.0, fixed + FADER.1);
                 for index in shown {
                     let scroll_to = moved && index == strips.selected;
                     strips.strip(ui, index, height, scroll_to, &mut memory, out);
+                    // FL sets the master apart from the inserts.
+                    if index == 0 {
+                        ui.add_space(6.0);
+                    }
                 }
             });
         });
@@ -286,12 +293,19 @@ impl Strips<'_> {
             memory.selected = index;
         }
         let visuals = ui.visuals();
+        // FL lights the selected strip a shade, and keeps the orange for
+        // what is switched on.
         let fill = if selected {
-            visuals.selection.bg_fill.gamma_multiply(0.35)
+            visuals.widgets.inactive.bg_fill
         } else {
             visuals.faint_bg_color
         };
         ui.painter().rect_filled(rect, 2.0, fill);
+        if selected {
+            let edge = Stroke::new(1.0, visuals.selection.bg_fill.gamma_multiply(0.7));
+            ui.painter()
+                .rect_stroke(rect, 2.0, edge, StrokeKind::Inside);
+        }
 
         // An ID of its own, so that a strip's widgets stay the same ones
         // when the strips in front of it scroll out of sight.
@@ -302,6 +316,25 @@ impl Strips<'_> {
         let ui = &mut ui.new_child(builder);
         ui.spacing_mut().item_spacing = vec2(0.0, GAP);
 
+        // FL heads each strip with its number, and the master with an M.
+        let (number, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), NUMBER), Sense::hover());
+        let text = match index {
+            0 => "M".to_owned(),
+            index => index.to_string(),
+        };
+        let ink = if selected {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.painter().text(
+            number.center(),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::monospace(9.0),
+            ink,
+        );
         self.name_plate(ui, index, &name, memory, out);
         let pan = mix.pan_raw();
         let knob = Knob {

@@ -13,7 +13,7 @@ The app as it looks now, playing FL's Future House demo song. `crates/ui/tests/s
 | ![The start screen](docs/screenshots/start.png) | ![The playlist](docs/screenshots/playlist.png) |
 | Start: no window open, and the keys that open each one | Playlist (F5) |
 | ![The channel rack](docs/screenshots/channel-rack.png) | ![The piano roll](docs/screenshots/piano-roll.png) |
-| Channel rack (F6) | Piano roll (F7) |
+| Channel rack (F6) | Piano roll (F7), on the Outro Synth lead |
 | ![The browser](docs/screenshots/browser.png) | ![The mixer](docs/screenshots/mixer.png) |
 | Browser (F8) | Mixer (F9) |
 

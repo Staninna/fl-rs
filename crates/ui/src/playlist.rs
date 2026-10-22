@@ -19,7 +19,7 @@ use egui::{
 };
 use engine::automation::Curve;
 use flp::event::layout::Point;
-use model::{ChannelKind, ItemSource, PlaylistItem, Project, Trim};
+use model::{ChannelKind, ItemSource, Note, PlaylistItem, Project, Trim};
 
 /// The width of the column of track names.
 const NAMES: f32 = 96.0;
@@ -55,6 +55,9 @@ struct Block<'a> {
     /// Of an automation clip: its points, and how many beats into them the
     /// item starts.
     curve: Option<(&'a [Point], f32)>,
+    /// Of a pattern: its notes, and the tick of the pattern the item
+    /// starts at.
+    notes: Option<(&'a [Note], i64)>,
 }
 
 /// The items of the current arrangement that place something.
@@ -73,10 +76,15 @@ fn block<'a>(
     item: &PlaylistItem,
     version: u32,
 ) -> Option<Block<'a>> {
-    let mut curve = None;
+    let (mut curve, mut notes) = (None, None);
     let (colour, name) = match item.source()? {
         ItemSource::Pattern(index) => {
             let pattern = project.pattern(index);
+            let offset = match item.trim() {
+                Some(Trim::Ticks { start, .. }) => i64::from(start),
+                _ => 0,
+            };
+            notes = pattern.map(|pattern| (&pattern.notes[..], offset));
             let name = pattern.and_then(|pattern| pattern.name.clone());
             (
                 pattern.and_then(|pattern| pattern.color),
@@ -113,6 +121,7 @@ fn block<'a>(
         muted: item.muted(),
         selected: item.selected(),
         curve,
+        notes,
     })
 }
 
@@ -323,6 +332,57 @@ fn curve(
     (0..=steps).map(point).collect()
 }
 
+/// The notes of a pattern that an item plays, each as its key and its
+/// first and last tick on the song's timeline. A step, which has no length,
+/// lasts a sixteenth.
+fn notes_in<'a>(
+    notes: &'a [Note],
+    offset: i64,
+    block: &Block,
+    ppq: u16,
+) -> impl Iterator<Item = (i16, i64, i64)> + Clone + 'a {
+    let (start, end) = (block.start as i64, block.end as i64);
+    let step = i64::from((ppq / 4).max(1));
+    let placed = notes
+        .iter()
+        .filter(|note| !note.is_deleted() && !note.muted());
+    placed.filter_map(move |note| {
+        let from = start + i64::from(note.position) - offset;
+        let to = from + i64::from(note.length).max(step);
+        (to > start && from < end).then_some((note.key, from.max(start), to.min(end)))
+    })
+}
+
+/// The notes an item plays, small, in `body`: a line per note, as long as
+/// the note and as high as its key is among the item's keys.
+fn pattern_notes(
+    painter: &egui::Painter,
+    notes: impl Iterator<Item = (i16, i64, i64)> + Clone,
+    lane: Lane,
+    body: Rect,
+    visible: egui::Rangef,
+    ink: Color32,
+) {
+    let keys = notes.clone().map(|(key, _, _)| key);
+    let (low, high) = (keys.clone().min().unwrap_or(0), keys.max().unwrap_or(0));
+    let span = f32::from((high - low).max(1));
+    let room = (body.height() - 3.0).max(0.0);
+    for (key, from, to) in notes {
+        let (left, right) = (lane.x(from as f32), lane.x(to as f32));
+        if right < visible.min || left > visible.max {
+            continue;
+        }
+        let up = if high == low {
+            0.5
+        } else {
+            f32::from(key - low) / span
+        };
+        let y = body.bottom() - 1.5 - up * room;
+        let line = Rect::from_min_max(pos2(left, y - 0.5), pos2(right.max(left + 1.0), y + 0.5));
+        painter.rect_filled(line, 0.0, ink);
+    }
+}
+
 fn edit(edit: Edit) -> Command {
     Command::Edit {
         edit,
@@ -425,9 +485,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                 painter.hline(area.x_range(), top, line);
                 if row >= 12.0 {
                     let track = names.iter().find(|track| track.index as usize == index + 1);
-                    let text = match track.and_then(|track| track.name.as_deref()) {
-                        Some(name) => name.to_owned(),
-                        None => format!("Track {}", index + 1),
+                    // A track with a name of its own reads brighter than
+                    // one with its number.
+                    let (text, ink) = match track.and_then(|track| track.name.as_deref()) {
+                        Some(name) => (name.to_owned(), ui.visuals().text_color()),
+                        None => (format!("Track {}", index + 1), weak),
                     };
                     let at = pos2(name.left() + 4.0, name.center().y);
                     painter.with_clip_rect(name).text(
@@ -435,12 +497,22 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                         Align2::LEFT_CENTER,
                         text,
                         font.clone(),
-                        weak,
+                        ink,
                     );
                 }
             }
             // From here on everything stays right of the track names.
             let painter = ui.painter_at(area.with_min_x(lane.origin));
+            // A faint line on every beat when the beats have the room.
+            let beat = grid.beat as f32 * scale;
+            if step == 1 && beat >= 8.0 {
+                let faint = Stroke::new(1.0, line.color.gamma_multiply(0.45));
+                for (_, x) in lane.bars(grid, 1, area.right()) {
+                    for n in 1..grid.bar / grid.beat {
+                        painter.vline(x + n as f32 * beat, area.y_range(), faint);
+                    }
+                }
+            }
             for (_, x) in lane.bars(grid, step, area.right()) {
                 painter.vline(x, area.y_range(), line);
             }
@@ -464,20 +536,41 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                 } else {
                     (block.colour, text_on(block.colour))
                 };
-                painter.rect_filled(rect, 1.0, fill);
-                let inside = painter.with_clip_rect(rect);
+                // As in FL, a row with the room has the name on a strip of
+                // the item's colour, over a darker body that shows what the
+                // item plays.
+                let titled = row >= 16.0;
+                let title = if titled {
+                    rect.with_max_y(rect.top() + (rect.height() * 0.55).clamp(10.0, 14.0))
+                } else {
+                    rect
+                };
+                let body = rect.with_min_y(title.bottom());
+                let shade = fill.lerp_to_gamma(Color32::BLACK, 0.45);
+                painter.rect_filled(rect, 1.0, shade);
+                painter.rect_filled(title, 1.0, fill);
+                let inside = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+                let visible = inside.clip_rect().x_range();
+                let ink = fill.lerp_to_gamma(Color32::WHITE, 0.25);
                 if let Some((points, offset)) = block.curve
                     && row >= 12.0
                 {
+                    let (rect, ink) = if titled { (body, ink) } else { (rect, text) };
                     let beat = f32::from(project.header.ppq) * scale;
-                    let visible = inside.clip_rect().x_range();
                     let points = curve(&Curve::new(points), offset, rect, beat, visible);
-                    inside.add(Shape::line(points, Stroke::new(1.0, text)));
+                    inside.add(Shape::line(points, Stroke::new(1.0, ink)));
+                }
+                if let Some((notes, offset)) = block.notes
+                    && titled
+                {
+                    let ppq = project.header.ppq;
+                    let placed = notes_in(notes, offset, block, ppq);
+                    pattern_notes(&inside, placed, lane, body, visible, ink);
                 }
                 if row >= 12.0 && rect.width() >= 32.0 {
                     // The name stays in view when the item starts left of it.
                     let left = rect.left().max(lane.origin);
-                    let at = pos2(left + 3.0, rect.center().y);
+                    let at = pos2(left + 3.0, title.center().y);
                     inside.text(at, Align2::LEFT_CENTER, &block.name, font.clone(), text);
                 }
                 if block.selected {

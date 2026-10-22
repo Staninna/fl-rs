@@ -124,7 +124,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     if layout.panels().is_empty() {
         welcome(ui, &mut layout, out);
     } else {
-        let style = DockStyle::from_ui(ui);
+        // The tab in front has the fill of the window under it, so the two
+        // read as one, and the drop markers are FL's orange.
+        let mut style = DockStyle::from_ui(ui);
+        style.active_background = ui.visuals().panel_fill;
+        style.accent = crate::theme::ACCENT;
         let drawn = DockArea::new(id).show(
             ui,
             &layout,

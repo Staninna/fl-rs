@@ -1,3 +1,9 @@
+# Handoff, 2026-10-22, UI look
+
+The windows look more like FL's: drawing only, no change to what a click or a key does. The piano roll has a piano keyboard, darker black-key rows, and notes with an outline, a key name and a shade by velocity (a dark channel colour is lifted). Mixer faders fill the window's height under a strip number. Playlist clips have a title strip over a body that shows a pattern's notes or an automation curve. Steps are drawn as buttons, and the front tab joins its window. The README piano roll picture opens Wavvyy Synth on "Outro Synth" so that it has notes.
+
+Left: audio clips show no waveform (the UI has no sample data), the windows have no inner margin (the playlist tests click at fixed points), and FL's default note colour is not confirmed, so notes keep the channel's colour.
+
 # Handoff, 2026-10-22, later
 
 Branch `claude/next-five`, PR Staninna/fl-rs#2, off `main` at `d0e458d`. fmt, clippy, the dsp, flp, model, plugins and engine lib and fixtures tests with the corpus, and `progress.py --check` pass at the head. Corpus render at `a2e02e4`: 123 of 165 projects have sound and 92 play in full (83 before). 5 reached effect slots pass through (35 before), 10 hosted slots are approximated (24), 28 generator channels are approximated (34), 15 automation targets are unsupported (16) and 0 controller links (8).
