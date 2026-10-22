@@ -101,7 +101,7 @@ impl Graph {
     ) -> Result<Self, Error> {
         let song = sequence::sequence(project);
         let mode = (false, sample_rate, limit, plugin_dir);
-        Self::of(project, &song, mode, curves, sample)
+        Self::of(project, &song, mode, true, curves, sample)
     }
 
     /// The graph of one pattern on its own, as FL's PAT mode plays it. The
@@ -116,15 +116,35 @@ impl Graph {
     ) -> Result<Self, Error> {
         let song = sequence::pattern(project, index);
         let mode = (true, sample_rate, usize::MAX, plugin_dir);
-        Self::of(project, &song, mode, curves, sample)
+        Self::of(project, &song, mode, true, curves, sample)
+    }
+
+    /// [`Graph::pattern`] with every note as it is, for the keys the piano
+    /// roll previews through a channel ([`crate::live`]): the channel's
+    /// arpeggiator, if it is on, is left out. The preview takes each note's
+    /// first voice and plays it for as long as a key is held, which an
+    /// arpeggio's first step would cut short and move.
+    pub fn keys(
+        project: &Project,
+        index: u16,
+        sample_rate: u32,
+        curves: &dyn Curves,
+        plugin_dir: Option<&Path>,
+        sample: impl FnMut(&str) -> Result<Option<Arc<Sample>>, Error>,
+    ) -> Result<Self, Error> {
+        let song = sequence::pattern(project, index);
+        let mode = (true, sample_rate, usize::MAX, plugin_dir);
+        Self::of(project, &song, mode, false, curves, sample)
     }
 
     /// `mode` is whether the song is one pattern, the rate, the limit and
-    /// the plugin directory.
+    /// the plugin directory. `arpeggiate` is whether the channels'
+    /// arpeggiators play.
     fn of(
         project: &Project,
         song: &Song,
         mode: (bool, u32, usize, Option<&Path>),
+        arpeggiate: bool,
         curves: &dyn Curves,
         mut sample: impl FnMut(&str) -> Result<Option<Arc<Sample>>, Error>,
     ) -> Result<Self, Error> {
@@ -132,7 +152,9 @@ impl Graph {
         let (clock, automation) = timeline(project, song, sample_rate, limit)?;
         // The channels whose arpeggiator is on play its notes in place of
         // their own.
-        let arpeggiated = arp::arpeggiate(project, song, &automation);
+        let arpeggiated = arpeggiate
+            .then(|| arp::arpeggiate(project, song, &automation))
+            .flatten();
         let song = arpeggiated.as_ref().map_or(song, |arp| &arp.song);
         let unbuilt = arpeggiated.as_ref().map(|arp| &arp.unbuilt);
         let mut unplayed = BTreeSet::new();
