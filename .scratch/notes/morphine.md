@@ -36,6 +36,12 @@ projects (Africa's Calling, NIGHT TERROR, SHINE, I'll Be Your Madonna).
   account: noise layer, effects, the release-loop jump. Left out: unison
   and per-note tuning.
 
+## Tools
+
+`.scratch/notes/morphine-tools/`: the agent's small scripts (state chunk-tree
+parser `parse.py`, `tree.py`, VMT walk `vt.py`, disassembly `dis.py`).
+Paths in them point at `/root/work/morphine/`.
+
 ## Next
 
 Register it, run `cargo test -p plugins morphine` with `FL_RS_CORPUS`, fix
