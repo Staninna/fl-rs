@@ -392,18 +392,28 @@ impl Effect for WaveShaper {
         let stages = self.oversampling as usize;
         let gains = [self.pre, self.wet, self.dry];
         let (mut oversampler, mut glided) = (self.oversampler, self.glided);
+        let (smooth, glide) = (self.smooth, self.pace);
+        // The gains for the next frame at the curve's rate.
+        let mut next = || {
+            if smooth {
+                for (now, to) in glided.iter_mut().zip(gains) {
+                    *now += (to - *now) * glide;
+                }
+                glided
+            } else {
+                gains
+            }
+        };
         for (l, r) in left[..len].iter_mut().zip(&mut right[..len]) {
+            if stages == 0 {
+                let now = next();
+                [*l, *r] = [*l, *r].map(|x| self.shape(x, now));
+                continue;
+            }
             let mut wide = [[0.0; 2]; WIDEST];
             oversampler.up(stages, [*l, *r], &mut wide);
             for frame in &mut wide[..1 << stages] {
-                let now = if self.smooth {
-                    for (now, to) in glided.iter_mut().zip(gains) {
-                        *now += (to - *now) * self.pace;
-                    }
-                    glided
-                } else {
-                    gains
-                };
+                let now = next();
                 *frame = frame.map(|x| self.shape(x, now));
             }
             [*l, *r] = oversampler.down(stages, &mut wide);

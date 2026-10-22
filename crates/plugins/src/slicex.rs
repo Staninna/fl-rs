@@ -1166,7 +1166,8 @@ impl Slicex {
                 value: STARTS_AT[i],
             });
         }
-        let filter = links[2].filter(|g| filtered(*g));
+        // `links` has the filter's group only when its filter is on.
+        let filter = links[2];
         let sr = self.rate.round() as i32;
         let delay = slice.delay();
         let delay = if delay <= 0.0 {
@@ -1439,7 +1440,12 @@ impl Generator for Slicex {
         Ok(())
     }
 
+    /// A rate that is not a number above 0 is not taken: the control tick
+    /// and the declicker would come out of it as infinities.
     fn set_sample_rate(&mut self, hz: f32) {
+        if !(hz.is_finite() && hz > 0.0) {
+            return;
+        }
         self.rate = hz;
         self.retime();
         self.declicker = Declicker::new(hz);

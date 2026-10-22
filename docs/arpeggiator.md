@@ -74,6 +74,14 @@ rec+0x1d4 = now + gate          the note of this step is let go of here
 rec+0x1d8 = now + step          the next step
 ```
 
+Below PPQ 32 the fastest times cut down to a step of 0 ticks (450 at PPQ 24
+is 6 * 6 / 48). The gate is still a tick, so the next step comes on the
+tick after this one, with `rec+0x1d8` a tick behind it. That tick goes into
+the step note's record as its start, but FL reads a voice's start
+(`+0x270`) only for its length (`FUN_0132af20`), and a step note has no
+end: the note sounds from the tick it is made on. So such an arpeggio plays
+a note of one tick on every tick.
+
 ## 3. The held notes
 
 Each channel keeps 16 records of 0x34 bytes at `chan + 0x398 + 0x34 *

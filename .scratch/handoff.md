@@ -11,6 +11,8 @@ The five pieces were picked from the baseline render's per-project lines, by how
 - An empty sidechain input: FL hands the plugin nil (`FUN_0132baa0`) and Vocodex falls back on its own input, which the engine already did, so the approximation flag is gone (`docs/rec-225.md`). Vocodex's carrier noise is IPP's `ippsRandUniform_Direct_32f` from FL's seed, matched to the DLL's code.
 - A docs audit set every `docs/plugins.md` row, plugin doc and engine doc to what the code builds. It moved BooBass from Exact to Gaps (its own code names a stand-in pan law and an unbuilt HQ path), and added the 7 Band EQ to Fruity Wrapper's swap.
 
+A code review of the PR, fixed before the merge: an arpeggiator on one channel no longer re-sorts the other channels' notes in a pattern played on its own; a step of 0 ticks (PPQ below 32, the fastest time) plays a 1-tick note on every tick, as FL does (`docs/arpeggiator.md` section 2); Delay Bank takes its oversampling word as FL's stage count, up to 4; WaveShaper at 1x skips the oversampler; Slicex ignores a sample rate that is not above 0; and the arpeggiator and slides do less work per tick. A clip on 0x303/0x304 counts as played even with the arpeggiator off, which is right: FL sets the value and nothing sounds, as here, and an unbuilt arpeggiator is counted as unplayed already. Maximus still clears a 16-frame scratch where its 3 stages need 8.
+
 ## Next, by what the render at `a2e02e4` says
 
 - FLEX: 13 silent channels, the biggest gap left. Still waiting on the user: crack `.flexpack` or leave FLEX out.

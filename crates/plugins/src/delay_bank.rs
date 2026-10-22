@@ -52,7 +52,7 @@
 use crate::parts::{Matrix, glide, offset_frames, stereo_gains};
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value, state_version};
 use dsp::biquad::{Biquad64, Coefficients64};
-use dsp::halfband::{Oversampler, WIDEST};
+use dsp::halfband::{MAX_STAGES, Oversampler, WIDEST};
 use std::f64::consts::TAU;
 
 /// The plugin's event 201 name.
@@ -861,8 +861,11 @@ impl Effect for DelayBank {
                     value = value.saturating_mul(10);
                 }
             }
+            // FL takes the switch unchecked as the oversamplers' stage
+            // count (`FUN_006dff00`); its button sets 0 or 1. Past the
+            // stages the half band has room for, the state is refused.
             let (min, max) = if param == OVERSAMPLING {
-                (0, 1)
+                (0, MAX_STAGES as i32)
             } else {
                 range(param)
             };
@@ -1274,13 +1277,16 @@ mod tests {
         let filtered = Switches { in_filter: 4, ..ON };
         let mut plugin = with(&[filtered], &[]);
         assert_eq!(plugin.fidelity(), Fidelity::Exact);
-        // So is the oversampling, the state's last i32, 0 or 1.
+        // So is the oversampling, the state's last i32: a stage count,
+        // which FL's button sets to 0 or 1 and its loader takes as it is.
         let mut bytes = saved(&[ON], &[]);
         bytes[SWITCHES_AT - 4] = 1;
         plugin.set_state(&bytes).unwrap();
         assert_eq!((plugin.stages(), plugin.fidelity()), (1, Fidelity::Exact));
         bytes[SWITCHES_AT - 4] = 2;
-        assert!(plugin.set_state(&bytes).is_err());
+        plugin.set_state(&bytes).unwrap();
+        assert_eq!((plugin.stages(), plugin.fidelity()), (2, Fidelity::Exact));
+        assert_eq!(plugin.unit_rate(), 4.0 * plugin.rate);
         // The grain's bend is not.
         let shaped = Switches { grain: 2, ..ON };
         let mut bytes = saved(&[shaped], &[]);
@@ -1541,6 +1547,17 @@ mod tests {
                 value: 513
             })
         );
+        // The oversampling takes as many stages as the half band has.
+        for value in [-1, 5] {
+            let wrong = saved(&[ON], &[(OVERSAMPLING, value)]);
+            assert_eq!(
+                plugin.set_state(&wrong),
+                Err(StateError::Range {
+                    param: OVERSAMPLING,
+                    value
+                })
+            );
+        }
         // A wheel moves inside its range, and the last unit's "to next"
         // is no parameter.
         plugin.set_param(at(0, TIME), 9000.0);
