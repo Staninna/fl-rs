@@ -77,11 +77,11 @@
 use crate::limiter::{Highest, Mean, coef, gain};
 use crate::linear_phase::{LinearPhase, WINDOWS, fft_size};
 use crate::menvelope::{Class, MEnvelope, Reader};
-use crate::parametric_eq_2::HalfBand;
 use crate::parts::Matrix;
 use crate::{Effect, Fidelity, StateError, knob_value, state_version};
 use dsp::biquad::{Biquad64, Coefficients64};
 use dsp::curve::{Curve, Point};
+use dsp::halfband::{Oversampler, WIDEST};
 use std::f64::consts::{PI, TAU};
 
 /// The plugin's event 201 name.
@@ -571,68 +571,6 @@ impl LinearSetting {
     }
 }
 
-/// FL's oversampler (`0x7cc` up, `0x7d4` down, `FUN_0083b340` and
-/// `FUN_0083b3e0`): `order` stages of the 2x polyphase half band
-/// (`FUN_0083ae10` up, `FUN_0083afe0` down, the 13 doubles at
-/// `0x008bb648`, which are Parametric EQ 2's) up before the crossover and
-/// as many down after the band sum. FL reports no latency for it.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Oversampler {
-    up: [[HalfBand; 2]; MAX_ORDER],
-    down: [[HalfBand; 2]; MAX_ORDER],
-}
-
-/// Frames at the highest band rate a frame at the project rate makes.
-const WIDEST: usize = 1 << MAX_ORDER;
-
-impl Oversampler {
-    /// One frame up through `order` stages into `wide`, `1 << order`
-    /// frames in time order.
-    fn up(&mut self, order: usize, frame: [f32; 2], wide: &mut [[f32; 2]; WIDEST]) {
-        wide[0] = frame;
-        let mut scratch = [[0.0f32; 2]; WIDEST];
-        for (stage, sides) in self.up[..order].iter_mut().enumerate() {
-            let n = 1 << stage;
-            for (i, frame) in wide[..n].iter().enumerate() {
-                let [l0, l1] = sides[0].up_one(frame[0]);
-                let [r0, r1] = sides[1].up_one(frame[1]);
-                scratch[2 * i] = [l0, r0];
-                scratch[2 * i + 1] = [l1, r1];
-            }
-            wide[..2 * n].copy_from_slice(&scratch[..2 * n]);
-        }
-    }
-
-    /// The `1 << order` frames of `wide` down through `order` stages to one.
-    fn down(&mut self, order: usize, wide: &mut [[f32; 2]; WIDEST]) -> [f32; 2] {
-        for (stage, sides) in self.down[..order].iter_mut().enumerate() {
-            let n = 1 << (order - stage - 1);
-            for i in 0..n {
-                let (even, odd) = (wide[2 * i], wide[2 * i + 1]);
-                wide[i] = [
-                    sides[0].down_one([even[0], odd[0]]),
-                    sides[1].down_one([even[1], odd[1]]),
-                ];
-            }
-        }
-        wide[0]
-    }
-
-    /// FL's denormal flush after each block.
-    fn end_block(&mut self) {
-        for side in self.up.as_flattened_mut().iter_mut() {
-            side.flush();
-        }
-        for side in self.down.as_flattened_mut().iter_mut() {
-            side.flush();
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Oversampler::default();
-    }
-}
-
 /// A finite impulse response on a stereo signal, with a history a channel.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Fir {
@@ -935,7 +873,12 @@ pub struct Maximus {
     /// The low cut's four sections, when it is on.
     low_cut: Vec<Section>,
     low_cut_on: bool,
-    /// The halves that take the three bands to the band rate and back.
+    /// The halves that take the three bands to the band rate and back:
+    /// FL's oversampler (`0x7cc` up, `0x7d4` down, `FUN_0083b340` and
+    /// `FUN_0083b3e0`): `order` stages of the 2x polyphase half band
+    /// (`FUN_0083ae10` up, `FUN_0083afe0` down, the 13 doubles at
+    /// `0x008bb648`, which are Parametric EQ 2's) up before the crossover
+    /// and as many down after the band sum. FL reports no latency for it.
     oversampler: Oversampler,
     /// The linear-phase crossover: one engine context a band (`0x834`),
     /// the inputs the magnitudes were last asked for with, which bands
@@ -1782,7 +1725,7 @@ impl Effect for Maximus {
         for band in &mut self.bands {
             band.end_block();
         }
-        self.oversampler.end_block();
+        self.oversampler.flush_subnormal();
         let sections = (self.low.iter_mut())
             .chain(&mut self.mid_high)
             .chain(&mut self.mid_low)
@@ -1869,6 +1812,7 @@ impl Effect for Maximus {
 mod tests {
     use super::*;
     use crate::testing::{self, presets, state};
+    use dsp::halfband::HalfBand;
 
     const HZ: f64 = 48_000.0;
 
