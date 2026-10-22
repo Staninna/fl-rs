@@ -210,6 +210,19 @@ impl Graph {
             slides.note(usize::from(channel.index), events.len(), note, done);
             events.push(Event { start, voice });
         }
+        // A channel whose plugin drives a link is hosted whether a note
+        // reaches it or not.
+        for index in automation.controller_channels() {
+            let Some(channel) = project.channel(index) else {
+                continue;
+            };
+            let timing = (sample_rate, slowest, project.header.ppq);
+            let adjusts = (
+                voice::adjust(project, channel),
+                voice::pan_offset(project, channel),
+            );
+            rack.place(channel, target_insert(channel), timing, adjusts, curves);
+        }
         // A voice that slides plays at the speed each step of its slides
         // takes it to, from where the step falls in it.
         let mut steps = slides.steps(&clock);
