@@ -221,7 +221,7 @@ impl Pattern {
         }
     }
 
-    fn placed_note(&mut self, note: usize) -> Option<&mut layout::Note> {
+    pub(crate) fn placed_note(&mut self, note: usize) -> Option<&mut layout::Note> {
         self.notes.get_mut(note).filter(|note| !note.is_deleted())
     }
 
@@ -244,7 +244,7 @@ impl Pattern {
     /// leave the loader with two lists, and the notes of the raw one are
     /// not in [`Pattern::notes`] to keep. A pattern without a 65 in its
     /// `order` was not read from a file, and has no place for a 224.
-    fn writes_notes(&mut self) -> bool {
+    pub(crate) fn writes_notes(&mut self) -> bool {
         let notes = Id::PatternNotes;
         let has = |item: &Item| match item {
             Item::Field(id) => (*id == notes).then_some(true),

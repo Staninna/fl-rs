@@ -184,7 +184,24 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
                 });
             }
         }
+        Edit::AddNotes {
+            channel,
+            length,
+            ref notes,
+        } => {
+            if project.channel(channel).is_some() && !notes.is_empty() {
+                let pattern = project.pattern_to_edit(pattern);
+                pattern.add_notes(channel, length, notes);
+            }
+        }
         Edit::DeleteNotes { .. }
+        | Edit::SliceNotes { .. }
+        | Edit::GlueNotes { .. }
+        | Edit::QuantizeNotes { .. }
+        | Edit::ChopNotes { .. }
+        | Edit::ArpeggiateNotes { .. }
+        | Edit::StrumNotes { .. }
+        | Edit::SnapNotesToScale { .. }
         | Edit::MoveNotes { .. }
         | Edit::ResizeNotes { .. }
         | Edit::SetNotesMuted { .. }
@@ -265,6 +282,13 @@ fn edit_notes(pattern: &mut Pattern, edit: &Edit) {
         Edit::SetNotesMuted { ids, muted } => pattern.set_notes_muted(ids, *muted),
         Edit::SetNoteField { id, field, value } => pattern.set_note_field(*id, *field, *value),
         Edit::SelectNotes { ids, add } => pattern.select_notes(ids, *add),
+        Edit::SliceNotes { ids, at } => pattern.slice_notes(ids, *at),
+        Edit::GlueNotes { ids } => pattern.glue_notes(ids),
+        Edit::QuantizeNotes { ids, step, lengths } => pattern.quantize_notes(ids, *step, *lengths),
+        Edit::ChopNotes { ids, step } => pattern.chop_notes(ids, *step),
+        Edit::ArpeggiateNotes { ids, step } => pattern.arpeggiate_notes(ids, *step),
+        Edit::StrumNotes { ids, delay } => pattern.strum_notes(ids, *delay),
+        Edit::SnapNotesToScale { ids, keys } => pattern.snap_notes_to_scale(ids, *keys),
         _ => {}
     }
 }
@@ -434,6 +458,8 @@ pub struct App {
     looping: bool,
     /// The pattern that plays in pattern mode, by its index.
     pattern: u16,
+    /// The ticks that pattern plays round, when not the whole of it.
+    loop_range: Option<(Ticks, Ticks)>,
     peaks: (f32, f32),
     /// The peak of every insert, by the loader's number. Empty while no
     /// stream is open.
@@ -482,6 +508,7 @@ impl App {
             song_mode: true,
             looping: false,
             pattern: 1,
+            loop_range: None,
             peaks: (0.0, 0.0),
             insert_peaks: Vec::new(),
             error: None,
@@ -578,6 +605,7 @@ impl App {
             song_mode: self.song_mode,
             looping: self.looping,
             pattern: self.pattern,
+            loop_range: self.loop_range,
             data_root: self.sample_root.clone(),
             project_dir: self.path.as_deref().and_then(Path::parent).map(|folder| {
                 // A file named without a folder is in the current one.
@@ -609,6 +637,13 @@ impl App {
             Command::Play => self.play(),
             Command::Stop => self.stop(),
             Command::Seek(ticks) => self.seek(ticks),
+            Command::SetLoopRange(range) => self.set_loop_range(range),
+            Command::NoteOn {
+                channel,
+                key,
+                velocity,
+            } => self.note(|transport| transport.note_on(channel, key, velocity)),
+            Command::NoteOff { key } => self.note(|transport| transport.note_off(key)),
             Command::ToggleSongMode => self.set_mode(!self.song_mode, self.looping, self.pattern),
             Command::ToggleLoop => self.set_mode(self.song_mode, !self.looping, self.pattern),
             Command::SelectPattern(index) => self.set_mode(self.song_mode, self.looping, index),
@@ -741,7 +776,8 @@ impl App {
         }
         // A stream opens in song mode on pattern 1 and does not loop. The
         // mode and the loop stay what the user chose, and the pattern goes
-        // back to 1.
+        // back to 1, the whole of it.
+        self.loop_range = None;
         notices.extend(self.set_mode(self.song_mode, self.looping, 1).err());
         self.saved = Arc::clone(&project);
         self.project = project;
@@ -958,8 +994,34 @@ impl App {
             transport.set_song_mode(song).map_err(failed)?;
             transport.set_loop(looping).map_err(failed)?;
         }
+        // A range is the pattern's it was set on.
+        if pattern != self.pattern && self.loop_range.is_some() {
+            self.set_loop_range(None)?;
+        }
         (self.song_mode, self.looping, self.pattern) = (song, looping, pattern);
         Ok(())
+    }
+
+    /// The ticks the pattern plays round in pattern mode, or with `None`
+    /// the whole of it. A range with no ticks is `None`.
+    fn set_loop_range(&mut self, range: Option<(Ticks, Ticks)>) -> Result<(), String> {
+        let range = range.filter(|(from, to)| from < to);
+        if let Some(transport) = self.transport.as_mut() {
+            transport.set_range(range).map_err(|e| e.to_string())?;
+        }
+        self.loop_range = range;
+        Ok(())
+    }
+
+    /// Send a key of the keyboard to the stream, when there is one.
+    fn note(
+        &mut self,
+        send: impl FnOnce(&mut Transport) -> Result<(), engine::Error>,
+    ) -> Result<(), String> {
+        match self.transport.as_mut() {
+            Some(transport) => send(transport).map_err(|e| format!("the note does not play: {e}")),
+            None => Ok(()),
+        }
     }
 
     fn render(&mut self, path: PathBuf) -> Result<(), String> {
