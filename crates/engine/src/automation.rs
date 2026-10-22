@@ -35,9 +35,16 @@
 //! follows it where the controls are read. A channel whose filter nothing
 //! drives plays unfiltered, as it did before the filter was built, whatever
 //! its mod X and Y are. On a plugin channel the two are the plugin's, and a
-//! clip on them is not played. The others the engine leaves out, the
-//! arpeggiator, the time stretch, the envelopes and an LFO that is on in a
-//! clip, have no part in it to drive.
+//! clip on them is not played. The others the engine leaves out, the time
+//! stretch, the envelopes and an LFO that is on in a clip, have no part in
+//! it to drive.
+//!
+//! The arpeggiator's time and gate (0x303 and 0x304) are lanes like the
+//! others, but nothing is set from them as the song plays: the engine lays
+//! a channel's arpeggios out from the song before it plays
+//! (`crate::arp`, `docs/arpeggiator.md`), and reads them with
+//! `Automation::arp_at` at the tick of every step. A controller link to
+//! one of them is not played.
 //!
 //! A few controls FL keeps without anything it plays reading them, and a
 //! clip or a link on one is played by setting nothing (`unheard`): the
@@ -91,6 +98,7 @@
 //! set goes through a smoothed setter in FL that the doc has not read, and
 //! is set at once here.
 
+use crate::arp;
 use crate::formula::Formula;
 use crate::generator;
 use crate::levels;
@@ -493,6 +501,14 @@ enum Control {
         channel: u16,
         index: u16,
     },
+    /// The arpeggiator's time (0x303) or, with `gate`, its gate (0x304) of
+    /// the channel whose 64 has this index. The arpeggios are worked out
+    /// from the song before it plays ([`crate::arp`]), which reads them at
+    /// each step, so nothing is set as it plays.
+    Arp {
+        channel: u16,
+        gate: bool,
+    },
 }
 
 /// A level of a channel that a clip can drive.
@@ -673,6 +689,7 @@ fn set(control: Control, raw: f64, levels: &mut [Levels], mixer: &mut Mixer, cur
         Control::ChannelParam { channel, index } => {
             mixer.set_channel_param(channel, usize::from(index), raw as f32);
         }
+        Control::Arp { .. } => {}
     }
 }
 
@@ -900,7 +917,9 @@ impl Automation {
             let target = dispatched(project.link_target(ids.target));
             let driven = formula.as_ref().and_then(|formula| {
                 let (control, _, range) = self.control(project, target, tempo)?;
-                (control != Control::Tempo).then_some((control, range, formula.clone()))
+                // The arpeggios are laid out from the clips alone.
+                let played = !matches!(control, Control::Tempo | Control::Arp { .. });
+                played.then_some((control, range, formula.clone()))
             });
             let Some((control, (low, high), formula)) = driven else {
                 if formula.is_some() && unheard(project, target) {
@@ -1047,6 +1066,16 @@ impl Automation {
                     }
                 };
                 (found, initial, target.raw_range()?)
+            }
+            RecTarget::Channel {
+                index,
+                control: arp @ (control::CHANNEL_ARP_TIME | control::CHANNEL_ARP_GATE),
+            } => {
+                let settings = arp::Settings::of(project, project.channel(index)?);
+                let gate = arp == control::CHANNEL_ARP_GATE;
+                let initial = if gate { settings.gate } else { settings.time };
+                let channel = index;
+                (Control::Arp { channel, gate }, initial, target.raw_range()?)
             }
             RecTarget::Channel { index, control } if control >= PARAM => {
                 let mut plugin = generator::hosted(project.channel(index)?, None, None)?;
@@ -1282,6 +1311,15 @@ impl Automation {
             }
             _ => 0.0,
         }
+    }
+
+    /// The arpeggiator's time or, with `gate`, its gate on this channel at
+    /// `tick`, as the knob has it, when a clip drives it. FL works its
+    /// step out of them on every step ([`crate::arp`]).
+    pub fn arp_at(&self, channel: u16, gate: bool, tick: f64) -> Option<i32> {
+        let arp = Control::Arp { channel, gate };
+        let lane = self.lanes.iter().find(|l| l.control == arp)?;
+        Some(lane.raw_at(&self.clips, tick, self.ppq).round() as i32)
     }
 
     /// The counts over the clips that start before output sample `limit`.
