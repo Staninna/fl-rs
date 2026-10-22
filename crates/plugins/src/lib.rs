@@ -64,16 +64,19 @@ pub mod edison;
 pub mod effector;
 pub mod emphasis;
 mod emphasis_dsp;
+pub mod envelope_controller;
 pub mod equo;
 pub mod fast_dist;
 pub mod fast_lp;
 pub mod filter;
+mod fl_formula;
 pub mod fl_fx;
 pub mod fl_keys;
 pub mod fl_slayer;
 mod fl_slayer_engine;
 pub mod flanger;
 pub mod flangus;
+pub mod formula_controller;
 pub mod fpc;
 pub mod free_filter;
 pub mod frequency_shifter;
@@ -94,6 +97,7 @@ pub mod html_notebook;
 pub mod hyper_chorus;
 pub mod kepler;
 pub mod kepler_exo;
+pub mod keyboard_controller;
 pub mod limiter;
 mod linear_phase;
 pub mod love_philter;
@@ -419,6 +423,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(vintage_phaser::VintagePhaser::default()))
     } else if is(phaser::NAME) {
         Some(Box::new(phaser::Phaser::default()))
+    } else if is(formula_controller::NAME) {
+        Some(Box::new(formula_controller::FormulaController::default()))
     } else if is(free_filter::NAME) {
         Some(Box::new(free_filter::FreeFilter::default()))
     } else if is(bass_boost::NAME) {
@@ -847,6 +853,7 @@ mod tests {
             "fruity wrapper",
             // Counted in their own tests.
             "control surface",
+            "fruity formula controller",
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
             "zgameeditor visualizer",

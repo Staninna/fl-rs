@@ -363,6 +363,11 @@ impl LfoRun {
     pub(crate) fn end(&mut self) {
         self.level.end();
     }
+
+    /// Whether the LFO's level has played out.
+    pub(crate) fn over(&self) -> bool {
+        self.level.over()
+    }
 }
 
 impl Track {
@@ -768,6 +773,11 @@ impl Lfo {
             phase: self.start.wrapping_sub(self.pace(rate) as u32),
             out: 0.0,
         }
+    }
+
+    /// Let a run's level go, as [`Track::release`] does an envelope's.
+    pub(crate) fn release(&self, run: &mut LfoRun, rate: f64) {
+        self.level.release(&mut run.level, rate);
     }
 
     /// Move a run on by `dt` ticks. The oscillator waits until the level

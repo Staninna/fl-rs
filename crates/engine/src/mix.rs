@@ -3,6 +3,7 @@
 //! between them, the sidechain inputs those sends feed, and the delay lines
 //! that make up for the plugins that are late.
 
+use crate::automation::Controller;
 use crate::eq::InsertEq;
 use crate::generator::{Cue, Hosted as Generator};
 use crate::voice::Voice;
@@ -1309,6 +1310,8 @@ impl Mixer {
             strip.generators = (first, count);
         }
         self.generators = placed.into_iter().map(|(_, _, hosted)| hosted).collect();
+        let controller = |hosted: &Generator| !hosted.generator.controller_outputs().is_empty();
+        self.ticking |= self.generators.iter().any(controller);
     }
 
     /// How many generators the mixer hosts.
@@ -1552,7 +1555,10 @@ impl Mixer {
     /// with the insert and the slot the plugin is in. A slot that is
     /// switched off is left out, and so is every slot of an insert that
     /// is.
-    pub fn tick(&mut self, tick: u64, mut each: impl FnMut(u16, u8, &[f32])) {
+    ///
+    /// The generators that are controllers come after them, with the
+    /// channel they are on.
+    pub fn tick(&mut self, tick: u64, mut each: impl FnMut(Controller, &[f32])) {
         let tempo = self.tempo;
         for &at in &self.ranked {
             let strip = &mut self.strips[at];
@@ -1563,8 +1569,19 @@ impl Mixer {
             for hosted in controllers.filter(|hosted| hosted.ticks && hosted.enabled) {
                 hosted.effect.tick(tick, tempo);
                 if hosted.effect.controller_changed() {
-                    each(strip.index, hosted.slot, hosted.effect.controller_outputs());
+                    let source = Controller::Slot(strip.index, hosted.slot);
+                    each(source, hosted.effect.controller_outputs());
                 }
+            }
+        }
+        for hosted in &mut self.generators {
+            if hosted.generator.controller_outputs().is_empty() {
+                continue;
+            }
+            hosted.generator.tick(tick, tempo);
+            if hosted.generator.controller_changed() {
+                let source = Controller::Channel(hosted.channel);
+                each(source, hosted.generator.controller_outputs());
             }
         }
     }
