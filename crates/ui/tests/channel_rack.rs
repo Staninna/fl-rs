@@ -92,6 +92,7 @@ fn state() -> UiState {
         last_error: None,
         busy: None,
         progress: None,
+        loop_range: None,
     }
 }
 
