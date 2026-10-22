@@ -568,7 +568,7 @@ impl WaveTraveller {
 
     /// One sample of a voice, added to `out`. Whether it is over comes
     /// back.
-    fn tick(&self, voice: &mut Voice, out: &mut [f32; 2]) -> bool {
+    fn step_voice(&self, voice: &mut Voice, out: &mut [f32; 2]) -> bool {
         let patch = &self.patches[voice.key];
         let drawn = &self.drawn[voice.key];
         let points = drawn.positions as i32;
@@ -797,7 +797,7 @@ impl Generator for WaveTraveller {
             while k > 0 {
                 k -= 1;
                 let mut out = [*l, *r];
-                if self.tick(&mut voices[k], &mut out) {
+                if self.step_voice(&mut voices[k], &mut out) {
                     voices.remove(k);
                 }
                 [*l, *r] = out;
