@@ -219,16 +219,33 @@ layout! {
         /// A legacy sample field for writers below 2.2.0. The loader zeroes
         /// it for writers below 6.4.1.
         unknown_4: [u8; 4],
-        unknown_8: [u8; 44],
-        /// PyFLP reads an f32 arp time. The loader treats it as an integer
-        /// in `gate_time`'s unit, for writers below 3.5.2 only.
-        arp_time: [u8; 4],
-        unknown_56: [u8; 4],
-        /// Four single bytes. For writers below 3.3.4 the loader reduces the
-        /// first to 0 or 1 and zeroes the other three.
-        unknown_60: [u8; 4],
+        unknown_8: [u8; 32],
+        /// The arpeggiator, `chan+0x2ac` to `chan+0x2c0` and `chan+0x2e0`
+        /// (`docs/arpeggiator.md`). Its direction: 0 off, 1 up, 2 down, 3
+        /// up and down, 4 up and down with both ends twice, 5 random.
+        arp_direction: i32,
+        /// Octaves, control 0x301.
+        arp_range: i32,
+        /// Below 0 the notes held, 0 the key alone and `n` entry `n - 1` of
+        /// FL's chord table; control 0x302 is this plus 2.
+        arp_chord: i32,
+        /// The knob of control 0x303, 450..=1447: a step of
+        /// `round((27^(t / 1024) - 1) * 48 / 26)` 48ths of a step, and
+        /// 1447 none. PyFLP reads an f32. The loader remaps it from an
+        /// older scale for writers below 3.5.2.
+        arp_time: i32,
+        /// The part of a step a note lasts, in 48ths, control 0x304.
+        arp_gate: i32,
+        /// Whether the arpeggiator glides one voice from note to note
+        /// instead of starting a note on every step. For writers below
+        /// 3.3.4 the loader reduces it to 0 or 1 and zeroes the next three.
+        arp_slide: u8,
+        unknown_61: [u8; 3],
         gate_time: u32,
-        unknown_68: [u8; 28],
+        unknown_68: [u8; 24],
+        /// How many times the arpeggiator plays each round of the notes,
+        /// control 0x305.
+        arp_repeat: i32,
         /// An f32 when 169 bit 0 is set, otherwise an integer the loader
         /// converts to one.
         unknown_96: [u8; 4],
@@ -1114,9 +1131,13 @@ mod tests {
         let p = prefix(168, Parameters::from_bytes, Parameters::to_bytes);
         assert_eq!(p.len, 168);
         assert_eq!(p.unknown_4, [4, 5, 6, 7]);
-        assert_eq!(p.arp_time, [52, 53, 54, 55]);
-        assert_eq!(p.unknown_60, [60, 61, 62, 63]);
+        assert_eq!(p.arp_direction, at(40) as i32);
+        assert_eq!(p.arp_chord, at(48) as i32);
+        assert_eq!(p.arp_time, at(52) as i32);
+        assert_eq!(p.arp_gate, at(56) as i32);
+        assert_eq!((p.arp_slide, p.unknown_61), (60, [61, 62, 63]));
         assert_eq!(p.gate_time, at(64));
+        assert_eq!(p.arp_repeat, at(92) as i32);
         assert_eq!(p.unknown_96, [96, 97, 98, 99]);
         assert_eq!(p.stretch_mode, at(108) as i32);
         assert_eq!(p.unknown_112[55], 167);
