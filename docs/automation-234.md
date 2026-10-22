@@ -288,9 +288,6 @@ The corpus render counts the bindings and controller links of the first
   Out`. Nothing plays on those channels.
 - Parameters of Fruity Formula Controller in `Astes - Raubana - LIFE`,
   which the engine does not host.
-- Slicex parameter 5 (control 0x8005) of the eight channels of `Drumloop
-  Masher.flp`, linked from a controller: the rebuilt Slicex has no
-  parameter table (`docs/plugins/slicex.md` maps no `ProcessParam`).
 - The arpeggiator's time (0x303) of `nucleon - Harmless Galactic` channel
   14, whose arpeggiator is on: the engine has no arpeggiator.
 - A clip bound to nothing: `Asher Postman - Future House` channel 34. FL

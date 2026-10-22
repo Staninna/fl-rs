@@ -99,7 +99,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::sakura::NAME, Port::Gaps),
     (crate::send::NAME, Port::Gaps),
     (crate::seven_band_eq::NAME, Port::Exact),
-    (crate::slicex::NAME, Port::Approximate),
+    (crate::slicex::NAME, Port::Gaps),
     (crate::soft_clipper::NAME, Port::Exact),
     (crate::soundgoodizer::NAME, Port::Gaps),
     (crate::spreader::NAME, Port::Exact),
