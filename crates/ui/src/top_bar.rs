@@ -39,12 +39,101 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         readout(ui, &format!("{bar:03}:{beat:02}:{tick:03}"), "B:B:T");
         ui.separator();
         meter(ui, state.peaks);
+        ui.separator();
+        windows(ui);
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let title = state.project.title.as_deref().unwrap_or_default();
             ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
         });
     });
+}
+
+/// A button per main window, lit while it is in view, as FL's row of
+/// window buttons, each with a small picture of its window.
+fn windows(ui: &mut Ui) {
+    use crate::windows::{Window, shown, toggle};
+    let mut style = icon_style(ui.visuals());
+    style.selected = ButtonVisuals {
+        fill: crate::theme::ACCENT,
+        stroke: Stroke::NONE,
+        icon: ui.visuals().selection.stroke.color,
+    };
+    let size = Vec2::splat(ui.spacing().interact_size.y + 4.0);
+    for window in Window::ALL {
+        let name = format!("Show {}", window.name().to_lowercase());
+        let button = IconButton::new(&name, size, &style).selected(shown(ui.ctx(), window));
+        let button = button.show(ui, |ui, rect, tint| window_icon(ui, rect, tint, window));
+        let hint = format!("{} ({:?})", window.name(), window.key());
+        if button.on_hover_text(hint).clicked() {
+            toggle(ui.ctx(), window);
+        }
+    }
+}
+
+/// The picture on a window's button.
+fn window_icon(ui: &Ui, rect: Rect, tint: Color32, window: crate::windows::Window) {
+    use crate::windows::Window;
+    let painter = ui.painter();
+    let icon = Rect::from_center_size(rect.center(), rect.size() * 0.55);
+    let (left, top, w, h) = (icon.left(), icon.top(), icon.width(), icon.height());
+    let block = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        Rect::from_min_max(
+            pos2(left + w * x0, top + h * y0),
+            pos2(left + w * x1, top + h * y1),
+        )
+    };
+    match window {
+        // Clips staggered on tracks.
+        Window::Playlist => {
+            for (row, (from, to)) in [(0.0, 0.5), (0.3, 0.9), (0.55, 1.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let y = row as f32 / 3.0;
+                painter.rect_filled(block(from, y + 0.04, to, y + 0.29), 1.0, tint);
+            }
+        }
+        // A row of steps per channel.
+        Window::ChannelRack => {
+            for row in 0..3 {
+                for step in 0..4 {
+                    let (x, y) = (step as f32 / 4.0, row as f32 / 3.0);
+                    let lit = (row + step) % 2 == 0;
+                    let colour = if lit { tint } else { tint.gamma_multiply(0.35) };
+                    painter.rect_filled(block(x + 0.03, y + 0.04, x + 0.22, y + 0.29), 1.0, colour);
+                }
+            }
+        }
+        // Notes at different heights.
+        Window::PianoRoll => {
+            for (from, to, y) in [(0.0, 0.4, 0.6), (0.35, 0.7, 0.3), (0.6, 1.0, 0.0)] {
+                painter.rect_filled(block(from, y + 0.05, to, y + 0.35), 1.0, tint);
+            }
+        }
+        // A folder.
+        Window::Browser => {
+            painter.rect_filled(block(0.0, 0.1, 0.45, 0.3), 1.0, tint);
+            painter.rect_filled(block(0.0, 0.25, 1.0, 0.9), 1.0, tint);
+        }
+        // Faders on their tracks.
+        Window::Mixer => {
+            for (i, knob) in [0.6, 0.25, 0.45].into_iter().enumerate() {
+                let x = left + w * (0.17 + i as f32 * 0.33);
+                painter.vline(
+                    x,
+                    icon.y_range(),
+                    Stroke::new(1.5, tint.gamma_multiply(0.5)),
+                );
+                let y = top + h * knob;
+                painter.rect_filled(
+                    Rect::from_center_size(pos2(x, y), vec2(w * 0.24, h * 0.16)),
+                    1.0,
+                    tint,
+                );
+            }
+        }
+    }
 }
 
 /// Play, stop, the switch between pattern mode and song mode, the loop
@@ -117,10 +206,11 @@ fn icon_style(visuals: &egui::Visuals) -> IconButtonStyle {
         normal: look(&visuals.widgets.inactive),
         hovered: look(&visuals.widgets.hovered),
         pressed: Some(look(&visuals.widgets.active)),
+        // Play lights green while the song plays, as in FL.
         selected: ButtonVisuals {
-            fill: visuals.selection.bg_fill,
+            fill: Color32::from_rgb(70, 150, 80),
             stroke: Stroke::NONE,
-            icon: visuals.selection.stroke.color,
+            icon: Color32::from_rgb(225, 255, 225),
         },
         corner_radius: visuals.widgets.inactive.corner_radius,
         focus_stroke: visuals.selection.stroke,
@@ -134,7 +224,12 @@ fn readout(ui: &mut Ui, value: &str, unit: &str) {
         .inner_margin(vec2(6.0, 2.0))
         .corner_radius(2.0)
         .show(ui, |ui| {
-            ui.label(RichText::new(value).monospace().strong());
+            ui.label(
+                RichText::new(value)
+                    .monospace()
+                    .strong()
+                    .color(crate::theme::READOUT),
+            );
             ui.weak(unit);
         });
 }
