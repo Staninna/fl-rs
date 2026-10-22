@@ -258,6 +258,9 @@ pub(crate) fn hosted(
     let state = channel.plugin_state.as_deref();
     let taken = state.map_or(Ok(()), |state| generator.set_state(state));
     taken.ok()?;
+    if let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) {
+        generator.set_channel_sample(path);
+    }
     Some(generator)
 }
 

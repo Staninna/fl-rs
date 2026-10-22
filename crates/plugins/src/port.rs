@@ -61,6 +61,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::frequency_shifter::NAME, Port::Gaps),
     (crate::frequency_splitter::NAME, Port::Gaps),
     (crate::fruit_kick::NAME, Port::Gaps),
+    (crate::granulizer::NAME, Port::Gaps),
     (crate::fruity_slicer::NAME, Port::Gaps),
     (crate::fruity_slicer_2::NAME, Port::Gaps),
     (crate::gms::NAME, Port::Gaps),
@@ -111,6 +112,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::wrapper::NAME, Port::Gaps),
     (crate::xy_controller::NAME, Port::Gaps),
     (crate::zgameeditor::NAME, Port::Gaps),
+    (crate::wave_traveller::NAME, Port::Gaps),
 ];
 
 /// The port of a plugin by its event 201 name, in any case.

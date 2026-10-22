@@ -98,6 +98,13 @@ pub trait Generator: Send {
     /// what it lacks in [`Generator::fidelity`]. The others take no notice.
     fn set_resource_dir(&mut self, _dir: &Path) {}
 
+    /// The sample the plugin's channel holds, as its event 196 writes it,
+    /// for a plugin that plays its channel's own sample: FL hands that one
+    /// over with `FPD_SetSample`. Such a plugin names it among its
+    /// [`Generator::sample_paths`] from then on. This allocates. The others
+    /// take no notice.
+    fn set_channel_sample(&mut self, _path: &str) {}
+
     /// Start a note on the first frame of the next block.
     fn note_on(&mut self, note: NoteOn);
 
@@ -273,6 +280,9 @@ const GENERATORS: &[(&str, Make)] = &[
         Box::new(crate::fruity_slicer_2::FruitySlicer2::default())
     }),
     (crate::gms::NAME, || Box::new(crate::gms::Gms::default())),
+    (crate::granulizer::NAME, || {
+        Box::new(crate::granulizer::Granulizer::default())
+    }),
     (crate::harmless::NAME, || {
         Box::new(crate::harmless::Harmless::default())
     }),
@@ -300,6 +310,9 @@ const GENERATORS: &[(&str, Make)] = &[
     }),
     (crate::sytrus::NAME, || {
         Box::new(crate::sytrus::Sytrus::default())
+    }),
+    (crate::wave_traveller::NAME, || {
+        Box::new(crate::wave_traveller::WaveTraveller::default())
     }),
     #[cfg(any(test, feature = "test-generators"))]
     (crate::test_sine::NAME, || {

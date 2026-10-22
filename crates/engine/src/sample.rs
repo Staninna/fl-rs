@@ -177,6 +177,9 @@ pub fn prepare(project: &Project, sample_root: &Path) -> Result<PreparedSamples,
             generator.set_resource_dir(dir);
         }
         if generator.set_state(state).is_ok() {
+            if let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) {
+                generator.set_channel_sample(path);
+            }
             for path in generator.sample_paths() {
                 let _ = samples.load(&path, sample_root);
             }

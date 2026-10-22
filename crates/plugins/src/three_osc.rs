@@ -125,7 +125,7 @@ const TABLE: usize = 16_384;
 const BASE: f64 = 2_247_346_493_527.166;
 
 /// The ticks to a beat the envelopes count in until the host says.
-const PPQ: f64 = 96.0;
+pub(crate) const PPQ: f64 = 96.0;
 
 /// The range of each parameter's wheel.
 const RANGES: [(i32, i32); 21] = [
@@ -173,10 +173,10 @@ const LFO_SHAPE: usize = 13;
 const TENSIONS: usize = 14;
 
 /// The blocks of the tab, in the order the state has them.
-const VOLUME: usize = 1;
-const MOD_X: usize = 2;
-const MOD_Y: usize = 3;
-const PITCH: usize = 4;
+pub(crate) const VOLUME: usize = 1;
+pub(crate) const MOD_X: usize = 2;
+pub(crate) const MOD_Y: usize = 3;
+pub(crate) const PITCH: usize = 4;
 
 /// The parameter the instrument tab's start at. FL's tab handler
 /// (`0x7378a0`) takes 23 to 113: `0x73ad35` hands 23 to `0x72c440`, which
@@ -237,18 +237,18 @@ const GLOBAL_LFO: i32 = 0x20;
 
 /// The stages of an envelope, as FL numbers them.
 const WAIT: u8 = 0;
-const RISE: u8 = 1;
+pub(crate) const RISE: u8 = 1;
 const HELD: u8 = 2;
 const FALL: u8 = 3;
 const SUSTAINED: u8 = 4;
 const RELEASED: u8 = 6;
-const OVER: u8 = 9;
+pub(crate) const OVER: u8 = 9;
 
 /// An envelope under this is over.
 const TINY: f32 = 5.960_464_5e-8;
 
 /// The tab of a new plugin, and of every state older than version 14.
-fn new_tab() -> Articulation {
+pub(crate) fn new_tab() -> Articulation {
     let block = [
         0, 0, 100, 20_000, 20_000, 30_000, 50, 20_000, 0, 100, 20_000, 0, 32_950, 0, 0, 0, 0,
     ];
@@ -266,7 +266,7 @@ fn new_tab() -> Articulation {
 /// The six tables FL's host makes when it starts: sine, triangle, square,
 /// saw, rounded saw and noise.
 #[derive(Debug, PartialEq)]
-struct HostTables {
+pub(crate) struct HostTables {
     shapes: [Vec<f32>; 6],
 }
 
@@ -349,7 +349,7 @@ impl HostTables {
     }
 
     /// The tables, made once.
-    fn get() -> &'static HostTables {
+    pub(crate) fn get() -> &'static HostTables {
         static TABLES: OnceLock<HostTables> = OnceLock::new();
         TABLES.get_or_init(HostTables::new)
     }
@@ -723,36 +723,36 @@ impl Tension {
 
 /// One block of the tab, worked out for a tempo.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Block {
-    enabled: bool,
-    full_when_off: bool,
-    global_lfo: bool,
+pub(crate) struct Block {
+    pub(crate) enabled: bool,
+    pub(crate) full_when_off: bool,
+    pub(crate) global_lfo: bool,
     /// The attack knob is at no time at all.
-    no_attack: bool,
+    pub(crate) no_attack: bool,
     /// Ticks.
-    predelay: i32,
-    hold: i32,
+    pub(crate) predelay: i32,
+    pub(crate) hold: i32,
     /// What a tick adds to the straight envelope in each stretch.
-    attack: f32,
-    decay: f32,
-    release: f32,
-    sustain: f32,
+    pub(crate) attack: f32,
+    pub(crate) decay: f32,
+    pub(crate) release: f32,
+    pub(crate) sustain: f32,
     tensions: [Tension; 3],
     /// How far the envelope and the LFO move their target: of 128, and for
     /// the pitch as they are, in cents.
-    amount: f32,
-    lfo_amount: f32,
-    cents: f32,
-    lfo_cents: f32,
-    lfo_predelay: i32,
-    lfo_attack: f32,
+    pub(crate) amount: f32,
+    pub(crate) lfo_amount: f32,
+    pub(crate) cents: f32,
+    pub(crate) lfo_cents: f32,
+    pub(crate) lfo_predelay: i32,
+    pub(crate) lfo_attack: f32,
     /// What a tick adds to the LFO's 32-bit phase.
-    lfo_step: u32,
-    lfo_shape: usize,
+    pub(crate) lfo_step: u32,
+    pub(crate) lfo_shape: usize,
 }
 
 impl Block {
-    fn of(raw: &[i32; 17], tempo: f64, ppq: f64) -> Self {
+    pub(crate) fn of(raw: &[i32; 17], tempo: f64, ppq: f64) -> Self {
         let unit = ppq / 4.0 / 48.0 * 24_576.0 / 1000.0;
         let unit_for = |fixed: i32| match raw[FLAGS] & fixed {
             0 => unit * tempo / 120.0,
@@ -787,23 +787,23 @@ impl Block {
 
 /// One envelope and LFO of a note.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Envelope {
-    stage: u8,
+pub(crate) struct Envelope {
+    pub(crate) stage: u8,
     /// The ticks the stage has lasted, for the two that are counted.
-    count: i32,
+    pub(crate) count: i32,
     /// The straight envelope, and what its stretch's bend makes of it.
-    value: f32,
-    level: f32,
-    lfo_phase: u32,
+    pub(crate) value: f32,
+    pub(crate) level: f32,
+    pub(crate) lfo_phase: u32,
     /// The ticks the LFO still waits, how far it has faded in, and what
     /// it is at.
-    lfo_waits: i32,
-    lfo_fade: f32,
-    lfo: f32,
+    pub(crate) lfo_waits: i32,
+    pub(crate) lfo_fade: f32,
+    pub(crate) lfo: f32,
 }
 
 impl Envelope {
-    fn new(block: &Block) -> Self {
+    pub(crate) fn new(block: &Block) -> Self {
         let mut envelope = Envelope {
             lfo_waits: block.lfo_predelay,
             ..Envelope::default()
@@ -826,7 +826,7 @@ impl Envelope {
     }
 
     /// One tick on. `global` is the phase of an LFO the notes share.
-    fn step(&mut self, block: &Block, global: u32, shapes: &HostTables) {
+    pub(crate) fn step(&mut self, block: &Block, global: u32, shapes: &HostTables) {
         if block.enabled {
             match self.stage {
                 WAIT => {
@@ -891,7 +891,7 @@ impl Envelope {
     }
 
     /// The note off: the release starts from the level the envelope is at.
-    fn release(&mut self, block: &Block) {
+    pub(crate) fn release(&mut self, block: &Block) {
         if self.stage <= RELEASED {
             self.value = block.tensions[2].unshape(self.level);
             (self.stage, self.count) = (RELEASED, 0);
@@ -902,14 +902,14 @@ impl Envelope {
 /// The filter's kinds: FL's Fast LP, the four biquads and the
 /// state-variable low-pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Fast,
     Biquad(u8),
     Svf,
 }
 
 /// The kind of each of the eight filter types, and whether it runs twice.
-const FILTERS: [(Kind, bool); 8] = [
+pub(crate) const FILTERS: [(Kind, bool); 8] = [
     (Kind::Fast, false),
     (Kind::Biquad(1), false),
     (Kind::Biquad(2), false),
@@ -1015,7 +1015,7 @@ pub fn svf(cut: f32, res: f32, s: f32) -> (f32, f32) {
 /// What a sample adds to a value that is headed for `target` from `from`
 /// over `len` samples, at no more than `limit` a sample, and where that
 /// gets it.
-fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
+pub(crate) fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
     let mut step = target - from;
     if step == 0.0 {
         return (0.0, target);
@@ -1030,7 +1030,7 @@ fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
 
 /// The filter of one note.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Filter {
+pub(crate) struct Filter {
     kind: Kind,
     twice: bool,
     /// A Fast LP that is wide open does nothing until it first is not.
@@ -1053,7 +1053,7 @@ struct Filter {
 }
 
 impl Filter {
-    fn new(kind: Kind, twice: bool) -> Self {
+    pub(crate) fn new(kind: Kind, twice: bool) -> Self {
         Filter {
             kind,
             twice,
@@ -1073,7 +1073,7 @@ impl Filter {
 
     /// Take the cutoff and the resonance of the `len` samples to the next
     /// tick. What the note's gain is to be multiplied by comes back.
-    fn set(&mut self, cut: f32, res: f32, s: f32, first: bool, len: usize) -> f32 {
+    pub(crate) fn set(&mut self, cut: f32, res: f32, s: f32, first: bool, len: usize) -> f32 {
         match self.kind {
             Kind::Fast => {
                 let (f, fb) = fast_lp(cut, res, s);
@@ -1104,7 +1104,7 @@ impl Filter {
     }
 
     /// One frame through.
-    fn run(&mut self, frame: [f32; 2]) -> [f32; 2] {
+    pub(crate) fn run(&mut self, frame: [f32; 2]) -> [f32; 2] {
         if !self.active {
             return frame;
         }
@@ -1204,7 +1204,7 @@ struct Derived {
 
 /// The 10 ms a note fades out by at this rate: half a turn of a cosine,
 /// from 1 down to 0.
-fn fade_out(rate: f32) -> Vec<f32> {
+pub(crate) fn fade_out(rate: f32) -> Vec<f32> {
     let len = ((f64::from(rate) * 0.01).round_ties_even() as usize).max(1);
     let step = (PI / (len + 1) as f64) as f32;
     let fade = |n: usize| (((n + 1) as f32 * step).cos() + 1.0) * 0.5;
