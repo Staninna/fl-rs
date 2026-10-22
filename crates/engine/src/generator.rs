@@ -437,6 +437,16 @@ impl Rack {
         }
     }
 
+    /// The note cued last, on the generator at `place`, is moved by an
+    /// arpeggiator ([`Slides::glide`]).
+    pub fn glide(&mut self, place: usize, points: &[(u64, f32)]) {
+        let Some(voice) = self.voices.checked_sub(1) else {
+            return;
+        };
+        self.slides.glide(voice as usize, points);
+        self.hosted[place].bend.get_or_insert_default();
+    }
+
     /// The cues in the order they are due. Where two are due on one
     /// sample, the note that started first comes first, a note's on comes
     /// before its off, and the notes' come before the slides'.

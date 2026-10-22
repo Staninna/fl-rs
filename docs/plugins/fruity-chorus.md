@@ -216,5 +216,5 @@ The plugin adds no latency: the dry part is not delayed.
 - A sample-rate change works the delay, the depth, the LFO steps and the
   crossover out again, where FL keeps the old ones.
 - The render test `System/Render tests/Fruity Chorus.flp` holds its chorus
-  inside a Fruity Wrapper (a 412-byte wrapper state), so it does not
-  exercise this plugin.
+  inside a Fruity Wrapper (a 412-byte wrapper state). The wrapper swaps in
+  this plugin at the wrapped parameters, so the test plays it.

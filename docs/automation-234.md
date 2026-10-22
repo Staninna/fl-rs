@@ -230,7 +230,7 @@ of the repo.
 - A segment covers t from 0 up to, not including, 1 (`0xb9e18a` moves on at t >= 1). A hold therefore jumps on the beat of its end point.
 - The trim of a playlist item on an automation channel is in beats into the clip. `end - start` equals the item's length in beats for 3,103 of the 3,104 corpus items with a trim (of 5,462 automation items, 71 of them muted).
 - The tempo's range for the value mapping is 10 to 522 BPM, as 10000 and 522000. The 219 of all seven clips that drive the tempo is (1250, 4250), which is exactly 60 and 180 BPM on that range, the two tempos `FUN_01191a50` computes fractions for.
-- Target counts, decoded with the legacy remap: 820 links to an insert, 495 to a channel, 7 to the tempo. 117 of the 1,322 go to a control the engine plays: 34 insert volumes, 1 insert pan, 28 send levels, 7 tempo, 45 channel volumes and 2 channel pans. Of the channel ones, only the 6 volumes on audio clip channels are played, because the other 41 belong to plugin channels.
+- Target counts, decoded with the legacy remap: 820 links to an insert, 495 to a channel, 7 to the tempo. When the engine first played automation, 117 of the 1,322 went to a control it played: 34 insert volumes, 1 insert pan, 28 send levels, 7 tempo, 45 channel volumes and 2 channel pans. It now plays the levels of a hosted generator's channel and the parameters of hosted plugins as well; the corpus render prints today's counts.
 
 ## Channel controls (docs/rec-channel.md)
 
@@ -257,7 +257,8 @@ mask (`0xf81eb0`):
 `((1 + |t|)^x - 1) / |t|` below 0 and its mirror image above: 0 stays 0,
 1 stays 1, and the sign of `t` bends the line down or up. The result goes
 on as any formula's, kept inside 0 and 1. Corpus: the 32 links of
-`Surround mix.flp` from a Peak Controller to the sends of inserts 1 to 16
+`Surround mix.flp` from the Y of the Fruity X-Y Controllers on inserts 1
+to 16 to those inserts' sends
 to inserts 17 and 18, `Tension(Input,10)` and `Tension(1-Input,10)`.
 
 ## Targets that change nothing FL plays (crates/engine/src/automation.rs, `unheard`)
@@ -276,6 +277,17 @@ A clip or a controller link on one of these is played by setting nothing:
 - A control of an automation clip's LFO when that clip's LFO is off
   (`docs/rec-channel.md`).
 
+## The arpeggiator's time and gate
+
+A clip on a channel's arpeggiator time (0x303, 450..1447) or gate (0x304,
+0..48) is played. The engine lays the arpeggios out from the song before
+it plays (`docs/arpeggiator.md`, `crates/engine/src/arp.rs`) and reads the
+clip at the tick of each step, which is where FL works out the next step
+from the two knobs. Nothing is set while the song plays. A controller link
+to either is counted unsupported, since it moves as the song plays. Corpus:
+`nucleon - Harmless Galactic` channel 14 in its first 10 seconds, and the
+clips on channels 12, 16, 17 and 20 of `Mehran Abbasi - With You` later on.
+
 ## What the corpus render still counts unsupported
 
 The corpus render counts the bindings and controller links of the first
@@ -286,23 +298,19 @@ The corpus render counts the bindings and controller links of the first
   Song For You`, `Mehran Abbasi - With You`, `Purps On The Beat Feat
   Luclover - Stroll Up`) and FLEX's volume in `Mehdi Ebrahiminejad - Never
   Out`. Nothing plays on those channels.
-- Parameters of Fruity Formula Controller in `Astes - Raubana - LIFE`,
-  which the engine does not host.
-- Slicex parameter 5 (control 0x8005) of the eight channels of `Drumloop
-  Masher.flp`, linked from a controller: the rebuilt Slicex has no
-  parameter table (`docs/plugins/slicex.md` maps no `ProcessParam`).
-- The arpeggiator's time (0x303) of `nucleon - Harmless Galactic` channel
-  14, whose arpeggiator is on: the engine has no arpeggiator.
+- Parameters 39, 42, 43 and 49 of the Fruity Limiter on insert 1 of
+  `Sacco - Pumping objects`: the rebuilt Limiter has 18 parameters
+  (`docs/plugins/fruity-limiter.md`), and what FL drives with these
+  numbers is not read.
 - A clip bound to nothing: `Asher Postman - Future House` channel 34. FL
   drives nothing from it either; the render counts it so that a clip whose
   link did not decode does not pass unseen.
 
-Past the first 10 seconds, the rest of the corpus adds: the arpeggiator
-time and gate of FLEX, 3x Osc and DrumSynth channels (`Mehran Abbasi -
-With You`), mod X on 3x Osc (`Square a Saw - Oxygen` channel 51, see
-`docs/rec-channel.md`), formant (control 15) on an audio clip channel
-(`Mehdi Ebrahiminejad - Never Out` channel 14: the engine stretches
-nothing), the amount of 3x Osc's pitch envelope (0x1408, `Treben - Gimbal
-and Sinan - RawFL`: the instrument envelopes of a channel are not played),
-the switch of a Transporter slot, which the engine does not host, and the
-other plugin parameters of unhosted or parameterless plugins.
+Past the first 10 seconds, the rest of the corpus adds: mod X on 3x Osc
+(`Square a Saw - Oxygen` channel 51, see `docs/rec-channel.md`), formant
+(control 15) on an audio clip channel (`Mehdi Ebrahiminejad - Never Out`
+channel 14: the engine stretches nothing), the amount of 3x Osc's pitch
+envelope (0x1408, `Treben - Gimbal and Sinan - RawFL`: the instrument
+envelopes of a channel are not played), the switch of a Transporter slot,
+which the engine does not host, and the other plugin parameters of
+unhosted or parameterless plugins.

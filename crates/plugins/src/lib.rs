@@ -7,33 +7,12 @@
 //!
 //! A [`Generator`] is a plugin on a channel: it is handed notes and adds
 //! their sound to a block. [`generator_by_name`] makes the one for the name
-//! a channel's event 201 has. So far: [`bassdrum::BassDrum`],
-//! [`boobass::BooBass`], [`fruit_kick::FruitKick`], [`sytrus::Sytrus`] and
-//! [`three_osc::ThreeOsc`].
+//! a channel's event 201 has. [`port::PORTS`] lists every plugin built,
+//! effect and generator, with how close each comes to FL's.
 //!
-//! So far: [`balance::Balance`], [`bass_boost::BassBoost`],
-//! [`blood_overdrive::BloodOverdrive`],
-//! [`chorus::Chorus`], [`compressor::Compressor`],
-//! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
-//! [`delay_bank::DelayBank`], [`emphasis::Emphasis`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
-//! [`flanger::Flanger`], [`flangus::Flangus`], [`free_filter::FreeFilter`],
-//! [`limiter::Limiter`], [`love_philter::LovePhilter`],
-//! [`maximus::Maximus`],
-//! [`multiband_compressor::MultibandCompressor`], [`panomatic::PanOMatic`],
-//! [`parametric_eq::ParametricEq`], [`parametric_eq_2::ParametricEq2`],
-//! [`peak_controller::PeakController`], [`phaser::Phaser`],
-//! [`pitcher::Pitcher`],
-//! [`reeverb_2::Reeverb2`],
-//! [`soft_clipper::SoftClipper`], [`soundgoodizer::Soundgoodizer`],
-//! [`spreader::Spreader`],
-//! [`stereo_enhancer::StereoEnhancer`], [`stereo_shaper::StereoShaper`],
-//! [`transient_processor::TransientProcessor`],
-//! [`vintage_chorus::VintageChorus`], [`vintage_phaser::VintagePhaser`] and
-//! [`waveshaper::WaveShaper`].
-//!
-//! Fruity Peak Controller is an internal controller: beside its sound it
-//! has [`Effect::controller_outputs`], which a host carries to the controls
-//! its project links them to, once for every [`Effect::tick`].
+//! An internal controller, such as Fruity Peak Controller, has
+//! [`Effect::controller_outputs`] beside its sound, which a host carries to
+//! the controls its project links them to, once for every [`Effect::tick`].
 
 pub mod autogun;
 mod autogun_engine;
@@ -163,6 +142,7 @@ pub mod wave_traveller;
 pub mod waveshaper;
 pub mod wrapper;
 pub mod xy_controller;
+pub mod xyz_controller;
 pub mod zgameeditor;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
@@ -289,8 +269,9 @@ pub trait Effect: Send {
     /// long as that block. `None` for a plugin that has none, or has it
     /// switched off.
     ///
-    /// Stereo Shaper's difference is the one there is. A host adds it to
-    /// the bus of the insert [`Effect::sidechain_output`] counts to.
+    /// Stereo Shaper's difference and Fruity Send's send are such outputs.
+    /// A host adds it to the bus of the insert [`Effect::sidechain_output`]
+    /// counts to.
     fn aux_output(&self) -> Option<(&[f32], &[f32])> {
         None
     }
@@ -543,6 +524,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(control_surface::ControlSurface::default()))
     } else if is(xy_controller::NAME) {
         Some(Box::new(xy_controller::XyController::default()))
+    } else if is(xyz_controller::NAME) {
+        Some(Box::new(xyz_controller::XyzController::default()))
     } else if is(zgameeditor::NAME) {
         Some(Box::new(zgameeditor::ZGameEditor))
     } else if is(wrapper::NAME) {

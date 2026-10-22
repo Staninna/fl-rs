@@ -34,7 +34,8 @@
 //! with hard sync, the cross modulation and AM, the second LFO and
 //! envelope, the filter's other slopes and types and its FM, the
 //! modulation matrix, mono, legato and portamento, the EQ, saturation,
-//! delay, reverb and hyper chorus. Of FL's 188 presets two use none of it.
+//! delay, reverb and hyper chorus, hold, the chorus noise, and master tune
+//! and the oscillator offsets. Of FL's 188 presets two use none of it.
 
 use crate::kepler::{self, Kepler, PARAMS};
 use crate::menvelope::Reader;

@@ -3,6 +3,7 @@
 //! generators, its mixer with every gain worked out, and the automation
 //! that moves those gains as the song plays.
 
+use crate::arp;
 use crate::automation::Automation;
 use crate::clock::Clock;
 use crate::generator::{Cue, Rack};
@@ -75,6 +76,10 @@ pub(crate) struct Graph {
     /// The hosted generators that stand in for a thing their state asks
     /// for, by what they say of it, and the channels each is on.
     pub approximated_generators: BTreeMap<&'static str, usize>,
+    /// The channels with a note before the limit whose arpeggiator asks
+    /// for a part the engine does not build, by that part. Their notes
+    /// play as they are.
+    pub unplayed_arpeggiators: BTreeMap<&'static str, usize>,
 }
 
 impl Graph {
@@ -96,7 +101,7 @@ impl Graph {
     ) -> Result<Self, Error> {
         let song = sequence::sequence(project);
         let mode = (false, sample_rate, limit, plugin_dir);
-        Self::of(project, &song, mode, curves, sample)
+        Self::of(project, &song, mode, true, curves, sample)
     }
 
     /// The graph of one pattern on its own, as FL's PAT mode plays it. The
@@ -111,20 +116,60 @@ impl Graph {
     ) -> Result<Self, Error> {
         let song = sequence::pattern(project, index);
         let mode = (true, sample_rate, usize::MAX, plugin_dir);
-        Self::of(project, &song, mode, curves, sample)
+        Self::of(project, &song, mode, true, curves, sample)
+    }
+
+    /// [`Graph::pattern`] with every note as it is, for the keys the piano
+    /// roll previews through a channel ([`crate::live`]): the channel's
+    /// arpeggiator, if it is on, is left out. The preview takes each note's
+    /// first voice and plays it for as long as a key is held, which an
+    /// arpeggio's first step would cut short and move.
+    pub fn keys(
+        project: &Project,
+        index: u16,
+        sample_rate: u32,
+        curves: &dyn Curves,
+        plugin_dir: Option<&Path>,
+        sample: impl FnMut(&str) -> Result<Option<Arc<Sample>>, Error>,
+    ) -> Result<Self, Error> {
+        let song = sequence::pattern(project, index);
+        let mode = (true, sample_rate, usize::MAX, plugin_dir);
+        Self::of(project, &song, mode, false, curves, sample)
     }
 
     /// `mode` is whether the song is one pattern, the rate, the limit and
-    /// the plugin directory.
+    /// the plugin directory. `arpeggiate` is whether the channels'
+    /// arpeggiators play.
     fn of(
         project: &Project,
         song: &Song,
         mode: (bool, u32, usize, Option<&Path>),
+        arpeggiate: bool,
         curves: &dyn Curves,
         mut sample: impl FnMut(&str) -> Result<Option<Arc<Sample>>, Error>,
     ) -> Result<Self, Error> {
         let (pattern, sample_rate, limit, plugin_dir) = mode;
         let (clock, automation) = timeline(project, song, sample_rate, limit)?;
+        // A render that stops early needs the arpeggios up to its limit
+        // alone: up to the first tick that falls on it or after.
+        let stop = (limit != usize::MAX).then(|| {
+            let mut tick = clock.tick(limit);
+            while tick > 0 && clock.sample(tick - 1) >= limit {
+                tick -= 1;
+            }
+            while clock.sample(tick) < limit {
+                tick += 1;
+            }
+            tick
+        });
+        // The channels whose arpeggiator is on play its notes in place of
+        // their own.
+        let arpeggiated = arpeggiate
+            .then(|| arp::arpeggiate(project, song, &automation, stop))
+            .flatten();
+        let song = arpeggiated.as_ref().map_or(song, |arp| &arp.song);
+        let unbuilt = arpeggiated.as_ref().map(|arp| &arp.unbuilt);
+        let mut unplayed = BTreeSet::new();
         // The plugins are made at the slowest tempo a clip can take the
         // song to, where one that keeps time asks for the most memory, and
         // then told the tempo the song starts at.
@@ -140,7 +185,7 @@ impl Graph {
         let mut slides = Slides::default();
         let mut notes = 0;
         let mut len = clock.sample(song.end).min(limit);
-        for note in &song.notes {
+        for (at, note) in song.notes.iter().enumerate() {
             let start = clock.sample(note.tick);
             if start >= limit {
                 continue;
@@ -149,6 +194,10 @@ impl Graph {
             let Some(channel) = project.channel(note.note.channel) else {
                 continue;
             };
+            if unbuilt.is_some_and(|unbuilt| unbuilt.contains_key(&channel.index)) {
+                unplayed.insert(channel.index);
+            }
+            let glide = song.glides.get(&at);
             if channel.kind == Some(ChannelKind::Plugin) {
                 let insert = target_insert(channel);
                 let timing = (sample_rate, slowest, project.header.ppq);
@@ -173,6 +222,9 @@ impl Graph {
                 let clip = automation.pitch_shift(channel.index, note.tick as f64);
                 let shift = (levels::shift(channel), clip);
                 let done = rack.cue(place, note, start, &levels, shift, &clock);
+                if let Some(points) = glide {
+                    rack.glide(place, points);
+                }
                 len = len.max(done.min(limit));
                 played.insert(insert);
                 continue;
@@ -210,6 +262,9 @@ impl Graph {
             played.insert(insert);
             let done = start.saturating_add(voice.frames());
             slides.note(usize::from(channel.index), events.len(), note, done);
+            if let Some(points) = glide {
+                slides.glide(events.len(), points);
+            }
             events.push(Event { start, voice });
         }
         // A channel whose plugin drives a link is hosted whether a note
@@ -328,6 +383,13 @@ impl Graph {
         }
         let cues = rack.cues(&clock);
         let approximated_generators = rack.approximated();
+        let mut unplayed_arpeggiators = BTreeMap::new();
+        for channel in unplayed {
+            let what = unbuilt.and_then(|unbuilt| unbuilt.get(&channel));
+            if let Some(&what) = what {
+                *unplayed_arpeggiators.entry(what).or_default() += 1;
+            }
+        }
         mixer.host(rack.hosted);
         mixer.set_tempo(automation.tempo_at(0.0).unwrap_or(tempo));
         Ok(Graph {
@@ -350,6 +412,7 @@ impl Graph {
             unsupported_controller_targets,
             unhosted_generators: rack.unhosted,
             approximated_generators,
+            unplayed_arpeggiators,
         })
     }
 }

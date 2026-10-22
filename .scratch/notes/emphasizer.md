@@ -3,7 +3,7 @@
 State of the port (`crates/plugins/src/emphasizer.rs`, `docs/plugins/emphasizer.md`):
 
 - Done: the Delphi shell `Emphasizer_x64.dll` is mapped (VMT, state versions 1 and 2, the six parameters, the values `0x006c2bd0` hands the limiter, the limiter's interface slots). Every corpus state parses (1 project, 5 presets). Port level Gaps; `fidelity()` is Approximate for every state; the sound passes through.
-- Left: the limiter itself. All the DSP is `LimiterLite` in `Shared/ildsp_x64.dll` (`LimiterLite_CreateInstance`, looked up by name). The FL install on the machine this was done on (`/root/fl-studio/...`) has no `Shared/` directory, so it could not be read. Any full install has it.
+- Left: the limiter itself. All the DSP is `LimiterLite` in `Shared/ildsp_x64.dll` (`LimiterLite_CreateInstance`, looked up by name). The install this was first read from had no `Shared/` directory. The one at `/shared/code/fl-studio-target/.../FL Studio 2026/Shared/ildsp_x64.dll` has it, and it exports `LimiterLite_CreateInstance`, so the steps below can start.
 
 Next steps, with `ildsp_x64.dll` at hand:
 

@@ -32,19 +32,26 @@
 //! 32767 and the output is the step over 32768, so a straight curve gives
 //! `32767 / 32768` of its input and not all of it.
 //!
+//! With oversampling at `n`, the input goes up `n` times through FL's 2x
+//! half band ([`dsp::halfband`]), every sample at `2^n` times the rate goes
+//! through the table, and the output comes down through as many again
+//! before Center. FL reports no latency for it, and neither does this.
+//!
+//! With smooth modulation on, the pre amp, wet and dry gains in use glide
+//! to the parameters' a frame at a time (at the oversampled rate), 90% of
+//! the way in 5 ms of the song's frames. They start at 0 when the plugin
+//! is made, so such a state fades in.
+//!
 //! What this does not do as FL does:
 //!
-//! - Oversampling. The doc does not have the filters' coefficients, so the
-//!   curve runs at the song's rate, and [`Effect::fidelity`] says so.
-//! - Smooth modulation. FL glides the three gains to where a moved
-//!   parameter puts them, at a pace the doc does not have. Here they jump,
-//!   as FL's do with smooth off.
-//! - FL looks up as with HQ while it renders to a file, whatever the state
-//!   says. This goes by the state.
+//! - FL looks up as with HQ and oversamples 16 times while it renders to a
+//!   file (when the state oversamples at all), whatever the state says.
+//!   This goes by the state.
 
 use crate::parts::Follower;
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value};
 use dsp::curve::{Curve, Point};
+use dsp::halfband::{Oversampler, WIDEST};
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Fruity WaveShaper";
@@ -67,6 +74,11 @@ const TRAILER: usize = 20;
 
 /// How many steps a unipolar table has. A bipolar one has twice as many.
 const STEPS: usize = 0x4000;
+
+/// Smooth modulation's pace: what is left of the way after 5 ms of
+/// frames at the song's rate (`0x00830f38`, `0x00830f48`).
+const SMOOTH_LEFT: f64 = 0.1;
+const SMOOTH_TIME: f32 = 0.005;
 
 /// What Center gives its follower: `1.0070235 / rate` to go after the
 /// input with, and 0.96 of its speed kept.
@@ -224,8 +236,15 @@ pub struct WaveShaper {
     pre: f32,
     wet: f32,
     dry: f32,
+    /// The pre amp, wet and dry gains smooth modulation has in use
+    /// (`0x144`, `0x148`, `0x14c`), and the share of the way to the
+    /// parameters' they go a frame (`0x15c`).
+    glided: [f32; 3],
+    pace: f32,
     /// Center's follower of each side.
     offset: [Follower; 2],
+    /// The stages up and down (`0x160`, `0x168`).
+    oversampler: Oversampler,
 }
 
 impl Default for WaveShaper {
@@ -245,7 +264,10 @@ impl Default for WaveShaper {
             pre,
             wet,
             dry,
+            glided: [0.0; 3],
+            pace: smooth_pace(44_100.0),
             offset: [Follower::default(); 2],
+            oversampler: Oversampler::default(),
         }
     }
 }
@@ -262,15 +284,16 @@ impl WaveShaper {
         [self.pre, self.wet, self.dry] = gains(&params);
     }
 
-    /// One sample through the table and the mix.
-    fn shape(&self, x: f32) -> f32 {
+    /// One sample through the table and the mix, with the pre amp, wet
+    /// and dry gains `[pre, wet, dry]`.
+    fn shape(&self, x: f32, [pre, wet, dry]: [f32; 3]) -> f32 {
         let table = &self.table;
         let last = (table.len() - 3) as f32;
         // Step `i` is at `table[i + 1]`: one step under the first is the
         // first again, and one over the last the last.
         let step = |i: f32| f32::from(table[(i + 1.0) as usize]);
         let value = if self.bipolar {
-            let place = x * self.pre * (last * 0.5) + last * 0.5;
+            let place = x * pre * (last * 0.5) + last * 0.5;
             let nearest = place.round_ties_even();
             if self.hq {
                 let i = nearest.clamp(-1.0, last);
@@ -282,7 +305,7 @@ impl WaveShaper {
         } else {
             // The curve is for an input from 0 up, and an input under 0
             // gets what its size gets, upside down.
-            let place = x * self.pre * last;
+            let place = x * pre * last;
             let size = place.abs();
             let i = size.round_ties_even().min(last);
             let value = if self.hq {
@@ -293,8 +316,16 @@ impl WaveShaper {
             };
             value.copysign(place)
         };
-        value * self.wet / 32_768.0 + x * self.dry
+        value * wet / 32_768.0 + x * dry
     }
+}
+
+/// Smooth modulation's share of the way a frame (Dispatcher 4,
+/// `0x00830bf0`): `1 - 0.1^(1 / (rate * 0.005))`, Delphi's `Power` being
+/// `exp(y ln x)` here.
+fn smooth_pace(hz: f32) -> f32 {
+    let frames = f64::from(hz * SMOOTH_TIME);
+    (1.0 - ((1.0 / frames) * SMOOTH_LEFT.ln()).exp()) as f32
 }
 
 impl Effect for WaveShaper {
@@ -339,6 +370,8 @@ impl Effect for WaveShaper {
         self.hq = tail.get(4).is_some_and(|byte| *byte != 0);
         self.smooth = tail.get(5).is_some_and(|byte| *byte != 0);
         self.set(params);
+        // A load builds the stages again (`FUN_00832300`), from silence.
+        self.oversampler.reset();
         Ok(())
     }
 
@@ -347,19 +380,52 @@ impl Effect for WaveShaper {
     fn set_sample_rate(&mut self, hz: f32) {
         if hz.is_finite() && hz > 0.0 {
             self.hz = f64::from(hz);
+            self.pace = smooth_pace(hz.round());
         }
     }
 
+    /// `Eff_Render` (`0x00832390`): up, the table, down, then Center at
+    /// the song's rate.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         let pace = CENTER_PACE / self.hz;
+        let stages = self.oversampling as usize;
+        let gains = [self.pre, self.wet, self.dry];
+        let (mut oversampler, mut glided) = (self.oversampler, self.glided);
+        let (smooth, glide) = (self.smooth, self.pace);
+        // The gains for the next frame at the curve's rate.
+        let mut next = || {
+            if smooth {
+                for (now, to) in glided.iter_mut().zip(gains) {
+                    *now += (to - *now) * glide;
+                }
+                glided
+            } else {
+                gains
+            }
+        };
+        for (l, r) in left[..len].iter_mut().zip(&mut right[..len]) {
+            if stages == 0 {
+                let now = next();
+                [*l, *r] = [*l, *r].map(|x| self.shape(x, now));
+                continue;
+            }
+            let mut wide = [[0.0; 2]; WIDEST];
+            oversampler.up(stages, [*l, *r], &mut wide);
+            for frame in &mut wide[..1 << stages] {
+                let now = next();
+                *frame = frame.map(|x| self.shape(x, now));
+            }
+            [*l, *r] = oversampler.down(stages, &mut wide);
+        }
+        if stages > 0 {
+            oversampler.flush();
+        }
+        (self.oversampler, self.glided) = (oversampler, glided);
         for (side, samples) in [&mut left[..len], &mut right[..len]]
             .into_iter()
             .enumerate()
         {
-            for sample in samples.iter_mut() {
-                *sample = self.shape(*sample);
-            }
             if self.center {
                 let offset = &mut self.offset[side];
                 for sample in samples.iter_mut() {
@@ -388,23 +454,21 @@ impl Effect for WaveShaper {
     }
 
     fn fidelity(&self) -> Fidelity {
-        if self.oversampling > 0 {
-            Fidelity::Approximate("oversampling is left out, so the curve runs at the song's rate")
-        } else {
-            Fidelity::Exact
-        }
+        Fidelity::Exact
     }
 
-    /// Puts Center's followers back at nothing.
+    /// FL's flush (Dispatcher 2): Center's followers and the stages back
+    /// at nothing.
     fn reset(&mut self) {
         self.offset = [Follower::default(); 2];
+        self.oversampler.reset();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{corpus, every_preset, maps, presets, state};
+    use crate::testing::{self, corpus, every_preset, maps, presets, state};
 
     /// A point as version 3 of the curve saves it.
     fn point(x: f64, y: f64, tension: f32, mode: u8) -> Point {
@@ -746,10 +810,104 @@ mod tests {
         let end = bytes.len();
         bytes[end - 2..].copy_from_slice(&[0, 1]);
         assert!(!with(&bytes).hq && with(&bytes).smooth);
-        // The oversampling is said, since the curve runs at 1x.
+        // The oversampling is the byte after Center.
         assert_eq!(hq.fidelity(), Fidelity::Exact);
         bytes[18] = 2;
-        assert!(matches!(with(&bytes).fidelity(), Fidelity::Approximate(_)));
+        let four = with(&bytes);
+        assert_eq!((four.oversampling, four.fidelity()), (2, Fidelity::Exact));
+    }
+
+    /// A state of the newest version with this oversampling and smooth
+    /// modulation on or off.
+    fn oversampled(params: [i32; 3], points: &[Point], over: i32, smooth: bool) -> WaveShaper {
+        let mut bytes = newest(params, true, true, points);
+        bytes[18..22].copy_from_slice(&over.to_le_bytes());
+        let end = bytes.len();
+        bytes[end - 1] = u8::from(smooth);
+        with(&bytes)
+    }
+
+    #[test]
+    fn oversampling_is_the_half_band_up_the_curve_and_the_half_band_down() {
+        // A curve that is nearly a line, so the table gives the input
+        // back: oversampled, the output is the input up through as many
+        // of FL's half bands and down through as many again, to within
+        // the table's steps.
+        let input: Vec<f32> = (0..2000)
+            .map(|n| ((n * 7919 % 1009) as f32 / 1009.0 - 0.5) * 0.8)
+            .collect();
+        for over in 1..=4 {
+            let mut plugin = oversampled(DEFAULTS, &line(), over, false);
+            assert_eq!(plugin.latency(), 0);
+            let out = run(&mut plugin, &input);
+            let mut want = input.clone();
+            for _ in 0..over {
+                let mut wide = vec![0.0; want.len() * 2];
+                dsp::halfband::HalfBand::default().up(&want, &mut wide);
+                want = wide;
+            }
+            for v in &mut want {
+                *v *= 32_767.0 / 32_768.0;
+            }
+            for _ in 0..over {
+                let mut narrow = vec![0.0; want.len() / 2];
+                dsp::halfband::HalfBand::default().down(&want, &mut narrow);
+                want = narrow;
+            }
+            for (n, (y, w)) in out.iter().zip(&want).enumerate() {
+                assert!((y - w).abs() < 2e-6, "{over} {n}: {y} {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn oversampling_keeps_a_clipper_s_harmonics_from_folding_back() {
+        // A 7 kHz tone driven into "Fast dist 1"'s clip: its fifth
+        // harmonic, 35 kHz, folds to 9.1 kHz at 44.1 kHz and its seventh,
+        // 49 kHz, to 4.9 kHz. Sixteen times oversampled they are stopped
+        // on the way down; the tone and its third harmonic stay.
+        let tone = testing::sine(70.0 / 441.0, 3 * 4410);
+        let measure = |over: i32| {
+            let mut plugin = oversampled([192, 128, 128], &clipper(), over, false);
+            let out = run(&mut plugin, &tone);
+            let tail = &out[2 * 4410..];
+            [70.0, 210.0, 91.0, 49.0].map(|k| 20.0 * testing::partial(tail, k / 441.0).log10())
+        };
+        let [tone_1x, third_1x, fifth_1x, seventh_1x] = measure(0);
+        let [tone_16x, third_16x, fifth_16x, seventh_16x] = measure(4);
+        assert!((tone_1x - tone_16x).abs() < 0.5, "{tone_1x} {tone_16x}");
+        assert!((third_1x - third_16x).abs() < 1.5, "{third_1x} {third_16x}");
+        assert!(
+            fifth_1x > -30.0 && seventh_1x > -40.0,
+            "{fifth_1x} {seventh_1x}"
+        );
+        assert!(fifth_16x < fifth_1x - 40.0, "{fifth_1x} {fifth_16x}");
+        assert!(
+            seventh_16x < seventh_1x - 40.0,
+            "{seventh_1x} {seventh_16x}"
+        );
+    }
+
+    #[test]
+    fn smooth_modulation_glides_the_gains_from_nothing() {
+        // 90% of the way in 5 ms: 220.5 frames at 44.1 kHz.
+        let pace = smooth_pace(44_100.0);
+        assert!(((1.0 - f64::from(pace)).powf(220.5) - 0.1).abs() < 1e-6);
+        let held = vec![0.5; 2000];
+        let mut plugin = oversampled(DEFAULTS, &line(), 0, true);
+        let out = run(&mut plugin, &held);
+        // The pre amp and the wet gain both glide: 0.5 * g^2.
+        let g = 1.0 - (1.0 - pace).powi(221);
+        assert!(out[0] < 1e-3, "{}", out[0]);
+        assert!((out[220] - 0.5 * g * g).abs() < 2e-3, "{} {}", out[220], g);
+        assert!((out[1999] - 0.5).abs() < 1e-4);
+        // Off, the gains are where the parameters are at once.
+        let out = run(&mut oversampled(DEFAULTS, &line(), 0, false), &held);
+        assert!((out[0] - 0.5).abs() < 1e-4);
+        // Oversampled, the glide steps at the higher rate: twice as fast
+        // in the song's frames.
+        let out = run(&mut oversampled(DEFAULTS, &line(), 1, true), &held);
+        assert!((out[110] - 0.5 * g * g).abs() < 0.02, "{}", out[110]);
     }
 
     #[test]
@@ -884,8 +1042,10 @@ mod tests {
         let fast = named("Fast dist 1");
         assert_eq!((fast.params[0], fast.points().len()), (162, 3));
         // The dead zone of "Crossover": nothing under 0.375 of the table,
-        // which the pre amp of 2.33 puts at an input of 0.16.
+        // which the pre amp of 2.33 puts at an input of 0.16. The curve
+        // alone, without its four times oversampling.
         let mut crossover = crossover;
+        crossover.oversampling = 0;
         assert_eq!(run(&mut crossover, &[0.1, -0.15, 0.16])[..2], [0.0, -0.0]);
         assert!(run(&mut crossover, &[0.2])[0] > 0.08);
         // And it tops out at 0.625.

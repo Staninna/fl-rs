@@ -214,6 +214,9 @@ shell picks the engine from the pack kind (`0x9f1`) and both expose the same
 
 ## 4. What an implementation needs next
 
+FLEX is not built: `crates/plugins` has no port of it, and the corpus
+render leaves its 13 channels with notes silent.
+
 1. Import `engine_x64.dll` (MSVC, 5.7 MB) and read `DispatchToEngine`: the
    45-float parameter mapping, the `.flexpreset` parser and its decoder. Two
    runs (import, dispatch with callees). This is where every Hz and ms lives.

@@ -247,9 +247,11 @@ the state says.
 
 `crates/plugins/src/equo.rs` follows sections 1 to 6. It differs in:
 
-- the send buffer: there is no host call to give it to another insert, so
-  a state with a send loses that output (`fidelity()` says so), and send
-  only passes the input on. No corpus state has a send.
+- the send buffer: the plugin does not hand it to the host. The engine
+  routes one second output a plugin gives (`Effect::aux_output`) to an
+  insert its own insert sends to, but EQUO does not give one, so a state
+  with a send loses that output (`fidelity()` says so), and send only
+  passes the input on. No corpus state has a send.
 - the start: a loaded state starts with every smoother at its goal and the
   gains jumping to theirs. FL keeps the smoothers where its constructor
   left them, flat, and moves them on from there, so a project opened and

@@ -1315,8 +1315,8 @@ when not in the loop), added at the write pointer plus the per-channel offset
 `FUN_007a5660` out = (L, R) straight feedback, 1 `FUN_007a5790` out = (R, L),
 2 `FUN_007a58b0` out = (R, L) with crossed feedback; each reads the ring,
 clears it and writes `fb·out` T_d frames later (flush below 2^-24); `FX +=
-out`. The repo has no Rust for this class; Harmless and Sytrus use the same
-one.
+out`. `fl_fx::Delay32` is this class (`fl-fx.md`); Harmless and Sytrus use
+the same one.
 
 ### 4.5 Reverb (`FUN_008942b0`, setter `FUN_00893470`, `TFruityReverb`)
 
@@ -1491,6 +1491,13 @@ and unison; with steps 9 to 13 the shared FX cover most states; steps 14 to
 | 27 | sub-harmonics, unit order, local EQ, detuning, FX order, oct spacing | built |
 | 28 | strum, arpeggiator rank, VelToPortaTime | the arpeggiator rank is built (section 3.3); strum and VelToPortaTime are not (none in the corpus) |
 | - | harmonic randomness (unit 2) | not built: shape 4 sits flat at its centre in all 128 parts, which makes the unit do nothing |
+
+`fidelity` names the first of these a state asks for: a compression
+preset that is not found, an image, strum, and arpeggiator points on an
+LFO's level. A state that asks for none of them is still approximate,
+"resonance tables and FX not null-tested": no render has been checked
+against FL's. In the corpus render, 3 Harmor channels report their images
+and 15 the null test.
 
 Corpus (FL_RS_CORPUS render of every project, first 10 s): before Harmor,
 104 projects had sound and 18 Harmor channels with notes were silent;

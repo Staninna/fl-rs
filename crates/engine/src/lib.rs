@@ -12,7 +12,11 @@
 //!    song's timeline, each item showing its window of its pattern, and its
 //!    items on audio clip channels become clips. Muted items and muted
 //!    notes add nothing. A project with an empty playlist plays pattern 1
-//!    once. The notes and clips due in a block start their voices in it.
+//!    once. A channel whose arpeggiator is on plays the notes it starts in
+//!    place of its own, laid out tick by tick as FL's host does
+//!    (`docs/arpeggiator.md`); [`Rendered::unplayed_arpeggiators`] counts
+//!    the ones that ask for a part the engine does not build. The notes
+//!    and clips due in a block start their voices in it.
 //! 3. Voices. Every note on a sampler channel plays the channel's sample
 //!    from note-on for the note's length, at a speed set by its key, its
 //!    fine pitch and the channel's pitch, with velocity, channel volume and
@@ -38,14 +42,17 @@
 //!    sidechain input is handed what the insert at that number puts out,
 //!    among the inserts that send to its own: a route at level 0 is FL's
 //!    sidechain, heard by the plugin and not in the mix.
-//!    [`Rendered::sidechain_slots`] counts those plugins.
+//!    [`Rendered::sidechain_slots`] counts those plugins. A number past
+//!    those inserts is handed nothing, as in FL, and the plugin does
+//!    without.
 //! 5. Automation. An automation clip plays where the playlist has an item
 //!    for its channel, and drives the controls its links bind it to: an
-//!    insert's volume, pan, stereo separation, EQ and send levels, the volume and pan of a sampler
-//!    or audio clip channel, the tempo, and of an effect slot with a hosted
+//!    insert's volume, pan, stereo separation, EQ and send levels, the
+//!    volume, pan, pitch, pan offset and volume multiplier of a sampler or
+//!    audio clip channel, the tempo, and of an effect slot with a hosted
 //!    plugin its switch, its mix level and the plugin's parameters, which
 //!    [`Rendered::slot_targets`] counts. Of a plugin channel with a hosted
-//!    generator it drives the volume, the pan and the generator's
+//!    generator it drives the same five levels and the generator's
 //!    parameters. The controls are read at the
 //!    start of a block and stay as read until the next one: a block starts
 //!    on every 512th sample of the song and where a note or a clip starts.
@@ -54,8 +61,10 @@
 //!    other control a clip is bound to is counted in
 //!    [`Rendered::unsupported_targets`], and so is a clip bound to nothing. [`automation::Curve`] is the curve a
 //!    clip draws.
-//! 6. Controllers. A hosted plugin that is an internal controller, which is
-//!    Fruity Peak Controller, works its outputs out once a tick of the
+//! 6. Controllers. A hosted plugin that is an internal controller (Fruity
+//!    Peak Controller, Formula Controller, X-Y Controller and Control
+//!    Surface in an effect slot, Fruity Envelope Controller and Keyboard
+//!    Controller on a channel) works its outputs out once a tick of the
 //!    song, and the engine ends a block where a tick starts when it hosts
 //!    one. A 227 link from one of its outputs sets its control as the tick
 //!    starts: the output's 0 to 1, through the link's formula when it has
@@ -65,7 +74,7 @@
 //!    are played. [`automation`] has the rest.
 //!
 //! Layer channels are not played, and nor is a plugin channel whose
-//! generator the [`plugins`] crate lacks: none of FL's is built yet, and
+//! generator the [`plugins`] crate lacks:
 //! [`Rendered::unhosted_generators`] names the ones a song asks for. A
 //! generator hears of a note on the first sample of a block, because a
 //! block ends where the next note on or note off of a hosted channel is
@@ -83,8 +92,7 @@
 //! changes it, and where FL keeps its plugins, for the one that reads a
 //! file of FL's. [`Rendered::approximated_slots`] counts the hosted plugins
 //! that say they stand in for what FL's does with their state or lack a
-//! file, and the ones that ask for a sidechain input their insert does not
-//! have.
+//! file.
 //!
 //! A song ends where its last playlist item does, and [`song_length`] says
 //! where that is. An [`Engine`] stops there and lets its last voices play
@@ -106,6 +114,7 @@
 //! and [`render_with`] takes it. `docs/plugins/host-voice.md` says how FL's
 //! host gets from a note to the levels a voice plays by.
 
+mod arp;
 pub mod automation;
 mod channel_filter;
 mod clock;
@@ -196,7 +205,7 @@ pub struct Rendered {
     /// one for every clip without a link.
     pub unsupported_targets: usize,
     /// The 227 links whose source is an output of a controller plugin the
-    /// engine hosts, in the whole project: Fruity Peak Controller's
+    /// engine hosts, in the whole project, such as Fruity Peak Controller's
     /// Peak + LFO, Peak and LFO.
     pub controller_links: usize,
     /// The ones among them that drive a control the engine plays, which
@@ -215,8 +224,7 @@ pub struct Rendered {
     pub unhosted_slots: BTreeMap<String, usize>,
     /// The hosted slots whose plugin stands in for a thing its state asks
     /// for, by what [`plugins::Fidelity::Approximate`] says of it, and how
-    /// many slots each is in. A slot whose plugin asks for a sidechain
-    /// input that its insert does not have is here as well.
+    /// many slots each is in.
     pub approximated_slots: BTreeMap<&'static str, usize>,
     /// The sidechain inputs the hosted plugins listen to: every pair of
     /// an insert and an insert that sends to it which a plugin's state
@@ -237,6 +245,11 @@ pub struct Rendered {
     /// [`plugins::Fidelity::Approximate`] says of it, and how many channels
     /// each is on.
     pub approximated_generators: BTreeMap<&'static str, usize>,
+    /// The channels with a note inside the render whose arpeggiator is on
+    /// and asks for a part of FL's that the engine does not build, by that
+    /// part, and how many channels ask for each. Their notes play as they
+    /// are, not arpeggiated.
+    pub unplayed_arpeggiators: BTreeMap<&'static str, usize>,
     /// How many frames late the output is when the render starts: what the
     /// plugins on the latest way to the master add up to. Every other way
     /// there is held back to come out with it.
@@ -355,6 +368,7 @@ pub fn render_with_progress(
     let hosted_generators = graph.mixer.generators();
     let unhosted_generators = graph.unhosted_generators.clone();
     let approximated_generators = graph.approximated_generators.clone();
+    let unplayed_arpeggiators = graph.unplayed_arpeggiators.clone();
     let (latency, delayed_inserts) = (graph.mixer.latency(), graph.mixer.delayed());
 
     // A voice for every note and clip, so that none is ever stolen.
@@ -402,6 +416,7 @@ pub fn render_with_progress(
         hosted_generators,
         unhosted_generators,
         approximated_generators,
+        unplayed_arpeggiators,
         latency,
         delayed_inserts,
         unresolved: samples.unresolved(),

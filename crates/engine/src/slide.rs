@@ -25,9 +25,14 @@
 //!
 //! The note's fine pitch is not in `InitLevels.Pitch` (FL keeps it in
 //! `rec+0x1e0`), and neither is a slide note's.
+//!
+//! An arpeggiator with slide on moves `rec+0x1e0` of the note it sounds
+//! ([`crate::arp`]). That adds to what slides do, and [`Slides::glide`]
+//! takes it.
 
 use crate::clock::Clock;
 use crate::sequence::Played;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The notes of a song as slides find them, and the slides.
 #[derive(Debug, Default)]
@@ -36,6 +41,9 @@ pub(crate) struct Slides {
     tracks: Vec<Track>,
     /// The steps of the slides that are over, as [`Step`]s.
     steps: Vec<Step>,
+    /// The notes an arpeggiator glides, by their id, and the cents it
+    /// has them at from each tick on, on top of what slides do.
+    glides: Vec<(usize, Vec<(u64, f32)>)>,
 }
 
 /// A step of a slide: from output sample `at` on, note `id` is `cents` off
@@ -128,12 +136,71 @@ impl Slides {
         true
     }
 
-    /// Every step of every slide, the steps of a note in the order they
-    /// come. A step on or past the sample its note stops sounding on is
-    /// left out.
+    /// The note `id`, the last one handed to [`Slides::note`], is moved by
+    /// an arpeggiator to `points`: from each tick on, this many cents off
+    /// the pitch it started at.
+    pub fn glide(&mut self, id: usize, points: &[(u64, f32)]) {
+        self.glides.push((id, points.to_vec()));
+    }
+
+    /// Every step of every slide and glide, the steps of a note in the
+    /// order they come. A slide's step on or past the sample its note
+    /// stops sounding on is left out; a glide's steps are all kept, since
+    /// the arpeggiator makes them only while the note is held. A note that
+    /// slides and glides is at the sum of the two.
     pub fn steps(mut self, clock: &Clock) -> Vec<Step> {
         for track in &mut self.tracks {
             finish(track, u64::MAX, clock, &mut self.steps);
+        }
+        let glides = std::mem::take(&mut self.glides);
+        if glides.is_empty() {
+            return self.steps;
+        }
+        // The slides' steps of the notes that glide, taken out by note in
+        // one pass, to be summed with the glides.
+        let known: BTreeSet<usize> = self.tracks.iter().map(|t| t.id).collect();
+        let glided: BTreeSet<usize> = (glides.iter().map(|(id, _)| *id))
+            .filter(|id| known.contains(id))
+            .collect();
+        let mut slid: BTreeMap<usize, Vec<(usize, f32)>> = BTreeMap::new();
+        self.steps.retain(|step| {
+            let moved = glided.contains(&step.id);
+            if moved {
+                slid.entry(step.id).or_default().push((step.at, step.cents));
+            }
+            !moved
+        });
+        for (id, points) in glides {
+            if !glided.contains(&id) {
+                continue;
+            }
+            let slides = slid.remove(&id).unwrap_or_default();
+            let glides = points
+                .iter()
+                .map(|&(tick, cents)| (clock.sample(tick), cents));
+            // Both in the order they come: walk them together.
+            let mut changes: Vec<(usize, Option<f32>, Option<f32>)> = (slides.iter())
+                .map(|&(at, cents)| (at, Some(cents), None))
+                .chain(glides.map(|(at, cents)| (at, None, Some(cents))))
+                .collect();
+            changes.sort_by_key(|change| change.0);
+            let (mut slide, mut glide) = (0.0, 0.0);
+            for (k, &(at, s, g)) in changes.iter().enumerate() {
+                slide = s.unwrap_or(slide);
+                glide = g.unwrap_or(glide);
+                // No cut where the note would stop sounding unbent: a
+                // glide down makes a sampler voice last longer, and the
+                // voice ends where it runs off its sample or is let go of
+                // whatever steps are left.
+                let last_here = changes.get(k + 1).is_none_or(|next| next.0 != at);
+                if last_here {
+                    self.steps.push(Step {
+                        id,
+                        at,
+                        cents: slide + glide,
+                    });
+                }
+            }
         }
         self.steps
     }
@@ -222,6 +289,20 @@ mod tests {
         assert_eq!(gone.len(), 10);
         assert!(gone.iter().all(|(at, _)| *at < 10_000));
         assert_eq!(gone[0], (7500, 12.5));
+    }
+
+    #[test]
+    fn a_glide_keeps_its_steps_past_where_the_unbent_voice_would_end() {
+        // A sampler voice held for two bars that its sample would play
+        // through in 24000 samples at the speed it starts at. A slide
+        // arpeggio takes it down two octaves at sample 12000, which makes
+        // it last longer, and back up at 24000.
+        let clock = clock();
+        let mut slides = Slides::default();
+        slides.note(0, 0, &played(0, Some(768), 84, 0, false), 24_000);
+        slides.glide(0, &[(48, -2400.0), (96, 0.0)]);
+        let steps = slides.steps(&clock);
+        assert_eq!(cents(&steps, 0), [(12_000, -2400.0), (24_000, 0.0)]);
     }
 
     #[test]

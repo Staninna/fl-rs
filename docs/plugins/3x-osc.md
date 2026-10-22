@@ -560,5 +560,5 @@ the block ramps from the previous gains. (The first slot of each pair,
 - Rounded saw is `1 − 2·0.997^(16384x)`.
 - AM depth and oscillator gains carry the pan law's 0.7071; default levels are 3/8, 3/8, 1/4; Q tops out at 4.37.
 - Note-off without a volume envelope is a 10 ms cosine fade.
-- 152 project states, not 116; 181 presets. Custom shape 6 reports Approximate; HQ (13 states) is exact since its tables were rebuilt from the engine.
+- 152 project states, not 116; 181 presets. Custom shape 6 plays the saw and reports Approximate: the engine hands a generator its channel's sample (`Generator::set_channel_sample`), but `three_osc.rs` does not take it. HQ (13 states) is exact since its tables were rebuilt from the engine.
 - Envelope ticks use the song PPQ through `Generator::set_ppq`.

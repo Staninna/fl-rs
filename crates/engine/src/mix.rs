@@ -163,10 +163,6 @@ impl Line {
     }
 }
 
-/// What [`Mixer::approximated_slots`] says of a plugin whose state names a
-/// sidechain input its insert does not have.
-const NO_INPUT: &str = "the sidechain input has no insert behind it, so the plugin hears its own";
-
 /// One sidechain input of an insert: what another insert puts out, for the
 /// plugins here that listen to it. None of it is added to the bus.
 struct Side {
@@ -735,28 +731,36 @@ fn visit(
 /// late as a send from there is read, so in step with the head of its own
 /// chain. That it is the sound behind the fader is inferred. An insert
 /// with no sound to send is a silent input. A number past the insert's
-/// inputs is no input, and [`Mixer::approximated_slots`] counts the slot.
+/// inputs is handed nothing, which is FL's: its host's `GetInBuffer`
+/// (`FUN_0132baa0`) hands a plugin no buffer for a number past the list it
+/// keeps of the insert and its senders (`FUN_012528f0`), and the plugin
+/// does without, as Vocodex and Fruity Limiter do by listening to their
+/// own input. `docs/rec-225.md` has the addresses.
 ///
-/// A plugin's second output, which is Fruity Stereo Shaper's difference,
-/// is added to the bus of the insert its number counts to among the
-/// inserts its own sends to, in rising order from 1, the last of them for
-/// a higher number. It goes in as it leaves the plugin: the send's level,
-/// the slot's mix level and the insert's volume and pan are not on it. FL
-/// hands the plugin that insert's own buffer (`FUN_0132bb50`). How FL
+/// A plugin's second output, which is Fruity Stereo Shaper's difference
+/// or what Fruity Send sends, is added to the bus of the insert its
+/// number counts to among the inserts its own sends to, in rising order
+/// from 1, the last of them for a higher number. It goes in as it leaves
+/// the plugin: the send's level, the slot's mix level and the insert's
+/// volume and pan are not on it. FL hands the plugin that insert's own
+/// buffer (`FUN_0132bb50`). How FL
 /// counts to it is inferred from the "Left - Right splitter" preset, whose
 /// 2 is then the first insert after the master.
 ///
 /// A generator that is late is not made up for: it comes in with the
-/// voices of its insert, as late as it says. None is late so far.
+/// voices of its insert, as late as it says. Harmless, Harmor, Autogun,
+/// Ogun and the Patcher generator say they are.
 ///
-/// A plugin with [`Effect::controller_outputs`], which is Fruity Peak
-/// Controller, is told every tick of the song by [`Mixer::tick`], which
-/// hands back the outputs that moved. An insert with such a plugin that
-/// drives a link is in the mixer whether sound reaches it or not, because
-/// the plugin's LFO and its base levels drive their controls in silence
-/// too. A slot that is switched off, or on an insert that is, hears of no
-/// tick: that FL leaves it out is inferred from the plugin putting its LFO
-/// back in step when it is switched on.
+/// A plugin with [`Effect::controller_outputs`], a controller such as
+/// Fruity Peak Controller, Control Surface or the Envelope, Formula,
+/// Keyboard, X-Y and X-Y-Z Controllers, is told every tick of the song by
+/// [`Mixer::tick`], which hands back the outputs that moved. An insert
+/// with such a plugin that drives a link is in the mixer whether sound
+/// reaches it or not, because a controller drives its controls in silence
+/// too, as Peak Controller's LFO and base levels do. A slot that is
+/// switched off, or on an insert that is, hears of no tick: that FL leaves
+/// it out is inferred from Peak Controller putting its LFO back in step
+/// when it is switched on.
 ///
 /// The strips sit in runs that send nothing to each other, the strips one
 /// step from a strip with no route in first. A block brings into every
@@ -810,8 +814,7 @@ pub(crate) struct Mixer {
     /// their event 201 name, and the slots each is in.
     pub unhosted_slots: BTreeMap<String, usize>,
     /// The hosted slots whose plugin says another thing stands in for
-    /// what its state asks, by what the plugin says of it, and the ones
-    /// whose plugin asks for a sidechain input its insert does not have.
+    /// what its state asks, by what the plugin says of it.
     pub approximated_slots: BTreeMap<&'static str, usize>,
     /// The sidechain inputs the strips have: every pair of an insert and
     /// an insert that sends to it which a hosted plugin listens to.
@@ -1110,16 +1113,12 @@ impl Mixer {
                     .map(move |(which, n)| (slot, which, n))
             });
             // A slot counts once, whether it is fed one input or two.
-            let (mut fed, mut lacking) = (Vec::new(), Vec::new());
+            let mut fed = Vec::new();
             for (slot, which, number) in asked {
-                let Some(at_source) = number.checked_sub(1) else {
-                    continue;
-                };
-                let Some(source) = sources.get(at_source) else {
-                    if !lacking.contains(&slot) {
-                        lacking.push(slot);
-                        *approximated_slots.entry(NO_INPUT).or_default() += 1;
-                    }
+                // A number past the inputs gets no block, as FL's host
+                // hands no buffer for it, and the plugin does what its
+                // own code does without one.
+                let Some(source) = number.checked_sub(1).and_then(|at| sources.get(at)) else {
                     continue;
                 };
                 if !fed.contains(&slot) {

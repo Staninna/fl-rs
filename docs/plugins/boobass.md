@@ -179,9 +179,8 @@ The final `* 3` and the `0.5` pan smoothing are read from the listing (`asm`).
   transcendentals identified by use, not decompiled.
 - Host slot 37 (`FUN_0132bb50`): it locks a mixer track entry and returns a
   buffer; the SDK name was not matched.
-- The six PCM attack samples and loop waveforms: positions known, content
-  not extracted.
-- Which note the host maps to `FinalLevels.Pitch = 0`.
+- Which note the host maps to `FinalLevels.Pitch = 0`: taken to be key
+  60, below.
 
 ## Pitch reference
 
@@ -197,3 +196,8 @@ The final `* 3` and the `0.5` pan smoothing are read from the listing (`asm`).
 - The saturator is `sin(x·π/2)`, not tanh. The slew limit is `(attack progress + 0.0328)·44100/SR`, not pitch-dependent.
 - The level table uses `v·48` with entry 0 = 0. The doc's trims belong to the attacks; loops have their own (4, 3.5, 3, 3.25, 3.5, 3 dB), negated. `+0x104` is `1.5 − mid`.
 - The default EQ is not unity: −6/−5/−3 dB per pass, −1.28/+0.28/+3.23 dB overall.
+- Not FL's: the HQ path's box filter (`FUN_180004640`) is not built; a
+  note's pan is `dsp::pan_linear` until the host's `ComputeLRVol` is read;
+  a note ends on the sample its envelope ends, where FL ends it with the
+  block; under key 36 the decay table's formula goes on down where FL
+  reads before the table.

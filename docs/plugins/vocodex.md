@@ -140,8 +140,11 @@ through `FUN_006260c0` (type 1 lowpass, 4 highpass).
 - With L-R encoding (`0x18c`) the own input's left side is the modulator on
   both sides and its right side the carrier (`FUN_008554b0`).
 - Otherwise MOD 0 is the own input. MOD n asks the host for sidechain buffer
-  n (host vtable `+0x120`, as Fruity Limiter does) and falls back to the own
-  input when the host has none.
+  n (host vtable `+0x120`, as Fruity Limiter does, into the record at
+  `0x334`) and falls back to the own input when the buffer is nil
+  (`0x856683`). The flags FL writes beside the buffer are not read. FL's
+  host hands nil for a number past the inserts that send to the plugin's
+  insert (`docs/rec-225.md`), so such a number is the own input in FL too.
 - CAR -1 is a zeroed buffer, CAR 0 the own input, CAR n sidechain n with the
   same fallback.
 - A loaded carrier synthesizer adds its sound to the carrier, whatever CAR
@@ -152,7 +155,7 @@ What the corpus uses:
 
 | project | MOD | CAR | notes |
 |---|---|---|---|
-| render test `Vocodex.flp`, the 3 Umziky states, `Vocoder.flp` template | 1 / 0 | 0 | sidechain 1 absent or silent in some: the own input is both |
+| render test `Vocodex.flp`, the 3 Umziky states, `Vocoder.flp` template | 1 / 0 | 0 | sidechain 1 absent or silent in some: the own input is both, as in FL |
 | `Vocodex demo.flp` | 1 (Vocals) | 0 | 7600 noise |
 | `Olbaid - Harmless Essentials`, `JuiceBass - Menagerie` | 2 | 1 | both external |
 | `SeamlessR - Bass Antics` | 1 | 2 | both external, unison 1, pitch -1200 |
@@ -181,9 +184,15 @@ f32 and the band filters run in f64.
    peak of the last `round(0.012 sr)` frames of `max(|L|, |R|)`
    (`TPeakLookahead2`) and three-stage smoothing, attack `0.016 sr`, release
    `0.044 sr`.
-4. **Noise.** Uniform noise in `[-a, a]` (`ippsRandUniform_Direct_32f`),
-   the noise highpass, times the contour with contour to NOISE, plus the
-   carrier. This noisy carrier feeds the bands only.
+4. **Noise.** When the noise gain (`0x454`) is not 0, one call of
+   `ippsRandUniform_Direct_32f` (pointer `*0x8dc668`, call at `0x856e55`)
+   fills the block's interleaved stereo buffer `0x364`, two numbers a frame,
+   with uniform noise in `[-a, a]` from the seed at `0x458`; then the noise
+   highpass, times the contour with contour to NOISE, plus the carrier.
+   This noisy carrier feeds the bands only. The seed is 0 after the reset
+   `FUN_008537a0`, which a state load, a flush (dispatcher 2), a new
+   process mode (1) and the slot's switch (11) run. No block draws noise
+   while the plugin sleeps.
 5. **Rates.** Each input at its rate and at twice it. The 2x upsampler
    (`FUN_0077ab60`) is two branches of three first-order allpasses
    `y = x[-1] + a (x - y[-1])`, a = 0.14738, 0.48247, 0.88301 and 0.03915,
@@ -200,6 +209,24 @@ f32 and the band filters run in f64.
    ramp over a block (`FUN_0062c760`). Filters only run while their level is
    above 0.
 8. **Soundgoodizer** on the output when parameter 1 is above 0.
+
+### The noise generator (`Shared/dsp_ippv2_x64.dll`)
+
+`ippsRandUniform_Direct_32f(dst, len, low, high, &seed)` dispatches by CPU
+(`0x1815b3fa0`, table `0x1815b3f58`). The generic code (`0x1815ed2e0`) and
+the AVX2 code (`0x181645020`) put out the same numbers: both, run from the
+DLL's bytes, agree on a million of them. One call:
+
+- `x[0] = seed`, `x[-1] = 69069 x[0] + 0x3c6ef373`, `x[-2] = 69069 x[-1] +
+  0x3c6ef373`, borrow `c = -1`, `L = 0x436cbae9`, all u32.
+- For each number: `r = x[n-2] - x[n-3] + c`; when `r` is negative as an
+  i32, `c = -1` and `x[n] = r - 18`, else `c = 0` and `x[n] = r`. Then `L =
+  69069 L + 0x3c6ef373` and the number is `f32(i32(x[n] + L) * (high - low)
+  * k + (low + high) * 0.5)`, in f64, with `k = 0x3df0000000000007` (2^-32
+  and a hair).
+- The seed handed back is the last `x[n]`. The next call starts its
+  three words, its borrow and `L` over from it, so the run depends on how
+  long FL's blocks are.
 
 ### Band layout (`FUN_00851dd0`)
 
@@ -261,6 +288,9 @@ clamped to 40..800 Hz.
   the HQ render path always.
 - Saturation (envelopes 11 and 12, `*0x8dd640`). No corpus state turns it on.
 - Curved envelope segments, drawn straight here. None in the corpus.
-- The noise generator's numbers: IPP's uniform generator is not copied.
 - The carrier synthesizer is this crate's Sytrus, itself approximate.
 - The meters, the threads, the test speech and the editor.
+
+The noise is FL's generator, drawn once a block as FL draws it, so its
+numbers are FL's wherever the host cuts its blocks where FL's does. Where
+FL cuts its blocks is the host's business and not read here.
