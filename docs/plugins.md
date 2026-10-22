@@ -12,7 +12,7 @@ Corpus render at `22151e9`: 123 of 165 shipped projects have sound with the stoc
 | Generator | 3x Osc | 4247 | yes | 39 | implemented in crates/plugins (HQ engine exact: its tables are FL's to the bit, checked under an emulator; approximated: the custom shape plays the saw, FL's offline-render box filter not built), docs/plugins/3x-osc.md |
 | Effect | Fruity Reeverb 2 | 3742 | yes | 38 | implemented in crates/plugins (network, taps, predelay and modulation follow the engine's listing sample for sample; coefficients follow the Delphi update in f64 and are not checked bit for bit), docs/plugins/fruity-reeverb-2.md |
 | Effect | Fruity Delay 3 | 3847 |  | 31 | implemented in crates/plugins, docs/plugins/fruity-delay-3.md |
-| Effect | Fruity WaveShaper | 5608 | yes | 29 | implemented in crates/plugins (oversampling approximated), docs/plugins/fruity-waveshaper.md |
+| Effect | Fruity WaveShaper | 5608 | yes | 29 | implemented in crates/plugins (curve table, HQ lookup, oversampling up to 16x, smooth modulation and Center exact), docs/plugins/fruity-waveshaper.md |
 | Effect | Fruity Stereo Shaper | 3711 | yes | 27 | implemented in crates/plugins, docs/plugins/fruity-stereo-shaper.md |
 | Effect | Fruity Peak Controller | 3949 |  | 26 | implemented in crates/plugins (controller outputs reach 227 links through the 230 formula; `Tension()` formulas unsupported), docs/plugins/fruity-peak-controller.md |
 | Effect | Fruity Soft Clipper | 3631 | yes | 23 | implemented in crates/plugins, docs/plugins/fruity-soft-clipper.md |
