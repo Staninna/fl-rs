@@ -45,17 +45,24 @@
 //! resonators, the chorus, the reverb, the delay and the master level
 //! (`sakura_fx`).
 //!
-//! What is not FL's:
+//! Run under an emulator, the engine DLL plays what this does to the bit
+//! (`docs/plugins/sakura.md`). What is not FL's:
 //!
-//! - FL's blocks are not the host's: the LFO moves once a block and the
-//!   engine's noise is one generator for every Sakura FL has loaded.
+//! - The engine's noise is one generator for every Sakura FL has loaded;
+//!   here each has its own, starting where FL's first does.
+//! - The runtime's `powf`, `expf`, `tanf` and `cosf` are taken as
+//!   rounding once from f64, which their SSE2 builds do; the FMA3 builds a
+//!   CPU with FMA runs were not read.
+//! - The runtime's f64 `pow` (`0x180042ef0`) is Rust's, which parts from it
+//!   in the last bit on about one argument in 700: a state whose pitch
+//!   moves can drift from FL's by a step of the voice's f64 step.
 //! - The voices' lines are as long as the lowest key needs with the state's
 //!   octave and ratio; a parameter change that asks for longer lines than
 //!   the state did gets the longest the voice has, and `fidelity` says so.
 //! - The pitch wheel, mod wheel and aftertouch sources read 0: FL's piano
 //!   roll sends none.
 
-use crate::sakura_fx::{Chorus, Echo, HighPass, Plate, Resonators};
+use crate::sakura_fx::{Chorus, Echo, HighPass, Plate, Resonators, powf};
 use crate::sampler::circular;
 use crate::{Fidelity, Generator, NoteOn, StateError};
 use std::f64::consts::TAU;
@@ -81,7 +88,9 @@ const LONGEST: usize = 48_000;
 /// What the parameters start at (`0x18002f200`).
 const DEFAULTS: [f32; PARAMS] = {
     let mut p = [0.0; PARAMS];
-    let halves = [0, 1, 0x12, 0x13, 0x1d, 0x40, 0x44, 0x47, 0x48, 0x4b, 0x4c, 0x4d, 0x71];
+    let halves = [
+        0, 1, 0x12, 0x13, 0x1d, 0x40, 0x44, 0x47, 0x48, 0x4b, 0x4c, 0x4d, 0x71,
+    ];
     let mut i = 0;
     while i < halves.len() {
         p[halves[i]] = 0.5;
@@ -105,6 +114,10 @@ const DEFAULTS: [f32; PARAMS] = {
     p[0x6f] = 3.0;
     p
 };
+
+/// Pi as the LFO takes it (`0x180077ec8`).
+#[allow(clippy::approx_constant)]
+const LFO_PI: f64 = 3.141_592_653;
 
 /// The first of the mod matrix's 32 parameters: source, amount, invert
 /// and target for each of eight slots.
@@ -453,7 +466,11 @@ fn lengths(key: i32, knobs: &Knobs) -> (f64, usize, usize) {
         5 => (n, n * 3),
         _ => (n, n),
     };
-    let second = if knobs.ratio == 6 { n.wrapping_mul(4) } else { base };
+    let second = if knobs.ratio == 6 {
+        n.wrapping_mul(4)
+    } else {
+        base
+    };
     let first = first.clamp(1, LONGEST as i32) as usize;
     let second = second.clamp(1, LONGEST as i32) as usize;
     (frequency, first, second)
@@ -541,7 +558,7 @@ impl Sakura {
         self.params[n] = v;
         let k = &mut self.knobs;
         match n {
-            0 => k.level = 10f32.powf(v * 4.8 - 1.8),
+            0 => k.level = powf(10.0, v * 4.8 - f32::from_bits(0x3fe6_6667)),
             1 => {
                 let cents = ((v * 198.0 - 99.0) as i32).clamp(-99, 99);
                 k.tune = (f64::from(cents) * 0.01) as f32;
@@ -583,7 +600,7 @@ impl Sakura {
             36 => k.eg_sustain = v * v,
             37 => k.eg_release = (f64::from(fifth(v) * 50.0) + 0.1) as f32,
             38 => k.lfo_rate = (f64::from(v * v * v * 10.0) + 0.01) as f32,
-            39..=46 => self.resonators.position[n - 39] = 1.0 - v.powf(0.1),
+            39..=46 => self.resonators.position[n - 39] = 1.0 - powf(v, 0.1),
             47..=54 => {
                 self.resonators.feedback[n - 47] = (f64::from(v.sqrt()) * 0.9999) as f32;
             }
@@ -632,7 +649,10 @@ impl Sakura {
                 1 => sum += amount * voice.eg,
                 2 => sum += amount * voice.lfo,
                 6 => sum += amount * voice.velocity,
-                7 => sum = (f64::from(voice.key) * 0.0125 * f64::from(amount) + f64::from(sum)) as f32,
+                7 => {
+                    sum =
+                        (f64::from(voice.key) * 0.0125 * f64::from(amount) + f64::from(sum)) as f32
+                }
                 8 => sum += amount * voice.release,
                 // The wheels and aftertouch, at rest.
                 3..=5 => sum += amount * 0.0,
@@ -735,7 +755,9 @@ impl Sakura {
         let inverse = 1.0 / first as f64;
         voice.scale = inverse * INNER;
         voice.follow_rate = [inverse as f32, (1.0 / second as f64) as f32];
-        let comb = |len: usize, cap: usize| ((len as f32 * k.comb_ratio) as i32).max(1).min(cap as i32) as usize;
+        let comb = |len: usize, cap: usize| {
+            ((len as f32 * k.comb_ratio) as i32).max(1).min(cap as i32) as usize
+        };
         voice.combs[0].len = comb(first, LONGEST).min(capacity[0]);
         voice.combs[1].len = comb(second, LONGEST).min(capacity[1]);
         voice.envelope.start(
@@ -787,10 +809,14 @@ impl Sakura {
         let decay = (self.matrix(&voice, target::HI_CUT_DECAY) + k.hi_decay).clamp(0.0, 1.0);
         let decay = (f64::from(decay * decay * decay * 3.0) + 0.001) as f32;
         if voice.released_at > -1.0 {
-            voice.hi_rate = 0.002;
+            voice.hi_rate = f32::from_bits(0x3b03_126e);
             voice.hi_target = 0.0;
         } else if f64::from(attack) >= voice.time {
-            voice.hi_rate = if attack >= 0.001 { 0.0002 / attack } else { 1.0 };
+            voice.hi_rate = if attack >= 0.001 {
+                0.0002 / attack
+            } else {
+                1.0
+            };
             voice.hi_target = 1.0;
         } else {
             voice.hi_rate = (0.0002 / f64::from(decay)) as f32;
@@ -815,7 +841,8 @@ impl Sakura {
         for string in 0..2 {
             let sharp = k.sharpness[string] * -0.5;
             let x = (self.matrix(&voice, one[string]) + (both + k.damp[string])).clamp(0.0, 1.0);
-            let d = 50f64.powf(2.57 - f64::from(x * x * x) * 0.8995) as f32;
+            let d = 50f64.powf(2.57 - f64::from(x * x * x) * f64::from_bits(0x3fec_c8b4_3958_1061))
+                as f32;
             let c = (d * 4.535_147_3e-5).min(1.0);
             voice.damp[2 * string] = c;
             voice.sharp[2 * string] = (1.0 - c) * sharp;
@@ -825,7 +852,7 @@ impl Sakura {
             let x = (self.matrix(&voice, decays[string])
                 + (self.matrix(&voice, both_decay_target) + k.decay[string]))
                 .clamp(0.0, 1.0);
-            let mut g = x.powf(0.05);
+            let mut g = powf(x, 0.05);
             if k.decay_invert[string] {
                 g = -g;
             }
@@ -834,18 +861,26 @@ impl Sakura {
         }
         let spread = self.matrix(&voice, target::SEPARATION);
         let s = (spread + k.separation).clamp(0.0, 1.0);
-        let level = 10f32.powf(self.matrix(&voice, target::LEVEL) * 2.0);
+        let level = powf(10.0, self.matrix(&voice, target::LEVEL) * 2.0);
         let f = (1.0 - k.mix) * level * 0.05;
         voice.mix_target[0] = (1.0 - s) * f * self.key_left[key];
         voice.mix_target[1] = f * s * self.key_right[key];
         let spread = self.matrix(&voice, target::SEPARATION);
         let s = (spread + (1.0 - k.separation)).clamp(0.0, 1.0);
-        let level = 10f32.powf(self.matrix(&voice, target::LEVEL) * 2.0);
+        let level = powf(10.0, self.matrix(&voice, target::LEVEL) * 2.0);
         let f = level * k.mix * 0.05;
         voice.mix_target[2] = (1.0 - s) * f * self.key_left[key];
         voice.mix_target[3] = f * s * self.key_right[key];
-        voice.comb_feedback = if k.comb_feedback_invert { -k.comb_feedback } else { k.comb_feedback };
-        voice.comb_level = if k.comb_level_invert { -k.comb_level } else { k.comb_level };
+        voice.comb_feedback = if k.comb_feedback_invert {
+            -k.comb_feedback
+        } else {
+            k.comb_feedback
+        };
+        voice.comb_level = if k.comb_level_invert {
+            -k.comb_level
+        } else {
+            k.comb_level
+        };
         let dt = frames as f64 * (1.0 / INNER);
         let rate;
         if voice.released_at > -1.0 {
@@ -884,19 +919,24 @@ impl Sakura {
         let voices = &self.voices;
         self.order.extend((0..VOICES).filter(|n| voices[*n].active));
         let sounding = self.order.len();
-        self.order.extend((0..VOICES).filter(|n| !voices[*n].active));
+        self.order
+            .extend((0..VOICES).filter(|n| !voices[*n].active));
         let [left, right] = &mut self.inner;
         left[1..=frames].fill(0.0);
         right[1..=frames].fill(0.0);
         let mut group = 0;
         while group < sounding {
-            let lanes: [Option<usize>; 4] = std::array::from_fn(|lane| self.order.get(group + lane).copied());
+            let lanes: [Option<usize>; 4] =
+                std::array::from_fn(|lane| self.order.get(group + lane).copied());
             for frame in 1..=frames {
                 let mut sum = [0.0f32; 2];
                 let mut draws = [0.0f32; 4];
                 for draw in &mut draws {
                     *draw = self.noise as f32 * 2.328_306_4e-10;
-                    self.noise = self.noise.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+                    self.noise = self
+                        .noise
+                        .wrapping_mul(0x0bb3_8435)
+                        .wrapping_add(0x3619_636b);
                 }
                 for (lane, n) in lanes.iter().enumerate() {
                     let Some(n) = *n else { continue };
@@ -955,7 +995,8 @@ fn play(voice: &mut Voice) -> [f32; 2] {
             let rate = voice.follow_rate[n / 2];
             voice.follow[n] += rate * (exciter - voice.follow[n]);
             let into = exciter - voice.follow[n];
-            voice.low[n] += ((voice.sharp[n] * voice.y[n] + held[n]) - voice.low[n]) * voice.damp[n];
+            voice.low[n] +=
+                ((voice.sharp[n] * voice.y[n] + held[n]) - voice.low[n]) * voice.damp[n];
             let t = voice.y[n] + (voice.low[n] - voice.y[n]) * voice.damp[n];
             voice.y[n] = t / (t * t * voice.saturation + 1.0);
             voice.lines[n].samples[at[n]] = voice.gain[n] * voice.y[n] + into;
@@ -1122,7 +1163,7 @@ impl Generator for Sakura {
             return;
         }
         let (left, right) = (&mut left[..frames], &mut right[..frames]);
-        self.lfo_value = (TAU * f64::from(self.lfo_phase)).cos() as f32;
+        self.lfo_value = (f64::from(self.lfo_phase) * LFO_PI * 2.0).cos() as f32;
         let phase = f64::from(frames as f32 * self.knobs.lfo_rate) * (1.0 / self.rate)
             + f64::from(self.lfo_phase);
         self.lfo_phase = phase as f32;
@@ -1143,9 +1184,8 @@ impl Generator for Sakura {
                 let at = self.count as f64 + self.position;
                 let i = at as i32 as usize;
                 let along = (at - i as f64) as f32;
-                for side in 0..2 {
-                    let b = &self.inner[side];
-                    out[side][k] = (b[i + 1] - b[i]) * along + b[i];
+                for (o, b) in out.iter_mut().zip(&self.inner) {
+                    o[k] = (b[i + 1] - b[i]) * along + b[i];
                 }
                 self.position += ratio;
                 k += 1;
@@ -1163,9 +1203,8 @@ impl Generator for Sakura {
                 for frame in k..n {
                     let i = self.position as i32 as usize;
                     let along = (self.position - i as f64) as f32;
-                    for side in 0..2 {
-                        let b = &self.inner[side];
-                        out[side][frame] = (b[i + 1] - b[i]) * along + b[i];
+                    for (o, b) in out.iter_mut().zip(&self.inner) {
+                        o[frame] = (b[i + 1] - b[i]) * along + b[i];
                     }
                     self.position += ratio;
                 }
@@ -1209,7 +1248,11 @@ impl Generator for Sakura {
     fn tail(&self) -> usize {
         let k = &self.knobs;
         let seconds = f64::from(k.amp_release) + 0.05;
-        let effects = if self.plate.on || self.echo.on { 12.0 } else { 0.0 };
+        let effects = if self.plate.on || self.echo.on {
+            12.0
+        } else {
+            0.0
+        };
         ((seconds + effects) * self.rate) as usize + 1100
     }
 
@@ -1235,22 +1278,246 @@ mod tests {
         }
     }
 
-    #[test]
-    fn probe_render_test() {
-        let Some(root) = testing::corpus() else { return };
-        let saved = testing::projects(&root.join("System/Render tests"));
-        for saved in saved.iter().filter(|s| s.plugin == NAME) {
-            let mut synth = Sakura::default();
-            synth.set_sample_rate(44_100.0);
-            synth.set_state(&saved.state).unwrap();
-            synth.note_on(note(1, 60));
-            let (mut l, mut r) = (vec![0.0; 44_100], vec![0.0; 44_100]);
-            for (a, b) in l.chunks_mut(512).zip(r.chunks_mut(512)) {
-                synth.process(a, b);
+    /// One note on `key`, let go at `release`, in blocks of 512 that end
+    /// where the note is let go, as the harness in
+    /// `.scratch/notes/sakura-emu` plays the engine DLL.
+    fn render(synth: &mut Sakura, key: i16, frames: usize, release: usize) -> [Vec<f32>; 2] {
+        let (mut left, mut right) = (vec![0.0; frames], vec![0.0; frames]);
+        synth.note_on(note(1, key));
+        let mut done = 0;
+        while done < frames {
+            if done == release {
+                synth.note_off(1);
             }
-            let peak = l.iter().chain(&r).fold(0.0f32, |m, v| m.max(v.abs()));
-            let rms = (l.iter().map(|v| v * v).sum::<f32>() / l.len() as f32).sqrt();
-            eprintln!("{} peak {peak} rms {rms} first {:?}", synth.program(), &l[100..110]);
+            let mut end = (done + 512).min(frames);
+            if done < release {
+                end = end.min(release);
+            }
+            synth.process(&mut left[done..end], &mut right[done..end]);
+            done = end;
+        }
+        [left, right]
+    }
+
+    /// A state of the length FL writes with these parameters and name.
+    fn state_of(params: &[f32; PARAMS]) -> Vec<u8> {
+        let mut state = b"SSLF".to_vec();
+        state.extend((STATE_LEN as u32 - 8).to_le_bytes());
+        state.extend(b"1rkS");
+        for p in params {
+            state.extend(p.to_le_bytes());
+        }
+        let mut name = [0u8; 128];
+        name[..4].copy_from_slice(b"Test");
+        state.extend(name);
+        assert_eq!(state.len(), STATE_LEN);
+        state
+    }
+
+    #[test]
+    fn a_state_is_read_and_a_bad_one_refused() {
+        let mut params = DEFAULTS;
+        params[0] = 0.25;
+        params[113] = 1.0;
+        let mut synth = Sakura::default();
+        synth.set_state(&state_of(&params)).unwrap();
+        assert_eq!(synth.program(), "Test");
+        assert_eq!(synth.param(0), 0.25);
+        assert_eq!(synth.param(113), 1.0);
+        assert_eq!(synth.fidelity(), Fidelity::Exact);
+
+        let good = state_of(&DEFAULTS);
+        let mut bad = good.clone();
+        bad[..4].copy_from_slice(b"XXXX");
+        assert!(matches!(
+            synth.set_state(&bad),
+            Err(StateError::Version { .. })
+        ));
+        let mut bad = good.clone();
+        bad[8..12].copy_from_slice(b"2rkS");
+        assert!(matches!(
+            synth.set_state(&bad),
+            Err(StateError::Version { .. })
+        ));
+        assert!(matches!(
+            synth.set_state(&good[..100]),
+            Err(StateError::Length { .. })
+        ));
+        let mut bad = good;
+        bad[12 + 4 * 5..12 + 4 * 6].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(matches!(
+            synth.set_state(&bad),
+            Err(StateError::Range { param: 5, .. })
+        ));
+        // A refused state leaves the one before.
+        assert_eq!(synth.param(0), 0.25);
+    }
+
+    /// The level knob is `10^(4.8 v - 1.8)`, with the engine's 1.8 an f32
+    /// a step above the nearest one, as its 4.8 is: 0.375 is unity.
+    #[test]
+    fn the_level_knob_is_decibels_with_the_engine_s_constant() {
+        let mut synth = Sakura::default();
+        synth.apply(0, 0.375);
+        assert_eq!(synth.knobs.level, 1.0);
+        synth.apply(0, 0.0);
+        assert!((synth.knobs.level - 10f32.powf(-1.8)).abs() < 1e-6);
+        synth.apply(0, 1.0);
+        assert!((synth.knobs.level - 1000.0).abs() < 0.01);
+    }
+
+    /// A key's string is `48000 / f` samples long, split between the two
+    /// strings by the ratio, and the octave knob moves `f` by octaves.
+    #[test]
+    fn a_key_s_strings_are_a_period_long() {
+        let mut knobs = Sakura::default().knobs;
+        let (f, first, second) = lengths(69, &knobs);
+        assert!((f - 440.0).abs() < 1e-9);
+        assert_eq!((first, second), (109, 109));
+        knobs.ratio = 4;
+        assert_eq!(lengths(69, &knobs), (f, 109, 218));
+        knobs.ratio = 0;
+        // A quarter, and the first string a whole number of them.
+        assert_eq!(lengths(69, &knobs), (f, 108, 27));
+        knobs.ratio = 3;
+        knobs.octave = 1.0;
+        let (f, first, _) = lengths(69, &knobs);
+        assert!((f - 3520.0).abs() < 1e-9);
+        assert_eq!(first, 13);
+        knobs.octave = 0.0;
+        let (f, first, _) = lengths(69, &knobs);
+        assert!((f - 55.0).abs() < 1e-9);
+        assert_eq!(first, 872);
+    }
+
+    /// The envelope rises over its attack, falls to the sustain over its
+    /// decay and to nothing over its release, in straight lines a block
+    /// at a time.
+    #[test]
+    fn the_envelope_is_straight_lines() {
+        let mut e = Envelope::default();
+        e.start(0.01, 0.1, 0.25);
+        // 480 samples of attack: half way after 240.
+        let values: Vec<f32> = (0..5).map(|_| e.tick(48)).collect();
+        assert!((values[4] - 0.5).abs() < 1e-6, "{values:?}");
+        assert!(values.windows(2).all(|w| w[1] > w[0]));
+        while e.stage == 0 {
+            e.tick(48);
+        }
+        assert_eq!(e.value, 1.0);
+        // 4800 of decay to a quarter: five eighths after half of it.
+        for _ in 0..50 {
+            e.tick(48);
+        }
+        assert!((e.value - 0.625).abs() < 1e-9, "{}", e.value);
+        for _ in 0..60 {
+            e.tick(48);
+        }
+        assert_eq!(e.value, 0.25);
+        e.let_go(0.1);
+        for _ in 0..50 {
+            e.tick(48);
+        }
+        assert!((e.value - 0.125).abs() < 1e-9, "{}", e.value);
+        for _ in 0..60 {
+            e.tick(48);
+        }
+        assert_eq!(e.value, 0.0);
+        assert!(e.idle);
+    }
+
+    /// A plucked string sounds at its key: the sound repeats every
+    /// `44100 / 440` frames for A at 440 Hz.
+    #[test]
+    fn a_note_sounds_at_its_pitch() {
+        let mut synth = Sakura::default();
+        let [left, _] = render(&mut synth, 69, 8192, usize::MAX);
+        let tail = &left[4096..];
+        let peak = tail.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.01, "{peak}");
+        let correlation = |lag: usize| -> f64 {
+            let n = tail.len() - lag;
+            (0..n)
+                .map(|i| f64::from(tail[i]) * f64::from(tail[i + lag]))
+                .sum::<f64>()
+                / n as f64
+        };
+        let best = (60..140)
+            .max_by(|a, b| correlation(*a).total_cmp(&correlation(*b)))
+            .unwrap();
+        assert!((99..=101).contains(&best), "{best}");
+    }
+
+    #[test]
+    fn follows_note_pitch() {
+        testing::follows_note_pitch(|| Box::new(Sakura::default()), 44_100.0);
+    }
+
+    /// Bit for bit what `engine_x64.dll`'s own `CSakuraSynth` plays for the
+    /// render test's state under the harness in `.scratch/notes/sakura-emu`
+    /// (key 60, 20000 frames at 44.1 kHz, let go at 9999): every sample's
+    /// bits folded together, and three of them.
+    #[test]
+    fn plays_the_render_test_as_the_engine_dll_does() {
+        let Some(root) = testing::corpus() else {
+            return;
+        };
+        let saved = testing::projects(&root.join("System/Render tests"));
+        let ours: Vec<_> = saved.iter().filter(|s| s.plugin == NAME).collect();
+        assert_eq!(ours.len(), 1);
+        let mut synth = Sakura::default();
+        synth.set_sample_rate(44_100.0);
+        synth.set_state(&ours[0].state).unwrap();
+        let [left, right] = render(&mut synth, 60, 20_000, 9999);
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for (l, r) in left.iter().zip(&right) {
+            for bits in [l.to_bits(), r.to_bits()] {
+                hash = (hash ^ u64::from(bits)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        let at = |n: usize| [left[n].to_bits(), right[n].to_bits()];
+        assert_eq!(at(1000), [0xbf45_de71, 0xbf08_0233]);
+        assert_eq!(at(5000), [0xbe3d_897d, 0xbea4_8975]);
+        assert_eq!(at(12_000), [0xbc3b_c596, 0xbbc3_fc82]);
+        assert_eq!(hash, 0x3772_88ed_838c_d379);
+    }
+
+    /// How many Sakura presets FL ships, the plugin database's among them.
+    const PRESETS: usize = 504;
+
+    /// Every Sakura state FL ships, in a preset or a project, loads as its
+    /// floats say and plays a note that is heard and stays finite.
+    #[test]
+    fn every_shipped_state_loads_and_plays() {
+        let Some(root) = testing::corpus() else {
+            return;
+        };
+        let mut saved = testing::every_preset(&root, NAME);
+        let presets = saved.len();
+        let ours = |saved: &testing::Saved| saved.plugin.eq_ignore_ascii_case(NAME);
+        saved.extend(testing::projects(&root).into_iter().filter(ours));
+        assert_eq!((presets, saved.len()), (PRESETS, PRESETS + 5));
+        for saved in saved {
+            assert_eq!(saved.state.len(), STATE_LEN, "{}", saved.file);
+            let mut synth = crate::generator_by_name(&saved.plugin).unwrap();
+            if let Err(error) = synth.set_state(&saved.state) {
+                panic!("{}: {error}", saved.file);
+            }
+            assert_eq!(synth.fidelity(), Fidelity::Exact, "{}", saved.file);
+            for index in 0..PARAMS {
+                let at = 12 + 4 * index;
+                let word = f32::from_le_bytes(saved.state[at..at + 4].try_into().unwrap());
+                assert_eq!(synth.param(index), word, "{}", saved.file);
+            }
+            synth.note_on(note(1, 60));
+            let (mut left, mut right) = (vec![0.0; 8192], vec![0.0; 8192]);
+            for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+                synth.process(l, r);
+            }
+            let all = || left.iter().chain(&right);
+            assert!(all().all(|v| v.is_finite()), "{}", saved.file);
+            let peak = all().fold(0.0f32, |m, v| m.max(v.abs()));
+            assert!((1e-6..16.0).contains(&peak), "{peak} in {}", saved.file);
         }
     }
 
@@ -1271,52 +1538,66 @@ mod tests {
         let release: usize = env("SAKURA_RELEASE", usize::MAX);
         let block: usize = env("SAKURA_BLOCK", 512);
         let rate: f32 = env("SAKURA_RATE", 44_100.0);
+        let velocity: f32 = env::<f32>("SAKURA_VELOCITY", 100.0) / 100.0;
         let state = std::fs::read(path).unwrap();
+        // The harness runs the DLL flushing results to zero (MXCSR 0x9f80).
+        #[cfg(target_arch = "x86_64")]
+        if std::env::var("SAKURA_FTZ").is_ok() {
+            #[allow(deprecated, unsafe_code)]
+            // SAFETY: only how results under f32's normal range round.
+            unsafe {
+                std::arch::x86_64::_mm_setcsr(0x9f80)
+            };
+        }
         let mut synth = Sakura::default();
         synth.set_sample_rate(rate);
         synth.set_state(&state).unwrap();
+        eprintln!("HP {:?}", synth.high[0]);
         let mut events: Vec<(usize, bool, i16)> = std::env::var("SAKURA_EVENTS")
             .unwrap_or_default()
             .split_whitespace()
             .map(|event| {
                 let parts: Vec<&str> = event.split(':').collect();
-                (parts[2].parse().unwrap(), parts[0] == "on", parts[1].parse().unwrap())
+                (
+                    parts[2].parse().unwrap(),
+                    parts[0] == "on",
+                    parts[1].parse().unwrap(),
+                )
             })
             .collect();
+        if events.is_empty() {
+            events.push((0, true, key));
+            if release != usize::MAX {
+                events.push((release, false, key));
+            }
+        }
         events.sort();
         events.reverse();
-        if events.is_empty() {
-            synth.note_on(note(1, key));
-        }
         let mut out = String::new();
         let mut done = 0;
         while done < frames {
             while events.last().is_some_and(|event| event.0 <= done) {
                 let (_, on, key) = events.pop().unwrap();
                 if on {
-                    synth.note_on(note(key as u32 + 1000, key));
+                    synth.note_on(NoteOn {
+                        velocity,
+                        ..note(key as u32 + 1000, key)
+                    });
                 } else {
                     synth.note_off(key as u32 + 1000);
                 }
             }
-            let n = block.min(frames - done);
+            // A block ends at the next event, as the harness's does.
+            let mut n = block.min(frames - done);
+            if let Some(event) = events.last() {
+                n = n.min(event.0 - done);
+            }
             let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
             synth.process(&mut l, &mut r);
             for i in 0..n {
                 out += &format!("{:?} {:?}\n", l[i], r[i]);
             }
             done += n;
-            if done <= 3 * n {
-                let v = &synth.voices[0];
-                eprintln!("step {} scale {} freq {}", v.step, v.scale, v.frequency);
-                eprintln!("damp {:?} sharp {:?}", v.damp, v.sharp);
-                eprintln!("gain {:?} mix {:?}", v.gain_target, v.mix_target);
-                eprintln!("b {:?} hc {:?} amp {:?}", (v.b0, v.a1, v.a2), (v.hi_rate, v.hi_target, v.hi_env, v.hi_cut, v.hi_res), (v.amp_rate, v.amp_target, v.amp));
-                eprintln!("sat {} follow {:?} comb {:?} eg {:?}", v.saturation, v.follow_rate, (v.comb_level, v.comb_feedback), (v.eg, v.lfo));
-            }
-            if done >= release && release != usize::MAX {
-                synth.note_off(1);
-            }
         }
         std::fs::write(std::env::var("SAKURA_OUT").unwrap(), out).unwrap();
     }

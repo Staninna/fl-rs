@@ -1,4 +1,5 @@
 """Minimal unicorn harness over the Sakura engine DLL (copied from tools/plugstate/vst_emu.py)."""
+import os
 import struct
 import sys
 
@@ -11,7 +12,9 @@ from unicorn.x86_const import (
 )
 
 STACK, HEAP, STUBS, RET = 0x10000000, 0x40000000, 0x30000000, 0x30100000
-PATH = '/root/work/sakura/dll/engine_x64.dll'
+# Sakura's engine DLL in your FL Studio install.
+PATH = os.environ.get('SAKURA_DLL', '/root/fl-studio/drive_c/Program Files/Image-Line/FL Studio 2026'
+                      '/Plugins/Fruity/Generators/Sakura/engine_x64.dll')
 
 
 class Emu:

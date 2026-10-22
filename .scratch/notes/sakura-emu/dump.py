@@ -33,7 +33,7 @@ for p in sorted(list(root.rglob("*.flp"))+list(root.rglob("*.fst"))):
         for eid, v in events(b):
             if eid == 201: cur = s(v)
             if eid == 213 and cur and cur.lower()=="sakura":
-                print(p, len(v)); out=pathlib.Path("/root/work/sakura/states"); out.mkdir(exist_ok=True)
+                print(p, len(v)); out=pathlib.Path(sys.argv[2])/"states"; out.mkdir(exist_ok=True)
                 (out/(p.stem+f"_{len(list(out.glob(p.stem+'*')))}.bin")).write_bytes(v)
                 cur=None
     except Exception as e: print("FAIL",p,e,file=sys.stderr)
