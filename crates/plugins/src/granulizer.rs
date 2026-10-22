@@ -70,9 +70,9 @@
 //!
 //! What is not FL's:
 //!
-//! - FL reads the sample with a kernel that is not read. A 4-point
-//!   Hermite curve stands in between frames; at the file's own pitch and
-//!   rate the frames are read as they are, as FL's player does.
+//! - FL reads the sample through its interpolator (`+0xf0`, `0x5fce50`),
+//!   built in `dsp::interpolator`, at the render's quality, which is
+//!   inferred as FPC's and Slicex's is ([`sampler::RENDER_POINTS`]).
 //! - The transients (the regions of the file, or the ones FL detects), and
 //!   so the transient trigger mode and the transient hold, are not built,
 //!   and fidelity says so for a state that asks for them.
@@ -84,7 +84,7 @@
 //!   else. Here each plugin starts from 0.
 
 use crate::fruit_kick::Articulation;
-use crate::sampler::{Wave, circular};
+use crate::sampler::{self, Wave, circular};
 use crate::tab::{Articulator, Clock, Tab};
 use crate::three_osc::{PPQ, new_tab};
 use crate::{Fidelity, Generator, NoteOn, SampleFile, StateError, knob_value, state_version};
@@ -495,6 +495,7 @@ impl Granulizer {
                     grain.end - grain.pos
                 };
                 let run = (stretch.max(0) as usize).min(len - at);
+                let reader = sampler::reader(grain.step);
                 for n in 0..run {
                     let floor = grain.at.floor() as i64;
                     if floor >= loop_len {
@@ -505,7 +506,7 @@ impl Granulizer {
                             break;
                         }
                     }
-                    let (l, r) = wave.frame(grain.at);
+                    let (l, r) = wave.read(grain.at, &reader);
                     grain.at += grain.step;
                     let gain = grain.gain + n as f32 * grain.gain_step;
                     out_l[at + n] += l * gain * grain.gains.0;

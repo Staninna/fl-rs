@@ -165,8 +165,12 @@ and `crates/plugins/src/tab.rs` plays it from 3x Osc's port.
 
 ## Not built
 
-- The sample player's interpolation kernel (`+0xf0`, a windowed sinc of
-  up to 512 points by `0x5fce50`): a Hermite curve stands in.
+The sample player's interpolation kernel (`+0xf0`, a windowed sinc of up to
+512 points by `0x5fce50`) is FL's interpolator, now built in
+`crates/dsp/src/interpolator.rs` and read at the render's quality (16
+points a side), which is inferred as for FPC and Slicex.
+
+
 - Transients: the regions of the file, FL's detection (`0x7397a0`,
   `0x7400a0`), the transient branch of the block and the transient hold.
 - The tempo lock: it needs the sample's beats, the dispatcher's 0x13.
