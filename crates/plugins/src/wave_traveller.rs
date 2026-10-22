@@ -928,9 +928,11 @@ mod tests {
         let Some(root) = testing::corpus() else {
             return;
         };
-        // An install that also has `Patches/Plugin database` has one more.
+        // Installs differ in a few presets outside the pinned projects: 9
+        // in one, 10 in another, and one more with `Patches/Plugin
+        // database`.
         let mut saved = testing::every_preset(&root, NAME);
-        assert!((10..=11).contains(&saved.len()), "{}", saved.len());
+        assert!((9..=11).contains(&saved.len()), "{}", saved.len());
         let ours = |saved: &testing::Saved| saved.plugin.eq_ignore_ascii_case(NAME);
         let projects = testing::projects(&root).into_iter().filter(ours);
         saved.extend(projects);
