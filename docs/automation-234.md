@@ -275,3 +275,34 @@ A clip or a controller link on one of these is played by setting nothing:
   2 NoteBook 2 bindings in `Astes - Bien Duro`.
 - A control of an automation clip's LFO when that clip's LFO is off
   (`docs/rec-channel.md`).
+
+## What the corpus render still counts unsupported
+
+The corpus render counts the bindings and controller links of the first
+10 seconds of every project. What it still counts, and why:
+
+- Parameters of a plugin channel whose generator the engine does not host:
+  FLEX (`Cuebur & Thandi Draai - Africa's Calling`, `Edlan & Ella Noël -
+  Song For You`, `Mehran Abbasi - With You`, `Purps On The Beat Feat
+  Luclover - Stroll Up`) and FLEX's volume in `Mehdi Ebrahiminejad - Never
+  Out`. Nothing plays on those channels.
+- Parameters of Fruity Formula Controller in `Astes - Raubana - LIFE`,
+  which the engine does not host.
+- Slicex parameter 5 (control 0x8005) of the eight channels of `Drumloop
+  Masher.flp`, linked from a controller: the rebuilt Slicex has no
+  parameter table (`docs/plugins/slicex.md` maps no `ProcessParam`).
+- The arpeggiator's time (0x303) of `nucleon - Harmless Galactic` channel
+  14, whose arpeggiator is on: the engine has no arpeggiator.
+- A clip bound to nothing: `Asher Postman - Future House` channel 34. FL
+  drives nothing from it either; the render counts it so that a clip whose
+  link did not decode does not pass unseen.
+
+Past the first 10 seconds, the rest of the corpus adds: the arpeggiator
+time and gate of FLEX, 3x Osc and DrumSynth channels (`Mehran Abbasi -
+With You`), mod X on 3x Osc (`Square a Saw - Oxygen` channel 51, see
+`docs/rec-channel.md`), formant (control 15) on an audio clip channel
+(`Mehdi Ebrahiminejad - Never Out` channel 14: the engine stretches
+nothing), the amount of 3x Osc's pitch envelope (0x1408, `Treben - Gimbal
+and Sinan - RawFL`: the instrument envelopes of a channel are not played),
+the switch of a Transporter slot, which the engine does not host, and the
+other plugin parameters of unhosted or parameterless plugins.
