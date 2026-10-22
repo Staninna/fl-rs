@@ -44,7 +44,7 @@ pub(crate) struct Live {
 
 impl Live {
     /// The channel with this index of `project`, at `sample_rate`. `sample`
-    /// and `plugin_dir` are what [`Graph::pattern`] takes. A channel that
+    /// and `plugin_dir` are what [`Graph::keys`] takes. A channel that
     /// plays nothing, or is not there, makes a `Live` that stays silent.
     pub fn new(
         project: &Project,
@@ -67,7 +67,7 @@ impl Live {
             notes: notes.collect(),
             ..Pattern::default()
         }];
-        let graph = Graph::pattern(&alone, index, sample_rate, &Approximate, plugin_dir, sample)?;
+        let graph = Graph::keys(&alone, index, sample_rate, &Approximate, plugin_dir, sample)?;
         Ok(Self::of(graph))
     }
 
@@ -181,25 +181,31 @@ pub(crate) mod tests {
     /// A sampler channel at 120 BPM and PPQ 96 that plays 100 samples of
     /// 0.5, and a pattern of its own the live notes leave out.
     pub(crate) fn live() -> Live {
+        let channel = Channel {
+            index: 0,
+            kind: Some(ChannelKind::Sampler),
+            sample_path: Some("sample".to_owned()),
+            ..Channel::default()
+        };
+        live_with(channel, 100)
+    }
+
+    /// [`live`] with this channel, playing `frames` samples of 0.5.
+    fn live_with(channel: Channel, frames: usize) -> Live {
         let mut project = Project::new(flp::Header {
             format: 0,
             channel_count: 1,
             ppq: 96,
         });
         project.tempo_milli = Some(120_000);
-        project.channels.push(Channel {
-            index: 0,
-            kind: Some(ChannelKind::Sampler),
-            sample_path: Some("sample".to_owned()),
-            ..Channel::default()
-        });
+        project.channels.push(channel);
         project.patterns.push(Pattern {
             index: 1,
             notes: vec![Note::default()],
             ..Pattern::default()
         });
         let sample = Arc::new(Sample {
-            left: vec![0.5; 100],
+            left: vec![0.5; frames],
             right: None,
             rate: RATE,
         });
@@ -239,5 +245,32 @@ pub(crate) mod tests {
         // A key the channel has not got plays nothing.
         live.note_on(200, 1.0);
         assert_eq!(play(&mut live, 10), [0.0; 10]);
+    }
+
+    #[test]
+    fn a_key_plays_as_it_did_before_the_arpeggiator_whatever_it_is_set_to() {
+        // An arpeggiator down over two octaves, which would start an
+        // octave up and let go of a step sequencer note after a tick.
+        let mut bytes = [0u8; 168];
+        for (at, value) in [(40, 2), (44, 2), (48, -1), (52, 1024), (56, 48), (92, 1)] {
+            bytes[at..at + 4].copy_from_slice(&i32::to_le_bytes(value));
+        }
+        let channel = |parameters| Channel {
+            index: 0,
+            kind: Some(ChannelKind::Sampler),
+            sample_path: Some("sample".to_owned()),
+            parameters,
+            ..Channel::default()
+        };
+        let arpeggiated = channel(flp::event::layout::Parameters::from_bytes(&bytes));
+        let (mut plain, mut arpeggiated) =
+            (live_with(channel(None), 1000), live_with(arpeggiated, 1000));
+        plain.note_on(60, 1.0);
+        arpeggiated.note_on(60, 1.0);
+        // A tick is 250 samples. The key sounds on past it, at its own
+        // pitch, through the whole sample.
+        let out = play(&mut arpeggiated, 1200);
+        assert_eq!(out, play(&mut plain, 1200));
+        assert_eq!(out.iter().filter(|v| **v != 0.0).count(), 1000);
     }
 }
