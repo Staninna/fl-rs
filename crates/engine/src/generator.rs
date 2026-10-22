@@ -28,13 +28,39 @@
 //!   what the channel's tracking adds.
 //! - `release` is the note's release velocity, from 0 to 1.
 //!
+//! - `color` is the note's colour, which FL's host hands a plugin for
+//!   `FPV_GetColor`.
+//!
 //! FL puts the channel's volume and pan into `FinalLevels` as well. Here
 //! they go on what the generator puts out, so that automation can move
-//! them under a sounding note.
+//! them under a sounding note, and the generator hears the volume's gain
+//! with [`Generator::set_channel_volume`] for a plugin that does more with
+//! `FinalLevels.Vol` than multiply by it.
+//!
+//! # Pitch that moves under a note
+//!
+//! FL's host works `FinalLevels` out again on every tick (`FUN_00d2ab30`
+//! calls `FUN_00d265e0`), and a plugin reads them as its voices run. Two
+//! things move the pitch there while a note sounds, and the engine tells a
+//! generator of both with [`Generator::set_note_pitch`]:
+//!
+//! - A slide note, which starts no voice ([`crate::slide`]): the notes of
+//!   its channel and its colour that sound slide to its key a tick at a
+//!   time.
+//! - A clip on the channel's pitch (control 4). The note takes the pitch
+//!   the clip gives as it starts, and is told on every tick that the clip
+//!   moves it after.
+//!
+//! The slides are worked out with the cues, from the song. The clip is
+//! read on every tick as the song plays, and [`Hosted::bend`] tells the
+//! notes it moves. Only the generators of
+//! channels with one or the other keep the notes they have sounding, in
+//! room the graph makes for the most that sound at once.
 
 use crate::clock::Clock;
 use crate::levels::Triggered;
 use crate::sequence::Played;
+use crate::slide::Slides;
 use crate::{Curves, voice};
 use model::{Channel, ChannelKind};
 use plugins::{Fidelity, Generator, NoteOn};
@@ -51,14 +77,144 @@ pub(crate) struct Hosted {
     /// Left and right gain of the channel's volume and pan, which go on
     /// what the generator puts out.
     pub gains: (f32, f32),
+    /// The notes it sounds and what moves their pitch, for a generator on
+    /// a channel with slide notes or a clip on its pitch.
+    pub bend: Option<Bend>,
 }
 
 /// What a generator is told.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Signal {
-    On(NoteOn),
+    /// A note starts, with what a clip on the channel's pitch has moved
+    /// it by, in cents. That is in the note's pitch already.
+    On(NoteOn, f32),
     /// The note that was started under this number ends.
     Off(u32),
+    /// A slide has the note's pitch at this many cents from key 60, as the
+    /// note on's key and fine pitch are, before what a clip on the
+    /// channel's pitch adds.
+    Slide { voice: u32, pitch: f32 },
+}
+
+/// The notes a generator has sounding, for a generator whose notes'
+/// pitch moves: what each started at and has been told.
+#[derive(Debug, Default)]
+pub(crate) struct Bend {
+    /// Whether a clip drives the channel's pitch.
+    pub follows: bool,
+    /// How far the clip had moved the channel's pitch, in cents, when the
+    /// notes were last told.
+    shift: f32,
+    /// In the order they started. The room is made when the graph is
+    /// built, and when it runs out the note that started first goes.
+    notes: Vec<Bent>,
+}
+
+impl Bend {
+    /// How far the clip had moved the channel's pitch, in cents, when the
+    /// notes were last told.
+    pub fn shift(&self) -> f32 {
+        self.shift
+    }
+}
+
+/// A note of a [`Bend`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bent {
+    voice: u32,
+    /// The note's pitch in cents from key 60 with its slide, without what
+    /// a clip on the channel's pitch adds.
+    pitch: f32,
+    /// The pitch the generator has of it.
+    told: f32,
+    /// The output sample from which it no longer sounds: past its note
+    /// off and the generator's tail. `usize::MAX` while it is held.
+    until: usize,
+}
+
+/// The pitch of a note on in cents from key 60.
+fn pitch_of(note: &NoteOn) -> f32 {
+    f32::from(note.key - 60) * 100.0 + note.fine_pitch
+}
+
+impl Hosted {
+    /// Hand the generator a cue. Returns whether it let go of a note.
+    pub fn hear(&mut self, cue: &Cue) -> bool {
+        match cue.signal {
+            Signal::On(note, shift) => {
+                if let Some(bend) = &mut self.bend {
+                    if bend.notes.len() == bend.notes.capacity() && !bend.notes.is_empty() {
+                        bend.notes.remove(0);
+                    }
+                    let told = pitch_of(&note);
+                    bend.notes.push(Bent {
+                        voice: note.voice,
+                        pitch: told - shift,
+                        told,
+                        until: usize::MAX,
+                    });
+                }
+                self.generator.note_on(note);
+                false
+            }
+            Signal::Off(voice) => {
+                self.generator.note_off(voice);
+                if let Some(bend) = &mut self.bend {
+                    let until = cue.at.saturating_add(self.generator.tail());
+                    for bent in bend.notes.iter_mut().filter(|b| b.voice == voice) {
+                        bent.until = until;
+                    }
+                }
+                true
+            }
+            Signal::Slide { voice, pitch } => {
+                let Some(bend) = &mut self.bend else {
+                    return false;
+                };
+                let shift = bend.shift;
+                for bent in bend.notes.iter_mut().filter(|b| b.voice == voice) {
+                    bent.pitch = pitch;
+                    tell(self.generator.as_mut(), bent, shift);
+                }
+                false
+            }
+        }
+    }
+
+    /// The channel's pitch is `shift` cents off the project's at output
+    /// sample `at`, by the clip on it: tell every note that still sounds
+    /// whose pitch that moves. Notes that have stopped sounding are
+    /// forgotten.
+    pub fn bend(&mut self, at: usize, shift: f32) {
+        let Some(bend) = &mut self.bend else {
+            return;
+        };
+        bend.notes.retain(|bent| bent.until > at);
+        if shift == bend.shift {
+            return;
+        }
+        bend.shift = shift;
+        for bent in &mut bend.notes {
+            tell(self.generator.as_mut(), bent, shift);
+        }
+    }
+
+    /// Forget the notes, which the generator has cut or let go of all at
+    /// once.
+    pub fn forget(&mut self) {
+        if let Some(bend) = &mut self.bend {
+            bend.notes.clear();
+        }
+    }
+}
+
+/// Tell the generator the pitch of a note when it has moved.
+fn tell(generator: &mut dyn Generator, bent: &mut Bent, shift: f32) {
+    let pitch = bent.pitch + shift;
+    if pitch != bent.told {
+        bent.told = pitch;
+        generator.set_note_pitch(bent.voice, pitch);
+    }
 }
 
 /// A signal and the output sample it is due on.
@@ -102,6 +258,9 @@ pub(crate) fn hosted(
     let state = channel.plugin_state.as_deref();
     let taken = state.map_or(Ok(()), |state| generator.set_state(state));
     taken.ok()?;
+    if let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) {
+        generator.set_channel_sample(path);
+    }
     Some(generator)
 }
 
@@ -134,6 +293,14 @@ pub(crate) struct Rack {
     /// FL's `Plugins/Fruity/Generators` directory, which every generator
     /// is told as it is made.
     pub plugin_dir: Option<PathBuf>,
+    /// The notes cued so far, which numbers the next.
+    voices: u32,
+    /// Every note cued, by its number: the generator it is for, the output
+    /// samples it starts and stops sounding on, and its pitch as its note
+    /// on has it, without a clip's, in cents from key 60.
+    notes: Vec<(usize, usize, usize, f32)>,
+    /// The slides of the notes, by their number and their generator.
+    slides: Slides,
 }
 
 impl Rack {
@@ -143,13 +310,14 @@ impl Rack {
     /// for one that is switched off, which is not.
     ///
     /// `timing` is the rate in Hz, the tempo in BPM and the PPQ the
-    /// generator is made at, and `adjust` the channel's [`voice::adjust`].
+    /// generator is made at, and `adjusts` the channel's [`voice::adjust`]
+    /// and [`voice::pan_offset`].
     pub fn place(
         &mut self,
         channel: &Channel,
         insert: u16,
         timing: (u32, f64, u16),
-        adjust: i32,
+        adjusts: (i32, i32),
         curves: &dyn Curves,
     ) -> Option<usize> {
         if channel.enabled == Some(false) || self.passed.contains(&channel.index) {
@@ -159,7 +327,7 @@ impl Rack {
         if let Some(place) = self.hosted.iter().position(made) {
             return Some(place);
         }
-        let Some(generator) = hosted(channel, Some(timing), self.plugin_dir.as_deref()) else {
+        let Some(mut generator) = hosted(channel, Some(timing), self.plugin_dir.as_deref()) else {
             self.passed.insert(channel.index);
             let name = channel.plugin_name.as_deref().filter(|n| !n.is_empty());
             if let Some(name) = name {
@@ -167,12 +335,25 @@ impl Rack {
             }
             return None;
         };
+        // The plugins a Patcher leaves out count as unhosted.
+        for inner in generator.unhosted() {
+            *self.unhosted.entry(inner.clone()).or_default() += 1;
+        }
         let (volume, pan) = voice::levels(channel);
+        generator
+            .set_channel_volume(curves.volume_adjust_gain(adjusts.0) * curves.volume_gain(volume));
         self.hosted.push(Hosted {
+            bend: None,
             channel: channel.index,
             insert,
             generator,
-            gains: voice::gains(volume, pan, curves.volume_adjust_gain(adjust), 0.0, curves),
+            gains: voice::gains(
+                volume,
+                pan as i32 + adjusts.1,
+                curves.volume_adjust_gain(adjusts.0),
+                0.0,
+                curves,
+            ),
         });
         Some(self.hosted.len() - 1)
     }
@@ -190,26 +371,36 @@ impl Rack {
         approximated
     }
 
+    /// A clip drives the pitch of the channel of the generator at `place`,
+    /// so its notes are told when it moves.
+    pub fn follow_pitch(&mut self, place: usize) {
+        self.hosted[place].bend.get_or_insert_default().follows = true;
+    }
+
     /// Cue a note for the generator at `place`: its note on at `start` and
     /// its note off where the clock puts its end. Returns the output sample
     /// the generator is done with it by.
     ///
     /// `levels` is what the host makes of the note, and `shift` how far
-    /// the channel moves its notes, in cents.
+    /// the channel moves its notes, in cents: by its own settings, and by a
+    /// clip on its pitch as the note starts.
     pub fn cue(
         &mut self,
         place: usize,
         played: &Played,
         start: usize,
         levels: &Triggered,
-        shift: f32,
+        shift: (f32, f32),
         clock: &Clock,
     ) -> usize {
         let note = &played.note;
         let length = played.length.unwrap_or(0);
         let end = clock.sample(played.tick + length).max(start);
         // One number for each note of the song, by the note's place in it.
-        let voice = (self.cues.len() / 2) as u32;
+        let voice = self.voices;
+        self.voices += 1;
+        let (own, clip) = shift;
+        let shift = own + clip;
         // Whole keys go to the key and the rest to the fine pitch.
         let keys = (shift / 100.0).round();
         let on = NoteOn {
@@ -223,22 +414,66 @@ impl Rack {
             mod_y: levels.mod_y,
             slide: note.slide(),
             porta: note.porta(),
+            color: note.color(),
         };
-        for (at, signal) in [(start, Signal::On(on)), (end, Signal::Off(voice))] {
+        for (at, signal) in [(start, Signal::On(on, clip)), (end, Signal::Off(voice))] {
             self.cues.push(Cue {
                 at,
                 generator: place,
                 signal,
             });
         }
-        end.saturating_add(self.hosted[place].generator.tail())
+        let done = end.saturating_add(self.hosted[place].generator.tail());
+        self.slides.note(place, voice as usize, played, done);
+        self.notes.push((place, start, done, pitch_of(&on) - clip));
+        done
+    }
+
+    /// A slide note for the generator at `place`, which bends the notes
+    /// of its colour that sound ([`Slides::slide`]).
+    pub fn slide(&mut self, place: usize, played: &Played, clock: &Clock) {
+        if self.slides.slide(place, played, clock) {
+            self.hosted[place].bend.get_or_insert_default();
+        }
     }
 
     /// The cues in the order they are due. Where two are due on one
-    /// sample, the note that started first comes first, and a note's on
-    /// comes before its off.
-    pub fn cues(&mut self) -> Vec<Cue> {
+    /// sample, the note that started first comes first, a note's on comes
+    /// before its off, and the notes' come before the slides'.
+    ///
+    /// The generators whose notes' pitch moves get room for as many notes
+    /// as they sound at once.
+    pub fn cues(&mut self, clock: &Clock) -> Vec<Cue> {
         let mut cues = std::mem::take(&mut self.cues);
+        for step in std::mem::take(&mut self.slides).steps(clock) {
+            let (place, _, _, pitch) = self.notes[step.id];
+            cues.push(Cue {
+                at: step.at,
+                generator: place,
+                signal: Signal::Slide {
+                    voice: step.id as u32,
+                    pitch: pitch + step.cents,
+                },
+            });
+        }
+        for (place, hosted) in self.hosted.iter_mut().enumerate() {
+            let Some(bend) = &mut hosted.bend else {
+                continue;
+            };
+            let mut edges: Vec<(usize, i32)> = (self.notes.iter())
+                .filter(|note| note.0 == place)
+                .flat_map(|&(_, start, done, _)| [(start, 1), (done, -1)])
+                .collect();
+            // A note that ends where another starts is gone by then.
+            edges.sort_unstable();
+            let mut sounding = 0;
+            let mut most = 1;
+            for (_, step) in edges {
+                sounding += step;
+                most = most.max(sounding);
+            }
+            bend.notes = Vec::with_capacity(most as usize);
+        }
         cues.sort_by_key(|cue| cue.at);
         cues
     }
@@ -272,7 +507,7 @@ mod tests {
         };
         let mut rack = Rack::default();
         let place = rack
-            .place(&channel, 0, (48_000, 120.0, 96), 12_800, curves)
+            .place(&channel, 0, (48_000, 120.0, 96), (12_800, 0), curves)
             .unwrap();
         let played = Played {
             tick: 0,
@@ -286,12 +521,12 @@ mod tests {
             &played,
             0,
             &triggered,
-            levels::shift(&channel),
+            (levels::shift(&channel), 0.0),
             &clock,
         );
         // What the generator makes its pitch of is FinalLevels.Pitch, from
         // the channel's root.
-        let Signal::On(on) = rack.cues()[0].signal else {
+        let Signal::On(on, _) = rack.cues(&clock)[0].signal else {
             panic!("the first cue is the note on");
         };
         let pitch = (f32::from(on.key) - 60.0) * 100.0 + on.fine_pitch;

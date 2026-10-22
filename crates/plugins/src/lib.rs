@@ -11,21 +11,24 @@
 //! [`boobass::BooBass`], [`fruit_kick::FruitKick`], [`sytrus::Sytrus`] and
 //! [`three_osc::ThreeOsc`].
 //!
-//! So far: [`balance::Balance`], [`blood_overdrive::BloodOverdrive`],
+//! So far: [`balance::Balance`], [`bass_boost::BassBoost`],
+//! [`blood_overdrive::BloodOverdrive`],
 //! [`chorus::Chorus`], [`compressor::Compressor`],
 //! [`convolver::Convolver`], [`delay_2::Delay2`], [`delay_3::Delay3`],
-//! [`delay_bank::DelayBank`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
-//! [`flangus::Flangus`],
+//! [`delay_bank::DelayBank`], [`emphasis::Emphasis`], [`fast_dist::FastDist`], [`fast_lp::FastLp`], [`filter::Filter`],
+//! [`flanger::Flanger`], [`flangus::Flangus`], [`free_filter::FreeFilter`],
 //! [`limiter::Limiter`], [`love_philter::LovePhilter`],
 //! [`maximus::Maximus`],
 //! [`multiband_compressor::MultibandCompressor`], [`panomatic::PanOMatic`],
-//! [`parametric_eq_2::ParametricEq2`],
-//! [`peak_controller::PeakController`], [`pitcher::Pitcher`],
+//! [`parametric_eq::ParametricEq`], [`parametric_eq_2::ParametricEq2`],
+//! [`peak_controller::PeakController`], [`phaser::Phaser`],
+//! [`pitcher::Pitcher`],
 //! [`reeverb_2::Reeverb2`],
 //! [`soft_clipper::SoftClipper`], [`soundgoodizer::Soundgoodizer`],
 //! [`spreader::Spreader`],
 //! [`stereo_enhancer::StereoEnhancer`], [`stereo_shaper::StereoShaper`],
-//! [`transient_processor::TransientProcessor`] and
+//! [`transient_processor::TransientProcessor`],
+//! [`vintage_chorus::VintageChorus`], [`vintage_phaser::VintagePhaser`] and
 //! [`waveshaper::WaveShaper`].
 //!
 //! Fruity Peak Controller is an internal controller: beside its sound it
@@ -35,69 +38,132 @@
 pub mod autogun;
 mod autogun_engine;
 pub mod balance;
+pub mod bass_boost;
 pub mod bassdrum;
+pub mod beepmap;
 pub mod blood_overdrive;
 pub mod boobass;
+pub mod center;
 pub mod chorus;
 pub mod compressor;
+pub mod control_surface;
 pub mod convolver;
+pub mod db_meter;
+pub mod delay;
 pub mod delay_2;
 pub mod delay_3;
 pub mod delay_bank;
 pub mod directwave;
+mod directwave_fx;
+pub mod drumaxx;
 pub mod drumpad;
 mod drumpad_voice;
+pub mod drumsynth_live;
 pub mod dx10;
+pub mod edison;
 pub mod effector;
+pub mod emphasis;
+mod emphasis_dsp;
+pub mod emphasizer;
+pub mod envelope_controller;
 pub mod equo;
 pub mod fast_dist;
 pub mod fast_lp;
 pub mod filter;
+mod fl_formula;
 pub mod fl_fx;
 pub mod fl_keys;
+pub mod fl_slayer;
+mod fl_slayer_engine;
+pub mod flanger;
 pub mod flangus;
+pub mod formula_controller;
 pub mod fpc;
+pub mod free_filter;
+pub mod frequency_shifter;
 pub mod frequency_splitter;
 pub mod fruit_kick;
+pub mod fruity_slicer;
+pub mod fruity_slicer_2;
 mod generator;
+pub mod gms;
+mod gms_fx;
+pub mod granulizer;
 pub mod gross_beat;
 pub mod harmless;
 pub mod harmor;
 mod harmor_art;
 mod harmor_fx;
 mod harmor_state;
+pub mod html_notebook;
 pub mod hyper_chorus;
+pub mod kepler;
+pub mod kepler_exo;
+pub mod keyboard_controller;
 pub mod limiter;
+mod linear_phase;
 pub mod love_philter;
+pub mod low_lifter;
 pub mod luxeverb;
 pub mod maximus;
 mod menvelope;
+pub mod minisynth;
+pub mod morphine;
+mod morphine_fx;
+mod morphine_noise;
+mod morphine_state;
 pub mod multiband_compressor;
+pub mod mute_2;
+pub mod notebook;
+pub mod notebook_2;
 pub mod ogun;
 pub mod panomatic;
+pub mod parametric_eq;
 pub mod parametric_eq_2;
+mod parametric_eq_2_engine;
 mod parts;
+pub mod pass_through;
+pub mod patcher;
+pub mod patcher_state;
 pub mod peak_controller;
+pub mod phase_inverter;
+pub mod phaser;
 pub mod pitch_shifter;
 pub mod pitcher;
 pub mod port;
+pub mod razer_chroma;
+pub mod reeverb;
 pub mod reeverb_2;
+pub mod sakura;
+mod sakura_fx;
 mod sampler;
+pub mod send;
+pub mod seven_band_eq;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
 pub mod spreader;
+pub mod squeeze;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod sytrus;
+mod tab;
 #[cfg(any(test, feature = "test-generators"))]
 pub mod test_sine;
 #[cfg(test)]
 mod testing;
 pub mod three_osc;
 pub mod transient_processor;
+pub mod transporter;
+pub mod vintage_chorus;
+pub mod vintage_phaser;
 pub mod vocodex;
+pub mod wave_candy;
+pub mod wave_traveller;
 pub mod waveshaper;
+pub mod wrapper;
+pub mod xy_controller;
+pub mod zgameeditor;
 
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
@@ -264,7 +330,35 @@ pub trait Effect: Send {
     /// longer than any before it and longer than 4096 frames, and never
     /// otherwise. A plugin that does not say takes no notice.
     fn set_sidechain(&mut self, _index: usize, _left: &[f32], _right: &[f32]) {}
+
+    /// Hand `each` every output the last block filled beside the main one,
+    /// for a host that has numbered outputs, as FL's Patcher has: the
+    /// number the plugin's state gives it (1 for the first) and the left
+    /// and right side, each as long as that block. Two may share a number
+    /// and add up there. This allocates nothing. A plugin that does not
+    /// say has its [`Effect::aux_output`] at [`Effect::sidechain_output`].
+    fn outputs(&self, each: &mut Output<'_>) {
+        if let Some((left, right)) = self.aux_output() {
+            each(self.sidechain_output(), left, right);
+        }
+    }
+
+    /// The host takes every one of [`Effect::outputs`] where its number
+    /// says, as FL's Patcher does, so a plugin no longer counts them as
+    /// left out in [`Effect::fidelity`]. The others take no notice.
+    fn route_outputs(&mut self) {}
+
+    /// The plugins inside this one that are not built and are passed
+    /// through, by their event 201 names, for a plugin that hosts others,
+    /// as FL's Patcher does. Empty for the others.
+    fn unhosted(&self) -> &[String] {
+        &[]
+    }
 }
+
+/// What [`Effect::outputs`] hands each output to: its number and its left
+/// and right side.
+pub type Output<'a> = dyn FnMut(usize, &[f32], &[f32]) + 'a;
 
 /// How near a plugin comes to FL's with the state it has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +381,9 @@ pub enum StateError {
     /// The state starts with a version newer than the plugin reads. FL
     /// leaves such a state alone too.
     Version { found: i32 },
+    /// The state holds another plugin, one this crate does not host, as a
+    /// Fruity Wrapper's can.
+    Unhosted,
 }
 
 impl fmt::Display for StateError {
@@ -301,11 +398,22 @@ impl fmt::Display for StateError {
             StateError::Version { found } => {
                 write!(f, "the state is of version {found}, which is too new")
             }
+            StateError::Unhosted => write!(f, "the state holds a plugin that is not hosted"),
         }
     }
 }
 
 impl std::error::Error for StateError {}
+
+/// The effects that leave the sound as it is, by their event 201 names.
+const PASS_THROUGH: [&str; 6] = [
+    db_meter::NAME,
+    html_notebook::NAME,
+    notebook::NAME,
+    notebook_2::NAME,
+    razer_chroma::NAME,
+    wave_candy::NAME,
+];
 
 /// The effect FL loads under this event 201 name, set to its defaults.
 /// `None` for a plugin that is not built yet.
@@ -315,6 +423,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
     let is = |known: &str| name.eq_ignore_ascii_case(known);
     if is(balance::NAME) {
         Some(Box::new(balance::Balance::default()))
+    } else if is(center::NAME) {
+        Some(Box::new(center::Center::default()))
+    } else if is(mute_2::NAME) {
+        Some(Box::new(mute_2::Mute2::default()))
+    } else if is(phase_inverter::NAME) {
+        Some(Box::new(phase_inverter::PhaseInverter::default()))
     } else if is(blood_overdrive::NAME) {
         Some(Box::new(blood_overdrive::BloodOverdrive::default()))
     } else if is(chorus::NAME) {
@@ -323,14 +437,22 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(compressor::Compressor::default()))
     } else if is(convolver::NAME) {
         Some(Box::new(convolver::Convolver::default()))
+    } else if is(delay::NAME) {
+        Some(Box::new(delay::Delay::default()))
     } else if is(delay_2::NAME) {
         Some(Box::new(delay_2::Delay2::default()))
     } else if is(delay_3::NAME) {
         Some(Box::new(delay_3::Delay3::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
+    } else if is(edison::NAME) {
+        Some(Box::new(edison::Edison))
     } else if is(effector::NAME) {
         Some(Box::new(effector::Effector::default()))
+    } else if is(emphasis::NAME) {
+        Some(Box::new(emphasis::Emphasis::default()))
+    } else if is(emphasizer::NAME) {
+        Some(Box::new(emphasizer::Emphasizer::default()))
     } else if is(equo::NAME) {
         Some(Box::new(equo::Equo::default()))
     } else if is(fast_dist::NAME) {
@@ -339,8 +461,24 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(fast_lp::FastLp::default()))
     } else if is(filter::NAME) {
         Some(Box::new(filter::Filter::default()))
+    } else if is(vintage_chorus::NAME) {
+        Some(Box::new(vintage_chorus::VintageChorus::default()))
+    } else if is(vintage_phaser::NAME) {
+        Some(Box::new(vintage_phaser::VintagePhaser::default()))
+    } else if is(phaser::NAME) {
+        Some(Box::new(phaser::Phaser::default()))
+    } else if is(formula_controller::NAME) {
+        Some(Box::new(formula_controller::FormulaController::default()))
+    } else if is(free_filter::NAME) {
+        Some(Box::new(free_filter::FreeFilter::default()))
+    } else if is(bass_boost::NAME) {
+        Some(Box::new(bass_boost::BassBoost::default()))
+    } else if is(flanger::NAME) {
+        Some(Box::new(flanger::Flanger::default()))
     } else if is(flangus::NAME) {
         Some(Box::new(flangus::Flangus::default()))
+    } else if is(frequency_shifter::NAME) {
+        Some(Box::new(frequency_shifter::FrequencyShifter::default()))
     } else if is(frequency_splitter::NAME) {
         Some(Box::new(frequency_splitter::FrequencySplitter::default()))
     } else if is(gross_beat::NAME) {
@@ -351,6 +489,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(limiter::Limiter::default()))
     } else if is(love_philter::NAME) {
         Some(Box::new(love_philter::LovePhilter::default()))
+    } else if is(low_lifter::NAME) {
+        Some(Box::new(low_lifter::LowLifter::default()))
     } else if is(luxeverb::NAME) {
         Some(Box::new(luxeverb::Luxeverb::default()))
     } else if is(maximus::NAME) {
@@ -361,6 +501,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         ))
     } else if is(panomatic::NAME) {
         Some(Box::new(panomatic::PanOMatic::default()))
+    } else if is(parametric_eq::NAME) {
+        Some(Box::new(parametric_eq::ParametricEq::default()))
     } else if is(parametric_eq_2::NAME) {
         Some(Box::new(parametric_eq_2::ParametricEq2::default()))
     } else if is(peak_controller::NAME) {
@@ -369,14 +511,22 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(pitch_shifter::PitchShifter::default()))
     } else if is(pitcher::NAME) {
         Some(Box::new(pitcher::Pitcher::default()))
+    } else if is(reeverb::NAME) {
+        Some(Box::new(reeverb::Reeverb::default()))
     } else if is(reeverb_2::NAME) {
         Some(Box::new(reeverb_2::Reeverb2::default()))
+    } else if is(send::NAME) {
+        Some(Box::new(send::Send::default()))
+    } else if is(seven_band_eq::NAME) {
+        Some(Box::new(seven_band_eq::SevenBandEq::default()))
     } else if is(soft_clipper::NAME) {
         Some(Box::new(soft_clipper::SoftClipper::default()))
     } else if is(soundgoodizer::NAME) {
         Some(Box::new(soundgoodizer::Soundgoodizer::default()))
     } else if is(spreader::NAME) {
         Some(Box::new(spreader::Spreader::default()))
+    } else if is(squeeze::NAME) {
+        Some(Box::new(squeeze::Squeeze::default()))
     } else if is(stereo_enhancer::NAME) {
         Some(Box::new(stereo_enhancer::StereoEnhancer::default()))
     } else if is(stereo_shaper::NAME) {
@@ -387,6 +537,18 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(vocodex::Vocodex::default()))
     } else if is(waveshaper::NAME) {
         Some(Box::new(waveshaper::WaveShaper::default()))
+    } else if PASS_THROUGH.iter().any(|known| is(known)) {
+        Some(Box::new(pass_through::PassThrough::new()))
+    } else if is(control_surface::NAME) {
+        Some(Box::new(control_surface::ControlSurface::default()))
+    } else if is(xy_controller::NAME) {
+        Some(Box::new(xy_controller::XyController::default()))
+    } else if is(zgameeditor::NAME) {
+        Some(Box::new(zgameeditor::ZGameEditor))
+    } else if is(wrapper::NAME) {
+        Some(Box::new(wrapper::Wrapper::default()))
+    } else if is(patcher::NAME) {
+        Some(Box::new(patcher::Patcher::default()))
     } else {
         None
     }
@@ -493,7 +655,8 @@ mod tests {
         assert!(by_name("Fruity fast dist").is_some());
         assert!(by_name("FRUITY BALANCE").is_some());
         assert!(by_name("fruity reeverb 2").is_some());
-        assert!(by_name("Fruity Reeverb").is_none());
+        assert!(by_name("Fruity Reeverb").is_some());
+        assert!(by_name("Fruity Reeverb 3").is_none());
         assert!(by_name("Fruity Balance ").is_none());
         assert!(by_name("").is_none());
     }
@@ -630,8 +793,17 @@ mod tests {
             let Some(mut effect) = by_name(&saved.plugin) else {
                 continue;
             };
-            if let Err(error) = effect.set_state(&saved.state) {
-                panic!("{} in {}: {error}", saved.plugin, saved.file);
+            match effect.set_state(&saved.state) {
+                // A wrapper of an effect not built yet, which
+                // `wrapper::tests` counts.
+                // Counted in `edison::tests`.
+                Err(StateError::Unhosted)
+                    if saved.plugin == wrapper::NAME || saved.plugin == edison::NAME =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("{} in {}: {error}", saved.plugin, saved.file),
+                Ok(()) => {}
             }
             let plugin = saved.plugin.to_ascii_lowercase();
             *loaded.entry((plugin, saved.state.len())).or_insert(0) += 1;
@@ -639,11 +811,20 @@ mod tests {
         // What the docs count in the 165 projects, but for Soft Clipper,
         // where the doc has 27.
         for (plugin, len, uses) in [
+            ("edison", 625, 1),
+            ("edison", 667, 2),
+            ("edison", 695, 2),
             ("effector", 316, 27),
+            ("emphasis", 64, 4),
+            ("emphasis", 67, 1),
+            ("emphasizer", 29, 1),
             ("equo", 4143, 10),
+            ("frequency shifter", 52, 5),
+            ("fruity bass boost", 12, 2),
             ("fruity compressor", 28, 2),
             ("fruity compressor", 32, 51),
             ("fruity compressor", 36, 35),
+            ("fruity delay", 28, 1),
             ("fruity delay 2", 32, 62),
             ("fruity delay 3", 108, 110),
             ("fruity delay bank", 792, 41),
@@ -652,23 +833,31 @@ mod tests {
             ("fruity filter", 29, 12),
             ("fruity blood overdrive", 36, 26),
             ("fruity chorus", 52, 20),
+            ("fruity flanger", 52, 5),
+            ("fruity free filter", 21, 4),
             ("fruity flangus", 32, 56),
             ("fruity limiter", 168, 156),
             ("fruity limiter", 169, 190),
             ("fruity multiband compressor", 124, 35),
             ("fruity panomatic", 24, 193),
+            ("fruity parametric eq", 116, 9),
             ("fruity parametric eq 2", 305, 21),
             ("fruity parametric eq 2", 309, 328),
             ("fruity parametric eq 2", 350, 199),
             ("fruity parametric eq 2", 354, 590),
             ("fruity peak controller", 42, 36),
+            ("fruity reeverb", 44, 7),
+            ("fruity phaser", 40, 3),
             ("fruity reeverb 2", 58, 62),
             ("fruity reeverb 2", 66, 271),
+            ("fruity send", 16, 2),
             ("fruity soft clipper", 8, 28),
+            ("fruity squeeze", 52, 2),
             ("fruity stereo enhancer", 24, 24),
             ("fruity stereo shaper", 36, 77),
             ("frequency splitter", 113, 17),
             ("hyper chorus", 52, 20),
+            ("low lifter", 82, 4),
             ("luxeverb", 165, 13),
             ("luxeverb", 169, 11),
             ("pitcher", 160, 61),
@@ -676,6 +865,8 @@ mod tests {
             ("pitch shifter", 75, 15),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
+            ("vintage chorus", 72, 12),
+            ("vintage phaser", 149, 1),
         ] {
             let found = loaded.get(&(plugin.to_owned(), len)).copied();
             assert_eq!(found, Some(uses), "{plugin} at {len} bytes");
@@ -707,11 +898,23 @@ mod tests {
             "maximus",
             "soundgoodizer",
             "vocodex",
+            // Counted in `wrapper::tests`.
+            "fruity wrapper",
+            // Counted in their own tests.
+            "control surface",
+            "fruity formula controller",
+            "fruity x-y controller",
+            // Counted in `zgameeditor::tests`.
+            "zgameeditor visualizer",
+            // Counted in `patcher::tests`.
+            "patcher",
         ];
+        // Any state does for an effect that leaves the sound alone.
+        let passes = |plugin: &str| PASS_THROUGH.iter().any(|n| n.eq_ignore_ascii_case(plugin));
         let lengths = loaded
             .keys()
-            .filter(|(plugin, _)| !others.contains(&plugin.as_str()));
-        assert_eq!(lengths.count(), 37);
+            .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
+        assert_eq!(lengths.count(), 56);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

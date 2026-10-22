@@ -30,8 +30,9 @@
 //! - The eight articulators (envelopes and LFOs on volume, pan, pitch and
 //!   the rest) are read and not run. With them switched off, which is how
 //!   nearly every state has them, FL plays a slice out as here.
-//! - The resampler is FL's shared one, not read: a step of 1 copies frames,
-//!   anything else is a 4-point Hermite curve.
+//! - The player is FL's interpolator ([`dsp::interpolator`]) on the
+//!   region's frames alone, at the quality the host asks for, taken to be
+//!   FL's default render quality (`sampler::RENDER_POINTS`).
 //! - The declicker at a slice's ends, time stretching, the filter, the
 //!   layer modes that pick one of several slices on a key, reversing and
 //!   the start offset are left out.
@@ -45,6 +46,7 @@
 use crate::menvelope::{Class, MEnvelope, Reader};
 use crate::sampler::{self, Bank, Wave};
 use crate::{Fidelity, Generator, NoteOn, SampleFile, StateError, knob_gain};
+use dsp::interpolator::Interpolator;
 use std::path::{Component, Path, PathBuf};
 
 /// The plugin's event 201 name.
@@ -173,9 +175,11 @@ struct Voice {
     wave: usize,
     /// Source frames: where the region starts, where it stops and where the
     /// voice is.
+    start: usize,
     pos: f64,
     stop: f64,
     step: f64,
+    reader: Interpolator,
     gains: (f32, f32),
 }
 
@@ -642,9 +646,13 @@ impl Generator for Slicex {
             self.voices.push(Voice {
                 note: note.voice,
                 wave: place,
+                start: start as usize,
                 pos: start as f64,
-                stop: end as f64,
+                // The region's last frame sounds: FL's player is given
+                // `end - start + 1` frames.
+                stop: (end + 1).min(frames) as f64,
                 step,
+                reader: sampler::reader(step),
                 gains,
             });
         }
@@ -667,7 +675,8 @@ impl Generator for Slicex {
                 if voice.pos >= voice.stop {
                     break;
                 }
-                let (l, r) = wave.frame(voice.pos);
+                let region = voice.start..voice.stop as usize;
+                let (l, r) = wave.read_in(region, voice.pos - voice.start as f64, &voice.reader);
                 left[n] += l * voice.gains.0;
                 right[n] += r * voice.gains.1;
                 voice.pos += voice.step;
@@ -727,7 +736,7 @@ impl Generator for Slicex {
         if self.settings.first().is_some_and(|m| *m > 1) && self.keys.iter().any(|k| k.len() > 1) {
             return Fidelity::Approximate("Slicex: a layer mode that picks one slice is left out");
         }
-        Fidelity::Approximate("Slicex: FL's resampler and declicker are not read")
+        Fidelity::Approximate("Slicex: FL's declicker is not read")
     }
 
     fn sample_paths(&self) -> Vec<String> {
@@ -900,6 +909,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -927,19 +937,19 @@ mod tests {
         sx.note_on(note(1, 61));
         // A note off does not stop it.
         sx.note_off(1);
-        // FL hands its player the region's length as its last frame less
-        // its first, so the last frame does not sound.
+        // FL hands its player the frames from the region's first to its
+        // last, and the last sounds too.
         let (left, right) = play(&mut sx, 150);
-        for n in 0..99 {
+        for n in 0..100 {
             let want = f32::from(frames[100 + n]) / 32_768.0;
             assert!((left[n] - want).abs() < 1e-6, "{n}");
             assert_eq!(left[n], right[n]);
         }
-        assert!(left[99..].iter().all(|v| *v == 0.0));
+        assert!(left[100..].iter().all(|v| *v == 0.0));
         // The last region ends with the file, and key 63 has none.
         sx.note_on(note(2, 62));
-        let (left, _) = play(&mut sx, 100);
-        assert!((left[98] - f32::from(frames[298]) / 32_768.0).abs() < 1e-6 && left[99] == 0.0);
+        let (left, _) = play(&mut sx, 101);
+        assert!((left[99] - f32::from(frames[299]) / 32_768.0).abs() < 1e-6 && left[100] == 0.0);
         sx.note_on(note(3, 63));
         assert!(play(&mut sx, 10).0.iter().all(|v| *v == 0.0));
         assert!(sx.tail() >= 100);
@@ -956,7 +966,7 @@ mod tests {
         assert_eq!((regions[0].end, regions[1].key), (Some(49), 36));
         sx.note_on(note(1, 60));
         let (left, _) = play(&mut sx, 60);
-        assert!(left[48] != 0.0 && left[49..].iter().all(|v| *v == 0.0));
+        assert!(left[49] != 0.0 && left[50..].iter().all(|v| *v == 0.0));
         sx.note_on(note(2, 36));
         assert!((play(&mut sx, 4).0[0] - f32::from(frames[100]) / 32_768.0).abs() < 1e-6);
         // The base key falls an octave for every 12 regions above 54.
@@ -991,11 +1001,11 @@ mod tests {
         high.fine_pitch = 600.0;
         sx.note_on(high);
         let (left, _) = play(&mut sx, 10);
-        assert!(
-            (left[3] - 6.0 / 32_768.0).abs() < 1e-7,
-            "{}",
-            left[3] * 32_768.0
-        );
+        // Twice the speed: FL's interpolator low-passes the ramp.
+        let source: Vec<f32> = ramp.iter().map(|v| f32::from(*v) / 32_768.0).collect();
+        let want = sampler::reader(2.0).frame(&source, 6, 0.0);
+        assert!((left[3] - want).abs() < 1e-9, "{}", left[3] * 32_768.0);
+        assert!((left[3] - 6.0 / 32_768.0).abs() < 1e-6);
         // Hard left takes the right side away.
         let mut sx = Slicex::default();
         sx.set_state(&state(&file, &[DEFAULT_SLICE], 12_800, 0))

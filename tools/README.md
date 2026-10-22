@@ -2,6 +2,8 @@
 
 Scripts behind `docs/parity.md`. None of them run in CI.
 
+- `play-demos.sh [Data dir]`: plays every project under `Demo projects` one after another, printing whether each is a demo song or another demo project. Closing the window starts the next. `--rate` asks how each one played through fzf and keeps the answers in `.scratch/demo-ratings.md`.
+- `demo-render.sh [Data dir]`: renders the same projects to WAV through `fl-rs --render`, into `target/demo-renders/<commit>/`.
 - `flp_census.py <Data dir>`: tallies event IDs across every `.flp` under a directory. Run with `python3 -I`.
 - `ghidra/DumpFlEngine.java`: Ghidra headless script. Dumps all strings with referrers, all functions, and decompiles every function that references the given strings. First run imports and analyses the binary; later runs reuse the project with `-process <file> -noanalysis`.
 - `ghidra/DecompileAddrs.java`: decompiles the functions at the given addresses, optionally plus their callees.

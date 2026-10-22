@@ -184,8 +184,15 @@ octave. On the pass side it is one less the stop curve mirrored, so the low
 and high curves at one frequency add to 1. Bin 0 is 1 for the low pass and 0
 for the high pass. Past -120 dB the stop side is 0 and the pass side 1.
 
-Each filter is the zero phase impulse of its curve, shifted `N / 4` frames
-late, windowed over `N / 2` taps, and run by FFT blocks.
+Each filter is the engine's convolver (`FUN_1801e3040`), the one the
+`mydispatcher` contexts of Maximus and Parametric EQ 2 hold two of:
+`FUN_1801e2c90` designs it and `FUN_1801e2ad0` runs a frame through it.
+`docs/plugins/maximus.md` section 5.8 has both read from the disassembly:
+the curve times the spectrum of a click at `N / 2`, transformed back and
+scaled by `1 / N`, the `N / 2` taps from `N / 4` under the half sine
+`sinf(i pi / (N/2 - 1))`, and blocks of `N / 2` overlap-added with one more
+`1 / N` on the way out. IPP's FFTs here scale neither way
+(`IPP_FFT_NODIV_BY_ANY`). A click comes out `3 N / 4` frames late.
 
 Bands:
 
@@ -242,25 +249,20 @@ filters at the start of a block after a change. A redesign keeps what the
 filters hold.
 
 The linear phase mode builds section 4: the quick log2 and exp2, the
-magnitude curve, a radix-2 FFT, two filter sets, the priming with `N` frames
-of history, the crossfade and the `3N / 4` delay line for the middle band.
-A redesign starts only once the previous fade has finished.
+magnitude curve, two filter sets of the shared convolver in
+`crates/plugins/src/linear_phase.rs` (its radix-2 FFT stands in for IPP's,
+so the last bits of the sums may differ), the priming with `N` frames of
+history, the crossfade and the `3N / 4` delay line for the middle band. A
+redesign starts only once the previous fade has finished.
 
-Exact, up to libm: the state, the parameter maps, the level curve and glide,
-and the IIR crossovers. The Rust reports `Fidelity::Exact` for IIR mode with
-no target set.
+Exact, up to libm and the FFT's rounding: the state, the parameter maps, the
+level curve and glide, the IIR crossovers and linear phase. The Rust reports
+`Fidelity::Exact` when no target is set.
 
-Approximated: linear phase, which reports `Fidelity::Approximate`. Band
-routing, as section 5 says.
+Left out: band routing, as section 5 says.
 
 Guessed, not confirmed:
 
-- The window is a sine. The engine computes it with `FUN_1801f1af0`, a libm
-  routine that was not identified.
-- The IPP FFT scaling. The IPP flags and the calls whose arguments Ghidra
-  lost were not resolved, so the Rust normalises the FIR to unity gain.
-- The overlap-save alignment is taken as exactly `N / 2` frames late, which
-  with the `N / 4` shift of the kernel gives the `3N / 4` latency.
 - The main gains start at 0 and glide in. The engine object comes from
   operator new and nothing initialises those fields.
 - FTZ and DAZ are not reproduced, and libm `sin`, `cos`, `tan` and `powf`

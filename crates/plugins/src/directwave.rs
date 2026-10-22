@@ -38,11 +38,13 @@
 //!
 //! DirectWave works in steps of at most 256 samples. The matrix, the
 //! envelopes for the matrix, the LFOs and the pitch are worked out once a
-//! step, the volume envelope and the gains every sample.
+//! step, the volume envelope and the gains every sample. A zone's three
+//! sends, squared, feed the program's delay, chorus and reverb
+//! (`directwave_fx.rs`), which add to the part after its voices.
 //!
 //! # What is not FL's
 //!
-//! - The three effects a program sends to, its program LFOs, the zone
+//! - The program LFOs, the zone
 //!   effects (ring modulator, decimator, bit crusher, phaser), filter types
 //!   6 and 7, time stretching and the high quality interpolation are not
 //!   built. Fidelity says so where a state asks for one of them.
@@ -55,6 +57,7 @@
 //! - Every note plays on part 0 and every part plays into the channel.
 //! - A path that is not a file is silent.
 
+use crate::directwave_fx::{Chorus, Context, Delay, Reverb};
 use crate::sampler::{self, Bank, Chunks, Wave};
 use crate::{Fidelity, Generator, NoteOn, SampleFile, StateError};
 use std::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
@@ -116,7 +119,7 @@ fn pace(x: f32, per_second: f32) -> f32 {
 
 /// The cutoff of a filter knob in Hz (`FUN_180010f30`): 127 semitones from
 /// 13.75 Hz.
-fn cutoff(x: f32) -> f32 {
+pub(crate) fn cutoff(x: f32) -> f32 {
     2f32.powf(x * 127.0 / 12.0 - 5.0) * 440.0
 }
 
@@ -242,7 +245,7 @@ type Coefficients = [f32; 5];
 
 /// FL's cookbook filters (`FUN_180003a10`): 1 lowpass, 2 highpass, 3
 /// bandpass, 4 notch, 5 allpass, anything else a wire.
-fn coefficients(kind: u8, hz: f32, q: f32, rate: f32) -> Coefficients {
+pub(crate) fn coefficients(kind: u8, hz: f32, q: f32, rate: f32) -> Coefficients {
     if !(1..=5).contains(&kind) {
         return [1.0, 0.0, 0.0, 0.0, 0.0];
     }
@@ -648,7 +651,9 @@ pub struct Program {
     /// Two waveshapers on what the program's voices make: a `tanh` and a
     /// sine, each on and with its drive.
     pub shapers: [(bool, f32); 2],
-    /// The three effects it sends to: on, and their bytes. Not built.
+    /// The three effects its zones send to, as chunks 0x69, 0x6a and 0x6b
+    /// hold them: on, and their bytes. [`Program::delay`],
+    /// [`Program::reverb`] and [`Program::chorus`] read them.
     pub effects: [(bool, Vec<u8>); 3],
     /// Its own two LFOs, for sources 5 and 6. Not built.
     lfos: [Vec<u8>; 2],
@@ -743,11 +748,36 @@ impl Program {
         Ok((index.unwrap_or(PROGRAMS), program))
     }
 
-    /// Whether any zone sends to an effect of the program that is on.
-    fn sends(&self) -> bool {
-        let on = |i: usize| self.effects[i].0;
-        let send = |zone: &Zone| (0..3).any(|i| on(i) && zone.sends[i] > 0.0);
-        self.zones.iter().any(send)
+    /// The delay (chunk 0x69, `+0x28d`): its time, feedback, highpass and
+    /// lowpass knobs (`+0x2ee`) and the ping-pong flag (`+0x28e`), when on.
+    /// A zone's first send feeds it.
+    pub fn delay(&self) -> Option<([f32; 4], bool)> {
+        let (on, b) = &self.effects[0];
+        let knobs = std::array::from_fn(|i| f32_at(b, 2 + 4 * i));
+        on.then_some((knobs, u8_at(b, 1) != 0))
+    }
+
+    /// The reverb (chunk 0x6a, `+0x28f`): its room size, damping, diffusion
+    /// and decay (`+0x2fe`), when on. A zone's third send feeds it.
+    pub fn reverb(&self) -> Option<[f32; 4]> {
+        let (on, b) = &self.effects[1];
+        on.then(|| std::array::from_fn(|i| f32_at(b, 1 + 4 * i)))
+    }
+
+    /// The chorus (chunk 0x6b, `+0x290`): its delay, depth, speed and
+    /// feedback (`+0x30e`), when on. A zone's second send feeds it.
+    pub fn chorus(&self) -> Option<[f32; 4]> {
+        let (on, b) = &self.effects[2];
+        on.then(|| std::array::from_fn(|i| f32_at(b, 1 + 4 * i)))
+    }
+
+    /// Which effects the zone's three sends feed are on.
+    fn sends_on(&self) -> [bool; 3] {
+        [
+            self.delay().is_some(),
+            self.chorus().is_some(),
+            self.reverb().is_some(),
+        ]
     }
 }
 
@@ -991,8 +1021,14 @@ pub struct DirectWave {
     rate: f32,
     tempo: f32,
     rand: Rand,
-    /// A step's sound before the volume, and a part's.
-    scratch: [Vec<f32>; 4],
+    /// A step's sound before the volume, a part's dry sound, and what its
+    /// voices send to the delay, the chorus and the reverb.
+    scratch: [Vec<f32>; 10],
+    /// The engine's one delay, chorus and reverb, made when a program
+    /// turns them on.
+    delay: Option<Box<Delay>>,
+    chorus: Option<Box<Chorus>>,
+    reverb: Option<Box<Reverb>>,
 }
 
 impl Default for DirectWave {
@@ -1010,11 +1046,31 @@ impl Default for DirectWave {
             tempo: 120.0,
             rand: Rand(1),
             scratch: std::array::from_fn(|_| vec![0.0; STEP]),
+            delay: None,
+            chorus: None,
+            reverb: None,
         }
     }
 }
 
 impl DirectWave {
+    /// Make the effects some program turns on, and the reverb's lines for
+    /// the rate: what allocates, out of the audio path.
+    fn prepare_effects(&mut self) {
+        let any = |on: fn(&Program) -> bool| self.programs.iter().any(on);
+        if any(|p| p.delay().is_some()) && self.delay.is_none() {
+            self.delay = Some(Box::default());
+        }
+        if any(|p| p.chorus().is_some()) && self.chorus.is_none() {
+            self.chorus = Some(Box::default());
+        }
+        if any(|p| p.reverb().is_some()) {
+            self.reverb
+                .get_or_insert_with(Box::default)
+                .prepare(self.rate);
+        }
+    }
+
     /// The 128 programs.
     pub fn programs(&self) -> &[Program] {
         &self.programs
@@ -1475,7 +1531,7 @@ impl DirectWave {
             }
         }
 
-        let [left_buf, right_buf, part_left, part_right] = buffers else {
+        let [left_buf, right_buf, part_left, part_right, sends @ ..] = buffers else {
             return;
         };
         let once = zone.mode < 2 || (zone.mode == 3 && voice.amp.state > 3);
@@ -1574,19 +1630,33 @@ impl DirectWave {
             }
         }
 
+        // A send and a dry level under 1 go on squared, a send only to an
+        // effect that is on and only when above 0 (`0x1800330c3`).
+        let on = program.sends_on();
+        let send = std::array::from_fn::<_, 3, _>(|i| {
+            let level = d[25 + i];
+            (on[i] && 0.0 < level).then_some(level * level)
+        });
         let dry = d[28];
+        let dry = if 1.0 <= dry { None } else { Some(dry * dry) };
         for n in 0..len {
             let level = voice.amp.next(attack, decay, sustain, release);
             let l = level * voice.gains.0 * left_buf[n];
             let r = level * voice.gains.1 * right_buf[n];
             voice.gains.0 = (voice.gains.0 - target.0) * step.smooth + target.0 + 1e-14;
             voice.gains.1 = (voice.gains.1 - target.1) * step.smooth + target.1 + 1e-14;
-            if 1.0 <= dry {
-                part_left[n] += l;
-                part_right[n] += r;
-            } else {
+            for (i, gain) in send.iter().enumerate() {
+                if let Some(gain) = gain {
+                    sends[2 * i][n] += l * gain;
+                    sends[2 * i + 1][n] += r * gain;
+                }
+            }
+            if let Some(dry) = dry {
                 part_left[n] += l * dry;
                 part_right[n] += r * dry;
+            } else {
+                part_left[n] += l;
+                part_right[n] += r;
             }
         }
     }
@@ -1613,16 +1683,23 @@ impl DirectWave {
             voices,
             rand,
             scratch,
+            delay,
+            chorus,
+            reverb,
             ..
         } = self;
+        let ctx = Context {
+            rate: step.rate,
+            tempo: self.tempo,
+        };
         for (index, part) in parts.iter().enumerate() {
             let program = &programs[usize::from(part.program).min(PROGRAMS - 1)];
             if program.zones.is_empty() {
                 continue;
             }
-            let [_, _, pl, pr] = scratch;
-            pl[..len].fill(0.0);
-            pr[..len].fill(0.0);
+            for buffer in &mut scratch[2..] {
+                buffer[..len].fill(0.0);
+            }
             for voice in voices.iter_mut() {
                 if voice.part != index || (voice.amp.state < 1 && !voice.fresh) {
                     continue;
@@ -1645,7 +1722,22 @@ impl DirectWave {
                     voice, zone, program, part, source, &step, flags, rand, scratch, len,
                 );
             }
-            let [_, _, pl, pr] = scratch;
+            // The engine's effects, on this part's sends and the program's
+            // knobs, add to its dry sound.
+            let [_, _, pl, pr, dl, dr, cl, cr, rl, rr] = scratch;
+            let mut draw = || rand.next();
+            if let (Some((knobs, cross)), Some(delay)) = (program.delay(), delay.as_deref_mut()) {
+                let (sends, out) = ([&dl[..len], &dr[..len]], [&mut pl[..len], &mut pr[..len]]);
+                delay.run(knobs, cross, ctx, sends, out, &mut draw);
+            }
+            if let (Some(knobs), Some(chorus)) = (program.chorus(), chorus.as_deref_mut()) {
+                let (sends, out) = ([&cl[..len], &cr[..len]], [&mut pl[..len], &mut pr[..len]]);
+                chorus.run(knobs, ctx, sends, out, &mut draw);
+            }
+            if let (Some(knobs), Some(reverb)) = (program.reverb(), reverb.as_deref_mut()) {
+                let (sends, out) = ([&rl[..len], &rr[..len]], [&mut pl[..len], &mut pr[..len]]);
+                reverb.run(knobs, ctx, sends, out);
+            }
             for (i, shaper) in program.shapers.iter().enumerate() {
                 if !shaper.0 {
                     continue;
@@ -1685,11 +1777,13 @@ impl Generator for DirectWave {
             tempo: self.tempo,
             ..read
         };
+        self.prepare_effects();
         Ok(())
     }
 
     fn set_sample_rate(&mut self, hz: f32) {
         self.rate = hz;
+        self.prepare_effects();
     }
 
     fn set_tempo(&mut self, bpm: f64) {
@@ -1792,9 +1886,6 @@ impl Generator for DirectWave {
             return Fidelity::Approximate(
                 "DirectWave: a sample file is missing, and its zone is silent",
             );
-        }
-        if programs().any(Program::sends) {
-            return Fidelity::Approximate("DirectWave: a program's send effects are left out");
         }
         if zones().any(|z| z.filters.iter().any(|f| f.kind > 5)) {
             return Fidelity::Approximate("DirectWave: filter types 6 and 7 are left out");
@@ -1993,6 +2084,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }

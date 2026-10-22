@@ -193,6 +193,19 @@ fn every_project_renders_its_first_10_seconds() {
             out.latency,
             out.delayed_inserts,
         );
+        // What keeps the project from playing in full, by name.
+        let gaps = [
+            ("passed", format!("{:?}", out.unhosted_slots)),
+            ("silent", format!("{:?}", out.unhosted_generators)),
+            ("approximated", format!("{:?}", out.approximated_slots)),
+            (
+                "approximated generators",
+                format!("{:?}", out.approximated_generators),
+            ),
+        ];
+        for (what, list) in gaps.iter().filter(|(_, list)| list != "{}") {
+            eprintln!("  {what}: {list}");
+        }
         hosted += out.hosted_slots;
         sidechain_routes += out.sidechain_routes;
         sidechain_slots += out.sidechain_slots;
@@ -263,7 +276,7 @@ fn every_project_renders_its_first_10_seconds() {
     );
     eprintln!(
         "corpus automation: {automation} clips evaluated, {bindings} bindings resolved \
-         ({playable} of them to a volume, a pan, a send level or the tempo), \
+         ({playable} of them to a volume, a pan, a send level, the tempo or a channel's level), \
          {slot_targets} targets on a hosted effect slot played, {unsupported_targets} unsupported \
          targets"
     );
@@ -397,15 +410,10 @@ fn the_love_philter_and_convolver_render_tests_play_through_the_plugin() {
             .keys()
             .any(|name| name.eq_ignore_ascii_case(plugin));
         assert!(!passed, "{plugin} passed through: {:?}", out.unhosted_slots);
-        // At the rate of its impulse Convolver does what FL's does, and at
-        // another it says its resampler is its own. Nothing is missing.
+        // Convolver does what FL's does at the rate of its impulse and at
+        // another, which goes through FL's interpolator. Nothing is missing.
         let said: Vec<&str> = out.approximated_slots.keys().copied().collect();
-        if sample_rate == 48_000 && plugin == "Fruity Convolver" {
-            assert_eq!(said.len(), 1, "{said:?}");
-            assert!(said[0].contains("resampled"), "{said:?}");
-        } else {
-            assert!(said.is_empty(), "{plugin}: {said:?}");
-        }
+        assert!(said.is_empty(), "{plugin}: {said:?}");
     }
 }
 
@@ -464,7 +472,7 @@ fn the_transient_multiband_and_delay_bank_render_tests_play_through_the_plugin()
 /// it does what FL's does, and the output has sound and no NaN.
 ///
 /// The render test for Fruity Chorus has its chorus inside a Fruity
-/// Wrapper, which the engine does not host, so it is not here.
+/// Wrapper, which hosts it under the wrapper's name, so it is not here.
 #[test]
 fn the_flangus_overdrive_and_spreader_render_tests_play_through_the_plugin() {
     let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
@@ -501,6 +509,43 @@ fn the_flangus_overdrive_and_spreader_render_tests_play_through_the_plugin() {
             out.approximated_slots
         );
     }
+}
+
+/// FL's render test for Emphasis plays a loop through one instance of the
+/// limiter: it is hosted, and the output has sound, no NaN and stays under
+/// the ceiling of its state, -0.08 dB. The state is in Versatile mode,
+/// which follows the input once a block, and the plugin says so.
+#[test]
+fn the_emphasis_render_test_plays_through_the_limiter() {
+    let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
+        eprintln!("FL_RS_CORPUS unset, the Emphasis render test skipped");
+        return;
+    };
+    let opts = RenderOptions {
+        sample_rate: 44_100,
+        sample_root: root.clone(),
+        max_seconds: 10.0,
+        plugin_dir: None,
+    };
+    let plugin = "Emphasis";
+    let path = root.join(format!("System/Render tests/{plugin}.flp"));
+    let file = flp::Project::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let project = model::from_flp(&file);
+    let out = engine::render(&project, &opts).unwrap();
+    let peak = peak(&out, plugin);
+    eprintln!(
+        "{plugin}: peak {peak:.4}, hosted {}, approximated {:?}",
+        out.hosted_slots, out.approximated_slots
+    );
+    assert!(peak > 0.05 && peak <= 0.992, "{plugin}: peak {peak}");
+    assert!(out.hosted_slots >= 1, "{plugin}: no slot hosted");
+    let passed = out
+        .unhosted_slots
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(plugin));
+    assert!(!passed, "{plugin} passed through: {:?}", out.unhosted_slots);
+    let said: Vec<&str> = out.approximated_slots.keys().copied().collect();
+    assert!(said.iter().all(|s| s.contains("Emphasis")), "{said:?}");
 }
 
 /// FL's render test for Sytrus plays notes through one instance of the
@@ -540,5 +585,44 @@ fn the_sytrus_render_test_plays_through_the_generator() {
             .all(|what| what.starts_with("Sytrus")),
         "{:?}",
         out.approximated_generators
+    );
+}
+
+/// FL's render test for Frequency Shifter plays a 3x Osc through the
+/// shifter in its tempo range: the plugin is hosted, says it does what FL's
+/// does, and the output has sound and no NaN.
+#[test]
+fn the_frequency_shifter_render_test_plays_through_the_plugin() {
+    let Some(root) = std::env::var_os("FL_RS_CORPUS").map(PathBuf::from) else {
+        eprintln!("FL_RS_CORPUS unset, the Frequency Shifter render test skipped");
+        return;
+    };
+    let plugin = "Frequency Shifter";
+    let opts = RenderOptions {
+        sample_rate: 48_000,
+        sample_root: root.clone(),
+        max_seconds: 10.0,
+        plugin_dir: None,
+    };
+    let path = root.join(format!("System/Render tests/{plugin}.flp"));
+    let file = flp::Project::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let project = model::from_flp(&file);
+    let out = engine::render(&project, &opts).unwrap();
+    let peak = peak(&out, plugin);
+    eprintln!(
+        "{plugin}: peak {peak:.3}, hosted {}, approximated {:?}",
+        out.hosted_slots, out.approximated_slots
+    );
+    assert!(peak > 0.05 && peak <= 4.0, "{plugin}: peak {peak}");
+    assert!(out.hosted_slots >= 1, "{plugin}: no slot hosted");
+    let passed = out
+        .unhosted_slots
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(plugin));
+    assert!(!passed, "{plugin} passed through: {:?}", out.unhosted_slots);
+    assert!(
+        out.approximated_slots.is_empty(),
+        "{:?}",
+        out.approximated_slots
     );
 }

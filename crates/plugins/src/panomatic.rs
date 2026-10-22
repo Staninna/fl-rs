@@ -28,20 +28,20 @@
 //! # The LFO's rate depends on the sample rate squared
 //!
 //! [`lfo_period`] is the LFO's period in samples, and FL's formula for it
-//! has the sample rate in the denominator. A period that is shorter in
-//! samples at a higher rate is shorter twice over in seconds: the LFO of
-//! one project runs `(48 / 44.1)^2`, 18 %, faster at 48 kHz than at
-//! 44.1 kHz. The doc reads that off the listing and cannot say whether FL
-//! means it. It is built as read, and [`Effect::fidelity`] says so for a
-//! plugin whose LFO is on at any rate but 44.1 kHz.
+//! has the sample rate in the denominator: `FPD_SetSampleRate` keeps
+//! `2048 / rate` (`0x006c5e2e`) and the speed routine multiplies by it. A
+//! period that is shorter in samples at a higher rate is shorter twice
+//! over in seconds: the LFO of one project runs `(48 / 44.1)^2`, 18 %,
+//! faster at 48 kHz than at 44.1 kHz. That is what FL does, and so does
+//! this.
 //!
-//! What is not FL's: FL also holds each step of a ramp to a most that its
-//! host hands the plugin. That number is not in the DLL, and a ramp here
-//! always ends with its block.
+//! Each gain of the matrix moves by no more than `0.001 * 44100 / rate` a
+//! frame, the cap FL's renderer hands the plugin, so a fast LFO or a moved
+//! knob may take more than a block to get there.
 
 use crate::parts::Matrix;
 use crate::three_osc::host_table;
-use crate::{Effect, Fidelity, StateError, knob_gain, knob_value, read_state};
+use crate::{Effect, StateError, knob_gain, knob_value, read_state};
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Fruity PanOMatic";
@@ -50,8 +50,7 @@ pub const NAME: &str = "Fruity PanOMatic";
 const RANGES: [(i32, i32); 6] = [(0, 256), (0, 320), (0, 2), (0, 2), (0, 128), (0, 55_000)];
 const DEFAULTS: [i32; 6] = [128, 256, 0, 0, 64, 27_500];
 
-/// The rate the plugin is made at, and the one rate FL's LFO formula is
-/// known to give the speed the wheel shows at.
+/// The rate the plugin is made at, 44.1 kHz until the host says otherwise.
 const BASE_RATE: f32 = 44_100.0;
 
 /// The matrix for a pan from -1 to 1 and a linear gain: left to left, right
@@ -71,18 +70,22 @@ pub fn gains(pan: f32, gain: f32) -> [f32; 4] {
     }
 }
 
-/// The LFO's period in samples for a speed and a sample rate in Hz:
-/// `round((50001^(i / 65536) - 1) * i * 2048 / rate)` with
-/// `i = 65536 - speed`. At 44.1 kHz that is an hour at speed 0, 21 s at
-/// the default 27500, 0.54 s at 45614 and 52 ms at 55000.
+/// The LFO's period in samples for a speed and a sample rate in Hz
+/// (`FUN_006c64b0`): `round((50001^(i / 65536) - 1) * i * 2048 / rate)`
+/// with `i = 65536 - speed`. At 44.1 kHz that is an hour at speed 0, 21 s
+/// at the default 27500, 0.54 s at 45614 and 52 ms at 55000.
 ///
 /// The rate divides the count of samples, so the period in seconds goes
 /// with one over the rate squared. See the module's note.
 pub fn lfo_period(speed: i32, hz: f32) -> u32 {
     let i = 65_536 - speed;
-    let depth = (50_001f64.powf(f64::from(i) / 65_536.0) - 1.0) as f32;
-    // FL multiplies the three as singles.
-    let samples = depth * i as f32 * (2048.0 / hz);
+    // `Exp(float(i / 65536) * Ln(50001))` in doubles, less 1, as a single.
+    let x = f64::from((f64::from(i) / 65_536.0) as f32);
+    let depth = ((x * 50_001f64.ln()).exp() - 1.0) as f32;
+    // `0x180`, worked out in doubles; FL multiplies the three as singles
+    // and rounds half to even (`CVTSD2SI`).
+    let per_rate = (2048.0 / f64::from(hz)) as f32;
+    let samples = depth * i as f32 * per_rate;
     (samples.round_ties_even() as u32).max(1)
 }
 
@@ -102,6 +105,14 @@ pub struct PanOMatic {
     phase: u32,
     step: u32,
     hz: f32,
+    /// The most a gain moves in a frame.
+    cap: f32,
+}
+
+/// The most a gain of the matrix moves in a frame: `TAudioRenderer`'s
+/// `0.001 * 44100 / rate` (engine info `+0x34`).
+fn ramp_cap(hz: f32) -> f32 {
+    (44_100.0 / f64::from(hz) * 0.001) as f32
 }
 
 impl Default for PanOMatic {
@@ -117,6 +128,7 @@ impl Default for PanOMatic {
             phase: 0,
             step: 0,
             hz: BASE_RATE,
+            cap: ramp_cap(BASE_RATE),
         };
         plugin.update();
         plugin.matrix.settle();
@@ -154,6 +166,7 @@ impl Effect for PanOMatic {
 
     fn set_sample_rate(&mut self, hz: f32) {
         self.hz = hz;
+        self.cap = ramp_cap(hz);
         self.update();
     }
 
@@ -174,7 +187,7 @@ impl Effect for PanOMatic {
                 _ => gains(self.pan, (self.gain + lfo).max(0.0)),
             });
         }
-        self.matrix.apply(left, right);
+        self.matrix.apply_capped(left, right, self.cap);
     }
 
     fn param_count(&self) -> usize {
@@ -198,28 +211,26 @@ impl Effect for PanOMatic {
         self.matrix.settle();
         self.phase = 0;
     }
-
-    /// The LFO's rate at any sample rate but 44.1 kHz is FL's formula as
-    /// the listing has it, which nobody has checked against FL. A plugin
-    /// whose LFO is off has nothing that depends on it.
-    fn fidelity(&self) -> Fidelity {
-        if self.params[3] != 0 && self.hz != BASE_RATE {
-            Fidelity::Approximate("PanOMatic LFO rate at non-44.1k")
-        } else {
-            Fidelity::Exact
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Fidelity;
     use crate::testing::{self, bits, state};
     use dsp::gain_to_db;
 
     fn with(params: [i32; 6]) -> PanOMatic {
         let mut plugin = PanOMatic::default();
         plugin.set_state(&state(&params)).unwrap();
+        plugin
+    }
+
+    /// The same with no cap on a ramp, so that every block gets where it
+    /// is aimed, for the tests of where that is.
+    fn uncapped(params: [i32; 6]) -> PanOMatic {
+        let mut plugin = with(params);
+        plugin.cap = f32::MAX;
         plugin
     }
 
@@ -371,7 +382,7 @@ mod tests {
     fn the_lfo_moves_once_a_block_and_the_matrix_ramps_to_it() {
         // A square on the volume at the fastest speed: 2297 samples a
         // turn. The first block of 100 is in the high half.
-        let mut plugin = with([128, 256, 2, 2, 128, 55_000]);
+        let mut plugin = uncapped([128, 256, 2, 2, 128, 55_000]);
         let (mut left, mut right) = ([1.0f32; 100], [1.0f32; 100]);
         plugin.process(&mut left, &mut right);
         // From unity towards 1.5 in a straight line over the block.
@@ -407,7 +418,7 @@ mod tests {
     fn an_lfo_on_the_pan_swings_it_and_stays_inside_its_range() {
         // A square at full amount from the centre: hard right, then hard
         // left. Blocks of one frame, so every frame is where the LFO is.
-        let mut plugin = with([128, 256, 2, 1, 128, 55_000]);
+        let mut plugin = uncapped([128, 256, 2, 1, 128, 55_000]);
         plugin.process(&mut [0.0], &mut [0.0]);
         assert_eq!(frame(&mut plugin, 1.0, 0.0), (0.0, 0.5));
         for _ in 0..1200 {
@@ -416,7 +427,7 @@ mod tests {
         assert_eq!(frame(&mut plugin, 0.0, 1.0), (0.5, 0.0));
         // From hard right the high half has nowhere to go, and the low
         // half comes back to the centre.
-        let mut plugin = with([256, 256, 2, 1, 128, 55_000]);
+        let mut plugin = uncapped([256, 256, 2, 1, 128, 55_000]);
         plugin.process(&mut [0.0], &mut [0.0]);
         assert_eq!(frame(&mut plugin, 1.0, 1.0), (0.0, 1.0));
         for _ in 0..1200 {
@@ -425,39 +436,56 @@ mod tests {
         assert_eq!(frame(&mut plugin, 1.0, 1.0), (1.0, 1.0));
         // Half the amount on the volume is a quarter of the gain, and a
         // volume at 0 does not go under it.
-        let mut plugin = with([128, 256, 2, 2, 64, 55_000]);
+        let mut plugin = uncapped([128, 256, 2, 2, 64, 55_000]);
         plugin.process(&mut [0.0], &mut [0.0]);
         assert_eq!(frame(&mut plugin, 1.0, 1.0), (1.25, 1.25));
-        let mut plugin = with([128, 0, 2, 2, 128, 55_000]);
+        let mut plugin = uncapped([128, 0, 2, 2, 128, 55_000]);
         for _ in 0..1200 {
             plugin.process(&mut [0.0], &mut [0.0]);
         }
         assert_eq!(frame(&mut plugin, 1.0, 1.0), (0.0, 0.0));
     }
 
+    /// `FPD_SetSampleRate` keeps `2048 / rate` and the period in samples
+    /// is multiplied by it, so the LFO turns faster by the rates' ratio
+    /// squared. That is FL's, at any rate.
     #[test]
-    fn the_lfo_s_rate_at_another_sample_rate_is_marked() {
-        let approximate = Fidelity::Approximate("PanOMatic LFO rate at non-44.1k");
+    fn the_lfo_s_rate_goes_with_the_sample_rate_squared() {
         let mut plugin = with([128, 256, 1, 1, 87, 45_614]);
-        assert_eq!(plugin.fidelity(), Fidelity::Exact);
         plugin.set_sample_rate(48_000.0);
-        assert_eq!(plugin.fidelity(), approximate);
-        // The period is shorter by the rates' ratio, in samples.
+        assert_eq!(plugin.fidelity(), Fidelity::Exact);
         let step = |hz: f32| ((1u64 << 32) / u64::from(lfo_period(45_614, hz))) as u32;
         assert_eq!(plugin.step, step(48_000.0));
-        assert!(plugin.step > step(44_100.0));
-        // With the LFO off nothing depends on the rate.
-        plugin.set_param(3, 0.0);
-        assert_eq!(plugin.fidelity(), Fidelity::Exact);
-        plugin.set_param(3, 2.0);
-        assert_eq!(plugin.fidelity(), approximate);
-        plugin.set_sample_rate(44_100.0);
-        assert_eq!(plugin.fidelity(), Fidelity::Exact);
+        let turns = |hz: f32| f64::from(hz) / f64::from(lfo_period(45_614, hz));
+        let ratio = turns(48_000.0) / turns(44_100.0);
+        assert!((ratio - (48.0f64 / 44.1).powi(2)).abs() < 2e-3, "{ratio}");
+        // The cap on a gain's step goes with one over the rate.
+        assert_eq!(plugin.cap, (44_100.0f64 / 48_000.0 * 0.001) as f32);
+    }
+
+    /// A gain moves by no more than the cap a frame, so a moved knob takes
+    /// as long as it needs, whatever the blocks.
+    #[test]
+    fn a_ramp_is_held_to_the_cap() {
+        let mut plugin = PanOMatic::default();
+        plugin.set_param(1, 0.0);
+        let mut left = vec![1.0f32; 1500];
+        let mut right = left.clone();
+        for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+            plugin.process(l, r);
+        }
+        // From 1 at 0.001 a frame over the first block, then the rest of
+        // the way, under the cap, over the second.
+        assert!((left[500] - 0.5).abs() < 1e-5, "{}", left[500]);
+        let rest = 1.0 - 0.512f32;
+        assert!((left[1023] - rest / 512.0).abs() < 1e-5, "{}", left[1023]);
+        assert_eq!(&left[1024..], &[0.0; 476][..]);
+        assert_eq!(left, right);
     }
 
     #[test]
     fn a_moved_parameter_ramps_over_one_block() {
-        let mut plugin = PanOMatic::default();
+        let mut plugin = uncapped(DEFAULTS);
         plugin.set_param(1, 0.0);
         let (mut left, mut right) = ([1.0; 4], [-1.0; 4]);
         plugin.process(&mut left, &mut right);
@@ -465,7 +493,7 @@ mod tests {
         assert_eq!(right, [-1.0, -0.75, -0.5, -0.25]);
         assert_eq!(frame(&mut plugin, 1.0, 1.0), (0.0, 0.0));
         // Switching the LFO off goes back to where the knobs are.
-        let mut plugin = with([128, 256, 2, 2, 128, 55_000]);
+        let mut plugin = uncapped([128, 256, 2, 2, 128, 55_000]);
         plugin.process(&mut [0.0], &mut [0.0]);
         assert_eq!(frame(&mut plugin, 1.0, 1.0), (1.5, 1.5));
         plugin.set_param(3, 0.0);

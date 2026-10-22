@@ -44,7 +44,7 @@ parent `TDelphiFruityPlug` VMT `0x00722348`). Generator slots in FL SDK order:
 
 `TFruityPlugInfo` @ `0x00791978` (packed): SDK version 1, "3x Osc" / "3xOsc",
 Flags `0x11600039` (bits 0 Generator, 3 GetChanCustomShape, 4 GetNoteInput, 5
-WantNewTick, 21 NewVoiceParams, 22, 24, 28), NumParams 114 (21 own + 93 of the
+WantNewTick, 21 NewVoiceParams, 22, 24, 28), NumParams 114 (21 own, two unused, 91 of the
 instrument tab), DefPoly 0. `FPF_UseSampler` and `FPF_RenderVoice` are not set:
 the host calls `Gen_Render` once per block and the plugin renders and
 articulates its own voices.
@@ -193,7 +193,29 @@ checked by hand decodes with the table above):
 
 ## 2. Parameter semantics (`ProcessParam` @ 0x00739060)
 
-Indexes 21..113 go to the instrument tab's handler (object at `this+0x22c`).
+Indexes 23..113 go to the instrument tab's handler (object at `this+0x22c`,
+`*(form+0x898)+0x6ac`, class `*0x733e28`, VMT `0x733ef0`, ProcessParam slot 0
+`FUN_007378a0`); 21 and 22 reach neither and do nothing. The handler's index
+record (`*0x00792f88` = `0x804628`) is filled by `FUN_0072c440(23)` from
+`0x0073ad35` (Fruit Kick passes 6):
+
+```
+first 23, stride 17; blocks 23..107: block b = (i - 23) / 17, word w = (i - 23) % 17
+     -> tab+8 + 0xa0 b + 4 w, then FUN_0072a400 (the block's derived values), tab+0x334 = 1
+cutoff 110 -> tab+0x328, resonance 111 -> tab+0x32c, type 113 -> tab+0x330 (tab = frame+0x6b8)
+108, 109, 112: nothing stored, nothing read
+REC_FromMIDI (0x20): the control from FUN_007369e0 (frame+0x6a4 [w], built by
+     FUN_007364a0: w 0 none, w 1 the "use envelope" box, w 2..16 the Tag 0x1000 + w
+     wheels; 0x640 / 0x638 / 0x630 for cutoff, resonance and type), rescaled by
+     FUN_00737820 over its Min (+0x3a8) .. Max (+0x3ac); words 8 and 11 (envelope and
+     LFO amount) over -a..a with a = *0x790a60[b] = 64, 128, 128, 128, 2400
+     (pan, volume, mod X, mod Y, pitch); w 0 has no control and is stored as given
+```
+
+Ranges (DFM): predelay, attack, hold, decay, release, LFO predelay and LFO
+attack 100..65536, sustain 0..128, LFO speed 200..65536, LFO shape 0..2,
+tensions -128..128, cutoff and resonance 0..256, type 0..7.
+
 For 0..20: REC_FromMIDI rescales with the wheel's Min/Max; REC_UpdateValue
 stores the int and recomputes, by `(idx + 1) mod 7` with osc `i = (idx + 1) div 7`:
 
@@ -224,7 +246,11 @@ is 523.25 Hz (the constant is `2^32 * 523.2511`). The host's
 `FinalLevels.Pitch` is `(key - 60) * 100 + fine pitch + channel pitch`
 (`host-voice.md`, section 3), so an oscillator at 0 semitones plays 523.25 Hz
 for C5 (MIDI 60): one octave above a standard instrument, which is what the
-default preset's -12 and -24 on oscillators 2 and 3 lean on.
+default preset's -12 and -24 on oscillators 2 and 3 lean on. The voice
+reads `FinalLevels.Pitch` again every tick (3.1), so a pitch the host moves
+under a sounding note (a slide note, a clip on the channel's pitch) is
+heard from the next tick: `three_osc.rs` takes it from
+`Generator::set_note_pitch`.
 
 Dispatcher (`FUN_00737f90`): 1 FPD_ProcessMode -> `0x1fd = value & 2`; 4
 SetSampleRate -> `0xe4`, engine `dispatch(obj, 2, SR)`; 7 FPD_UseVoiceLevels
@@ -351,6 +377,41 @@ is `8.1758 * 2^((l + 5) / 4)` Hz, whose harmonic count under 22.05 kHz is
 `1134 * 2^(-l/4)`, just above the table's cut. Level 0 keeps everything below
 MIDI note 15 (19.4 Hz); level 42 (the last one reachable) is for MIDI 141 and
 above.
+
+Confirmed to the bit (`asm`, and run under unicorn with
+`tools/plugstate/osc3_emu.py`, whose 176 tables
+`crates/plugins/src/three_osc.rs` reproduces exactly):
+
+- `FUN_180001310` calls `FUN_180002d90({4, 16}, mip, shape2048)` per shape;
+  the shape is `FUN_1800011f0(s, (f32)(i * 2^-11))` for `i` in 0..2048.
+- Upsampling: a double `t` steps by `1 / 16`; `i = (int) t`, the next point
+  is `i + 1` or 0 at the end, `f = (f32) t - (f32) i`, the point is
+  `(1 - f) * s[i] + f * s[next]` in floats.
+- The FFT is KissFFT built for four float lanes (`__m128`), one lane per
+  level of a group of four, each lane the same sum: plan `FUN_1800029d0(n,
+  inverse)` (twiddle `i`: `phase = (i * -2pi) * (1 / n)`, negated for the
+  inverse, `cos` and `sin` of it as floats; factors 4 first, then 2, 3 and odd
+  numbers up to `floor(sqrt n)`), recursion `FUN_1800027c0` (`kf_work`),
+  butterflies 2 (inline) and 4 (`FUN_180001e40`, `kf_bfly4` with its
+  `inverse` branch), 3, 5 and generic (`FUN_180002020`, `FUN_180002190`,
+  `FUN_1800025d0`, not reached for 32768 = 4^7 * 2).
+- One forward transform per shape. Per group of four levels the cut counts
+  are `c0 = d, c1 = d m, c2 = d m m, c3 = c2 m`, then `d = c3 m` (doubles,
+  `d` from 1024, `m = pow(2, -1/4)`), each `max(1, (int) c)`.
+  `FUN_180001be0` zeroes bins `c + 1 .. n - c - 1` of the lane (it works down
+  from what the lane kept last, which comes to the same), runs the inverse
+  (`FUN_180002b90`) and scales by `(f32)(1 / n)`, a float product. The
+  32768 points get a copy of the first two after them.
+
+The render (`FUN_180001660`) reads, per sample: `cyc = inc * 2^-32` in
+doubles; under `5e-4` the shape is worked out at `(f32)(phase * 2^-32)`;
+otherwise the level is `(f32)(log10(cyc * (0.12230919765 / (1 / SR))) *
+13.2877123795 - 5)` kept to `0 .. N - 2` and truncated, with `SR` the whole
+Hz the shell passes to `dispatch` 2, and the point is `x = (f32)(phase *
+2^-32) * 32768`, `(1 - f) t[i] + f t[i + 1]`. The weight at `+0x1c` is never
+read: no level is blended with the next. The sine is `sinf((f32)(phase *
+2^-32) * 6.2831855f)`, the noise `(f32)(i32) seed * 2^-31`. Output is
+`value * gain + buf`, and for AM `buf - buf * value * gain`.
 
 ### 3.2 Envelopes and LFOs (the articulation unit, `ghidra/out/osc3/voice`, `artic`)
 
@@ -486,12 +547,10 @@ the block ramps from the previous gains. (The first slot of each pair,
   shape selector and the engine's own shape numbering).
 - `*0x0077e6f4`, the sample-rate factor in every filter coefficient: 1.0 in
   the image, written at `0x005f8493`; taken as `44100 / SR`.
-- Engine: the two arguments of `FUN_180002d90` (4 levels per octave and the
-  2048 to 32768 upsampling ratio are `inferred` from the render's `4 log2` and
-  the 32768 index), the FFT identity of `FUN_1800027c0` / `FUN_180001be0`,
-  and the exponent `pow` takes in the rounded saw. The cross-level weight the
-  kernel computes is unused by the scalar loop that was read; a SIMD path may
-  blend two levels.
+- Engine: settled, see 3.1 (the tables are FL's to the bit). Left: the
+  noise seed is one for the whole process in FL (`0x180024a1c`), one per
+  plugin here, and FL's `log10`, `sinf` and `pow` may differ from Rust's in
+  a last bit.
 - `TDelphiFruityPlug` slots 20 and 21 (`0x00725e20`, `0x00725eb0`), GUI only.
 
 ## Corrections from the implementation (crates/plugins/src/three_osc.rs)
@@ -501,5 +560,5 @@ the block ramps from the previous gains. (The first slot of each pair,
 - Rounded saw is `1 − 2·0.997^(16384x)`.
 - AM depth and oscillator gains carry the pan law's 0.7071; default levels are 3/8, 3/8, 1/4; Q tops out at 4.37.
 - Note-off without a volume envelope is a 10 ms cosine fade.
-- 152 project states, not 116; 181 presets. HQ (13 states) and custom shape 6 report Approximate.
+- 152 project states, not 116; 181 presets. Custom shape 6 reports Approximate; HQ (13 states) is exact since its tables were rebuilt from the engine.
 - Envelope ticks use the song PPQ through `Generator::set_ppq`.

@@ -34,12 +34,19 @@
 //! leaves the line goes through the grain and the output gains into the
 //! wet sum, beside the dry input.
 //!
-//! Not built: the two filters of a unit, the 2x oversampling and the
-//! bend of the grain's shape. A state that has one of them on says so in
-//! [`Effect::fidelity`].
+//! Each unit has two filters of up to three alike stages: one on its input,
+//! before the line or after the grain, and one on what the line feeds
+//! back. They are the cookbook's low pass, band pass, notch, high pass,
+//! shelves and peak, designed and run as FL does (`FUN_006debc0`,
+//! `FUN_005dc180`, `FUN_005dc9a0`).
+//!
+//! Not built: the 2x oversampling and the bend of the grain's shape. A
+//! state that has one of them on says so in [`Effect::fidelity`].
 
 use crate::parts::{Matrix, glide, offset_frames, stereo_gains};
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value, state_version};
+use dsp::biquad::{Biquad64, Coefficients64};
+use std::f64::consts::TAU;
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Fruity Delay Bank";
@@ -89,11 +96,13 @@ const DEFAULTS: [i32; GLOBALS + EACH] = [
 /// A unit's parameters, counted from the unit's first.
 const IN_PAN: usize = 0;
 const IN_VOL: usize = 1;
+const IN_FILTER: usize = 2;
 const FB_PAN: usize = 5;
 const FB_VOL: usize = 6;
 const FB_SEP: usize = 7;
 const TIME: usize = 8;
 const OFFSET: usize = 9;
+const FB_FILTER: usize = 10;
 const OUT_PAN: usize = 13;
 const OUT_VOL: usize = 14;
 const NEXT: usize = 15;
@@ -179,6 +188,308 @@ fn window(len: usize) -> Vec<f32> {
     (0..len).map(value).collect()
 }
 
+/// The designer's kind for each filter mode of the state (`0x7344e0`): off,
+/// low pass, band pass, notch, high pass, low shelf, peak, high shelf.
+const KINDS: [i32; 8] = [0, 1, 2, 3, 4, 6, 7, 8];
+const LOW_PASS: i32 = 1;
+const BAND_PASS: i32 = 2;
+const NOTCH: i32 = 3;
+const HIGH_PASS: i32 = 4;
+const LOW_SHELF: i32 = 6;
+const PEAK: i32 = 7;
+const HIGH_SHELF: i32 = 8;
+
+/// The most stages a filter has room for: `0x178` bytes, three of `0x78`
+/// and the filter's own fields.
+const STAGES: usize = 3;
+
+/// `float(base^x - 1)` as FL works it, `Exp(double(float(x)) * Ln(base))`,
+/// for a wheel's curve.
+fn curve(x: f64, base: f64) -> f64 {
+    f64::from(((f64::from(x as f32) * base.ln()).exp() - 1.0) as f32)
+}
+
+/// FL's `Power` (`FUN_0045d6b0`): `Exp(y * Ln(x))`.
+fn power(x: f64, y: f64) -> f64 {
+    (y * x.ln()).exp()
+}
+
+/// `FUN_005dc180`: the cookbook's coefficients for a designer kind, from
+/// the amplitude `a`, the kind's alpha (for a shelf, `2 sqrt(A) alpha` over
+/// the sine), the sine and the cosine of the corner, normalised to
+/// `a0 = 1`, in FL's order of operations.
+fn cookbook(kind: i32, a: f64, alpha: f64, sin: f64, cos: f64) -> Coefficients64 {
+    let one = |n: f64| Coefficients64 {
+        b0: 0.0,
+        b1: 0.0,
+        b2: 0.0,
+        a1: n * cos * -2.0,
+        a2: n * (1.0 - alpha),
+    };
+    match kind {
+        LOW_PASS => {
+            let n = 1.0 / (alpha + 1.0);
+            let b1 = n * (1.0 - cos);
+            let b0 = b1 * 0.5;
+            Coefficients64 {
+                b0,
+                b1,
+                b2: b0,
+                ..one(n)
+            }
+        }
+        BAND_PASS => {
+            let n = 1.0 / (alpha + 1.0);
+            Coefficients64 {
+                b0: n * alpha,
+                b1: 0.0,
+                b2: n * -alpha,
+                ..one(n)
+            }
+        }
+        NOTCH => {
+            let n = 1.0 / (alpha + 1.0);
+            let c = one(n);
+            Coefficients64 {
+                b0: n,
+                b1: c.a1,
+                b2: n,
+                ..c
+            }
+        }
+        HIGH_PASS => {
+            let n = 1.0 / (alpha + 1.0);
+            let b1 = n * -(cos + 1.0);
+            let b0 = -b1 * 0.5;
+            Coefficients64 {
+                b0,
+                b1,
+                b2: b0,
+                ..one(n)
+            }
+        }
+        PEAK => {
+            let n = 1.0 / (alpha / a + 1.0);
+            let a1 = n * cos * -2.0;
+            Coefficients64 {
+                b0: n * (alpha * a + 1.0),
+                b1: a1,
+                b2: n * (1.0 - alpha * a),
+                a1,
+                a2: n * (1.0 - alpha / a),
+            }
+        }
+        LOW_SHELF => {
+            let tilt = (a - 1.0) * cos;
+            let slope = alpha * sin;
+            let n = 1.0 / (a + 1.0 + tilt + slope);
+            Coefficients64 {
+                b0: n * a * (((a + 1.0) - tilt) + slope),
+                b1: n * a * 2.0 * ((a - 1.0) - (a + 1.0) * cos),
+                b2: n * a * (((a + 1.0) - tilt) - slope),
+                a1: n * ((a - 1.0) + (a + 1.0) * cos) * -2.0,
+                a2: n * ((a + 1.0 + tilt) - slope),
+            }
+        }
+        HIGH_SHELF => {
+            let tilt = (a - 1.0) * cos;
+            let slope = alpha * sin;
+            let n = 1.0 / (((a + 1.0) - tilt) + slope);
+            Coefficients64 {
+                b0: n * a * (a + 1.0 + tilt + slope),
+                b1: n * a * -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+                b2: n * a * ((a + 1.0 + tilt) - slope),
+                a1: n * ((a - 1.0) - (a + 1.0) * cos) * 2.0,
+                a2: n * (((a + 1.0) - tilt) - slope),
+            }
+        }
+        _ => Coefficients64::IDENTITY,
+    }
+}
+
+/// One of a unit's two filters (`+0x68` the input's, `+0x1e0` the
+/// feedback's): up to three alike stages in a row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Filter {
+    /// The designer's kind, 0 for none, and how many stages run.
+    kind: i32,
+    stages: usize,
+    coefficients: Coefficients64,
+    /// Each stage's state, a side at a time.
+    state: [[Biquad64; 2]; STAGES],
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Filter {
+            kind: 0,
+            stages: 0,
+            coefficients: Coefficients64::IDENTITY,
+            state: Default::default(),
+        }
+    }
+}
+
+impl Filter {
+    /// `FUN_006debc0` for a mode, a type (stages less one) and the three
+    /// wheels: cutoff, resonance or width, and gain. `step` is the
+    /// renderer's `44100 / SR` times `2 pi`, so a cutoff counts in parts of
+    /// 44.1 kHz.
+    ///
+    /// The spread is what `FUN_006dfc10` keeps beside the stages from
+    /// their count `n`: `1 / n` for the Q of a pass or the amplitude of a
+    /// peak or shelf, and `n` for a band pass's width, `1 / n` for a
+    /// notch's. FL works it out when the unit is flushed, which a state
+    /// load does before it sets the wheels, so it is the count's here.
+    fn design(&mut self, mode: i32, kind_of_type: i32, wheels: [i32; 3], step: f64) {
+        let kind = usize::try_from(mode)
+            .ok()
+            .and_then(|m| KINDS.get(m))
+            .copied();
+        self.kind = kind.unwrap_or(0);
+        self.stages = usize::try_from(kind_of_type + 1).map_or(0, |n| n.min(STAGES));
+        let n = kind_of_type.saturating_add(1);
+        let several = kind_of_type > 0;
+        let per_stage = f64::from((1.0 / f64::from(n)) as f32);
+        let width_spread = if self.kind == NOTCH {
+            f64::from(1.0 / n as f32)
+        } else {
+            f64::from(n as f32)
+        };
+        let cut = f64::from(wheels[0]) * (1.0 / 65_536.0);
+        let res = f64::from(wheels[1]) * (1.0 / 65_536.0);
+        // The corner's sine and cosine, from a cutoff in parts of 44.1 kHz
+        // and the offset its kind adds, held to `0..2.8495` radians.
+        let corner = |fc: f64, offset: f64| {
+            let w = (fc + offset) * step;
+            let w = if w <= 2.849_517_146_113_191 {
+                w.max(0.0)
+            } else {
+                2.849_517_146_113_191
+            };
+            let (sin, cos) = w.sin_cos();
+            (w, sin, cos)
+        };
+        // The cutoff of a band, a notch, a high pass, a peak and a shelf:
+        // `(1501^c - 1) * 0.0004`, held under `top`.
+        let narrow = |top: f64| {
+            if cut > 0.0 {
+                (curve(cut, 1501.0) * 0.000_399_933_342_123_404_15).min(top)
+            } else {
+                0.0
+            }
+        };
+        // The Q of a pass: 0.1 to 50, shared out over the stages.
+        let pass_q = || {
+            let mut q = if res <= 0.0 {
+                0.1
+            } else if res < 1.0 {
+                curve(res, 2001.0) * 0.024_950_001_388_788_223 + 0.1
+            } else {
+                50.0
+            };
+            if several {
+                q = power(q, per_stage);
+            }
+            q
+        };
+        // The amplitude of a peak or a shelf from the gain wheel: 0.1 at
+        // 0, 1 at 128, 2 at 256, shared out over the stages.
+        let amplitude = || {
+            let g = f64::from(wheels[2] as f32 * (1.0 / 128.0));
+            let g = f64::from(((g * 1.111_111_164_093_017_6f64.ln()).exp() - 1.0) as f32);
+            let a = g * 8.1 + 0.1;
+            if several { power(a, per_stage) } else { a }
+        };
+        let (a, alpha, sin, cos) = match self.kind {
+            LOW_PASS | HIGH_PASS => {
+                let (fc, offset) = if self.kind == LOW_PASS {
+                    let fc = if cut > 0.0 {
+                        curve(cut, 1501.0) * 0.000_664_666_644_297_540_2
+                    } else {
+                        0.0
+                    };
+                    (fc, 0.003)
+                } else {
+                    (narrow(0.6001), 0.0001)
+                };
+                let k = 0.5 / pass_q();
+                let (_, sin, cos) = corner(fc, offset);
+                (0.0, sin * k, sin, cos)
+            }
+            BAND_PASS | NOTCH => {
+                let width = if res <= 0.0 {
+                    0.01
+                } else if res < 1.0 {
+                    curve(res, 101.0) * 0.119_899_995_625_019_07 + 0.01
+                } else {
+                    12.0
+                };
+                let (w, sin, cos) = corner(narrow(1.0001), 0.0001);
+                let s = ((width * width_spread * w) / sin).sinh();
+                (0.0, sin * s, sin, cos)
+            }
+            PEAK => {
+                let r = 1.0 - res;
+                let q = if r <= 0.0 {
+                    0.1
+                } else if r < 1.0 {
+                    curve(r, 2001.0) * 0.049_949_999_898_672_104 + 0.1
+                } else {
+                    100.0
+                };
+                let a = amplitude();
+                let (_, sin, cos) = corner(narrow(1.0001), 0.0001);
+                (a, sin / (q * 2.0), sin, cos)
+            }
+            LOW_SHELF | HIGH_SHELF => {
+                let r = 1.0 - res;
+                let slope = if r <= 0.0 {
+                    0.1
+                } else if r < 1.0 {
+                    curve(r, 3.0) * 0.449_999_988_079_071 + 0.1
+                } else {
+                    1.0
+                };
+                let a = amplitude();
+                let beta = a.sqrt() * ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).sqrt();
+                let (_, sin, cos) = corner(narrow(1.0001), 0.0001);
+                (a, beta, sin, cos)
+            }
+            _ => {
+                self.coefficients = Coefficients64::IDENTITY;
+                return;
+            }
+        };
+        self.coefficients = cookbook(self.kind, a, alpha, sin, cos);
+    }
+
+    /// `FUN_006e1320`: a frame through each stage in turn, in doubles,
+    /// back to a float between them (`FUN_005dc9a0`).
+    fn run(&mut self, frame: (f32, f32)) -> (f32, f32) {
+        let c = &self.coefficients;
+        let (mut l, mut r) = frame;
+        for [left, right] in &mut self.state[..self.stages] {
+            l = left.process(c, f64::from(l)) as f32;
+            r = right.process(c, f64::from(r)) as f32;
+        }
+        (l, r)
+    }
+
+    /// The kernel's flush of what is too small for a double to hold, at
+    /// the end of a block.
+    fn flush(&mut self) {
+        for side in self.state.as_flattened_mut() {
+            side.flush();
+        }
+    }
+
+    /// `FUN_006dfc10`'s clear: every stage starts from nothing.
+    fn clear(&mut self) {
+        self.state = Default::default();
+    }
+}
+
 /// One delay unit.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Unit {
@@ -187,6 +498,8 @@ struct Unit {
     /// unit on, the first echo left alone, the time in beats.
     filters: [[i32; 2]; 2],
     post: bool,
+    /// The input filter and the feedback filter.
+    bands: [Filter; 2],
     mode: i32,
     grain_division: i32,
     grain_shape: i32,
@@ -263,6 +576,9 @@ impl Unit {
     /// What FL's flush does to a unit: the line and the grain start
     /// over, and the gains are where they were last worked out to be.
     fn flush(&mut self) {
+        for band in &mut self.bands {
+            band.clear();
+        }
         self.line.fill([0.0; 2]);
         self.grain_phase = 0.0;
         self.input.current = self.input.target;
@@ -339,8 +655,16 @@ impl DelayBank {
             let (in_pan, in_vol) = (of(IN_PAN), of(IN_VOL));
             let (out_pan, out_vol, next) = (of(OUT_PAN), of(OUT_VOL), of(NEXT));
             let (time, offset) = (of(TIME), of(OFFSET));
+            let wheels = |first: usize| [of(first), of(first + 1), of(first + 2)];
+            let (in_wheels, fb_wheels) = (wheels(IN_FILTER), wheels(FB_FILTER));
             let (input, wet, rate, tempo) = (self.input, self.wet, self.rate, self.tempo);
             let unit = &mut self.units[at];
+            // The renderer's `44100 / SR` (`+0x20`) times `2 pi`.
+            let step = 44_100.0 / f64::from(rate) * TAU;
+            for (band, wheels) in [in_wheels, fb_wheels].into_iter().enumerate() {
+                let [mode, kind] = unit.filters[band];
+                unit.bands[band].design(mode, kind, wheels, step);
+            }
             unit.in_volume = signed_gain(in_vol);
             unit.out_volume = signed_gain(out_vol);
             unit.next = signed_gain(next);
@@ -378,17 +702,10 @@ impl DelayBank {
 
     /// What of the state this does not do, if anything.
     fn missing(&self) -> Option<&'static str> {
-        let on = self.units.iter().filter(|unit| unit.enabled);
-        let filtered =
-            |unit: &Unit| unit.filters[0][0] != 0 || (unit.delays() && unit.filters[1][0] != 0);
-        if on.clone().any(filtered) {
-            Some("Delay Bank's filters are not built: the units run without them")
-        } else if self.params[SAVED - 1] > 0 {
+        let mut on = self.units.iter().filter(|unit| unit.enabled);
+        if self.params[SAVED - 1] > 0 {
             Some("Delay Bank's 2x oversampling is not built")
-        } else if on
-            .clone()
-            .any(|u| !u.grain.is_empty() && u.grain_shape != 0)
-        {
+        } else if on.any(|u| !u.grain.is_empty() && u.grain_shape != 0) {
             Some("Delay Bank's grain shape is not built: the grain is a raised cosine")
         } else {
             None
@@ -510,13 +827,25 @@ impl Effect for DelayBank {
                     x.0 += before.0 * send;
                     x.1 += before.1 * send;
                 }
+                // The input filter's place (`+0x358`): none with its mode
+                // at 0, else before the line or after the grain.
+                let in_filter = unit.filters[0][0] != 0;
+                if in_filter && !unit.post {
+                    x = unit.bands[0].run(x);
+                }
                 if !unit.line.is_empty() {
                     let size = unit.line.len();
                     let write = (unit.at + unit.delay) % size;
                     unit.line[(write + unit.late[0]) % size][0] += x.0;
                     unit.line[(write + unit.late[1]) % size][1] += x.1;
                     let [out_left, out_right] = unit.line[unit.at];
-                    let mut back = Matrix::mix(&feedback, out_left, out_right);
+                    // The feedback filter works on what leaves the line,
+                    // after the first echo is taken from it.
+                    let mut heard = (out_left, out_right);
+                    if unit.filters[1][0] > 0 {
+                        heard = unit.bands[1].run(heard);
+                    }
+                    let mut back = Matrix::mix(&feedback, heard.0, heard.1);
                     if back.0.abs() < TINY {
                         back.0 = 0.0;
                     }
@@ -551,6 +880,9 @@ impl Effect for DelayBank {
                     grain_at[at] += 1;
                     grain_left[at] -= 1;
                 }
+                if in_filter && unit.post {
+                    x = unit.bands[0].run(x);
+                }
                 let out = Matrix::mix(&output, x.0, x.1);
                 wet.0 += out.0;
                 wet.1 += out.1;
@@ -558,6 +890,11 @@ impl Effect for DelayBank {
                 send = unit.next;
             }
             (*l, *r) = wet;
+        }
+        for unit in &mut self.units {
+            for band in &mut unit.bands {
+                band.flush();
+            }
         }
     }
 
@@ -857,21 +1194,136 @@ mod tests {
 
     #[test]
     fn a_state_with_what_is_not_built_says_so() {
+        // The filters are built.
         let filtered = Switches { in_filter: 4, ..ON };
         let mut plugin = with(&[filtered], &[]);
-        assert!(
-            matches!(plugin.fidelity(), Fidelity::Approximate(text) if text.contains("filters"))
-        );
-        // The filter of a unit that is off does not count.
-        let off = Switches {
-            enabled: false,
-            ..filtered
-        };
-        assert_eq!(with(&[ON, off], &[]).fidelity(), Fidelity::Exact);
+        assert_eq!(plugin.fidelity(), Fidelity::Exact);
         let mut bytes = saved(&[ON], &[]);
         bytes[SWITCHES_AT - 4] = 1;
         plugin.set_state(&bytes).unwrap();
         assert!(matches!(plugin.fidelity(), Fidelity::Approximate(text) if text.contains("2x")));
+    }
+
+    /// The gain of coefficients at `turns` a sample.
+    fn gain(c: &Coefficients64, turns: f64) -> f64 {
+        let w = TAU * turns;
+        let (z1, z2) = ((-w).sin_cos(), (-2.0 * w).sin_cos());
+        let num = (c.b0 + c.b1 * z1.1 + c.b2 * z2.1, c.b1 * z1.0 + c.b2 * z2.0);
+        let den = (1.0 + c.a1 * z1.1 + c.a2 * z2.1, c.a1 * z1.0 + c.a2 * z2.0);
+        (num.0.hypot(num.1)) / (den.0.hypot(den.1))
+    }
+
+    /// `FUN_005dc180` is the cookbook: each kind has its gain where the
+    /// cookbook puts it.
+    #[test]
+    fn the_designer_is_the_cookbook() {
+        let w = 0.3f64;
+        let (sin, cos) = w.sin_cos();
+        let turns = w / TAU;
+        let alpha = sin / (2.0 * 0.9);
+        let at =
+            |kind: i32, a: f64, alpha: f64, f: f64| gain(&cookbook(kind, a, alpha, sin, cos), f);
+        assert!((at(LOW_PASS, 0.0, alpha, 0.0) - 1.0).abs() < 1e-12);
+        assert!(at(LOW_PASS, 0.0, alpha, 0.5) < 1e-12);
+        assert!(at(HIGH_PASS, 0.0, alpha, 0.0) < 1e-12);
+        assert!((at(HIGH_PASS, 0.0, alpha, 0.5) - 1.0).abs() < 1e-12);
+        assert!((at(BAND_PASS, 0.0, alpha, turns) - 1.0).abs() < 1e-12);
+        assert!(at(NOTCH, 0.0, alpha, turns) < 1e-9);
+        // A peak of amplitude 1.5 is 1.5^2 at its centre, and a shelf is
+        // that far from the other end.
+        assert!((at(PEAK, 1.5, alpha, turns) - 2.25).abs() < 1e-9);
+        let beta = 1.5f64.sqrt() * ((1.5 + 1.0 / 1.5) * (1.0 / 0.8 - 1.0) + 2.0f64).sqrt();
+        assert!((at(LOW_SHELF, 1.5, beta, 0.0) - 2.25).abs() < 1e-9);
+        assert!((at(LOW_SHELF, 1.5, beta, 0.5) - 1.0).abs() < 1e-9);
+        assert!((at(HIGH_SHELF, 1.5, beta, 0.5) - 2.25).abs() < 1e-9);
+        assert!((at(HIGH_SHELF, 1.5, beta, 0.0) - 1.0).abs() < 1e-9);
+    }
+
+    /// The wheels as `FUN_006debc0` reads them, at 44.1 kHz where a
+    /// cutoff is in parts of the rate.
+    #[test]
+    fn the_wheels_make_the_corner_and_the_width() {
+        let step = TAU;
+        let mut filter = Filter::default();
+        // A low pass at its default cutoff: `(1501^0.506 - 1) * 0.00066`
+        // of 44.1 kHz and 0.003 more, 1.29 kHz, -3 dB there at the Q of
+        // its wheel at 0, which is 0.1 here: well down.
+        filter.design(1, 0, [33_145, 0, 128], step);
+        assert_eq!((filter.kind, filter.stages), (LOW_PASS, 1));
+        let fc = curve(33_145.0 / 65_536.0, 1501.0) * 0.000_664_666_644_297_540_2 + 0.003;
+        assert!((fc * 44_100.0 - 1290.0).abs() < 10.0, "{}", fc * 44_100.0);
+        let q = 0.1;
+        let want = q; // a low pass is Q at its corner
+        assert!((gain(&filter.coefficients, fc) - want).abs() < 1e-6);
+        // At the top of the resonance wheel the Q is 50.
+        filter.design(1, 0, [33_145, 65_536, 128], step);
+        assert!((gain(&filter.coefficients, fc) - 50.0).abs() < 1e-3);
+        // Three stages share the Q out: each has 50^(1/3).
+        filter.design(1, 2, [33_145, 65_536, 128], step);
+        assert_eq!(filter.stages, 3);
+        let each = power(50.0, f64::from(1.0f32 / 3.0));
+        assert!((gain(&filter.coefficients, fc) - each).abs() < 1e-3);
+        // A peak at 128 on its gain wheel does nothing, and at 256 it is
+        // twice the amplitude: four times the gain at its centre.
+        filter.design(6, 0, [30_000, 30_000, 128], step);
+        assert_eq!(filter.kind, PEAK);
+        let centre = curve(30_000.0 / 65_536.0, 1501.0) * 0.000_399_933_342_123_404_15 + 0.0001;
+        assert!((gain(&filter.coefficients, centre) - 1.0).abs() < 1e-6);
+        filter.design(6, 0, [30_000, 30_000, 256], step);
+        assert!((gain(&filter.coefficients, centre) - 4.0).abs() < 1e-3);
+        // A notch has nothing at its centre, a band pass all of it.
+        filter.design(3, 0, [30_000, 30_000, 128], step);
+        assert!(gain(&filter.coefficients, centre) < 1e-9);
+        filter.design(2, 2, [30_000, 30_000, 128], step);
+        assert!((gain(&filter.coefficients, centre) - 1.0).abs() < 1e-9);
+        // Mode 0 is no filter.
+        filter.design(0, 0, [30_000, 30_000, 128], step);
+        assert_eq!(filter.coefficients, Coefficients64::IDENTITY);
+    }
+
+    /// The input filter before the line and after it, and the feedback
+    /// filter on each echo.
+    #[test]
+    fn the_filters_shape_the_echoes() {
+        // An echo of a tone through a unit whose input is low passed at
+        // its default cutoff: low tones pass, high ones do not.
+        let tone = |plugin: &mut DelayBank, hz: f64| {
+            let turns = hz / 48_000.0;
+            let mut left = crate::testing::sine(turns, 48_000);
+            let mut right = left.clone();
+            for (l, r) in left.chunks_mut(512).zip(right.chunks_mut(512)) {
+                plugin.process(l, r);
+            }
+            crate::testing::partial(&left[24_000..], turns)
+        };
+        // The Dry wheel at 0: only the echoes.
+        let dry = (0, 0);
+        let low = Switches { in_filter: 1, ..ON };
+        let mut plugin = with(&[low], &[dry, (at(0, IN_FILTER + 1), 30_000)]);
+        let passed = tone(&mut plugin, 200.0);
+        let mut plugin = with(&[low], &[dry, (at(0, IN_FILTER + 1), 30_000)]);
+        let stopped = tone(&mut plugin, 12_000.0);
+        assert!(passed > 0.5 && stopped < 0.05, "{passed} {stopped}");
+        // The feedback filter: a high pass in the line takes a low tone
+        // out of every echo, the first one processed too.
+        let processed = Switches { first: false, ..ON };
+        let mut bytes = saved(&[processed], &[dry]);
+        bytes[SWITCHES_AT + 8..SWITCHES_AT + 12].copy_from_slice(&4i32.to_le_bytes());
+        let mut plugin = DelayBank::default();
+        plugin.set_sample_rate(48_000.0);
+        plugin.set_state(&bytes).unwrap();
+        assert_eq!(plugin.units[0].bands[1].kind, HIGH_PASS);
+        assert_eq!(plugin.fidelity(), Fidelity::Exact);
+        let level = tone(&mut plugin, 40.0);
+        let mut plain = with(&[processed], &[dry]);
+        let unfiltered = tone(&mut plain, 40.0);
+        assert!(
+            level < 0.1 * unfiltered && unfiltered > 0.1,
+            "{level} {unfiltered}"
+        );
+        // A flush empties the filters.
+        plugin.reset();
+        assert!(plugin.units[0].bands[1].state == Filter::default().state);
     }
 
     #[test]

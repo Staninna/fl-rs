@@ -165,9 +165,9 @@ pub fn prepare(project: &Project, sample_root: &Path) -> Result<PreparedSamples,
     // finds in its own directory, such as FL Keys's wavetables.
     let plugin_dir = samples.plugin_dir().map(Path::to_path_buf);
     for channel in &project.channels {
-        let state = channel.plugin_state.as_deref();
-        let name = channel.plugin_name.as_deref();
-        let Some((state, name)) = state.zip(name) else {
+        // A channel with no saved state plays the generator's defaults, as
+        // `generator::hosted` makes it, and still takes the channel's sample.
+        let Some(name) = channel.plugin_name.as_deref() else {
             continue;
         };
         let Some(mut generator) = plugins::generator_by_name(name) else {
@@ -176,7 +176,14 @@ pub fn prepare(project: &Project, sample_root: &Path) -> Result<PreparedSamples,
         if let Some(dir) = &plugin_dir {
             generator.set_resource_dir(dir);
         }
-        if generator.set_state(state).is_ok() {
+        let restored = channel
+            .plugin_state
+            .as_deref()
+            .is_none_or(|state| generator.set_state(state).is_ok());
+        if restored {
+            if let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) {
+                generator.set_channel_sample(path);
+            }
             for path in generator.sample_paths() {
                 let _ = samples.load(&path, sample_root);
             }
@@ -492,6 +499,25 @@ mod tests {
         let piano = samples.loaded.keys().filter(|p| p.contains("Grand Piano"));
         let decoded = piano.filter(|p| samples.get(p).is_some()).count();
         assert_eq!(decoded, 30);
+    }
+
+    #[test]
+    fn a_generator_channel_with_no_state_still_takes_its_sample() {
+        // FL plays such a channel at the generator's defaults, so the
+        // channel's sample has to be looked for all the same.
+        let mut project = model::Project::new(flp::Header {
+            format: 0,
+            channel_count: 1,
+            ppq: 96,
+        });
+        project.channels.push(model::Channel {
+            kind: Some(model::ChannelKind::Plugin),
+            plugin_name: Some(plugins::granulizer::NAME.into()),
+            sample_path: Some("Grains.wav".into()),
+            ..model::Channel::default()
+        });
+        let samples = prepare(&project, Path::new("nowhere")).unwrap();
+        assert!(samples.loaded.contains_key("Grains.wav"));
     }
 
     /// A directory under the system's temp directory, removed on drop.

@@ -206,3 +206,34 @@ fn text(data: &[u8]) -> String {
     };
     text.trim_end_matches('\0').to_owned()
 }
+
+/// Check that a generator follows [`crate::Generator::set_note_pitch`]:
+/// three of it play key 60 for 4096 frames. Moving one of them an octave
+/// up changes what it plays from then on, and telling another the pitch
+/// it has changes nothing.
+pub(crate) fn follows_note_pitch(make: impl Fn() -> Box<dyn crate::Generator>, rate: f32) {
+    let mut plugins: Vec<_> = (0..3).map(|_| make()).collect();
+    let mut outs = Vec::new();
+    for (n, plugin) in plugins.iter_mut().enumerate() {
+        plugin.set_sample_rate(rate);
+        plugin.note_on(crate::NoteOn {
+            voice: 1,
+            ..crate::NoteOn::default()
+        });
+        let (mut left, mut right) = (vec![0.0; 4096], vec![0.0; 4096]);
+        plugin.process(&mut left, &mut right);
+        assert!(left.iter().any(|v| *v != 0.0), "the note sounds");
+        match n {
+            0 => plugin.set_note_pitch(1, 1200.0),
+            1 => plugin.set_note_pitch(1, 0.0),
+            _ => plugin.set_note_pitch(2, 1200.0),
+        }
+        let (mut later, mut right) = (vec![0.0; 8192], vec![0.0; 8192]);
+        plugin.process(&mut later, &mut right);
+        left.extend(later);
+        outs.push(bits(&left));
+    }
+    assert_eq!(outs[1], outs[2], "the same pitch, and another note's");
+    assert_eq!(outs[0][..4096], outs[2][..4096]);
+    assert_ne!(outs[0][4096..], outs[2][4096..], "an octave up");
+}

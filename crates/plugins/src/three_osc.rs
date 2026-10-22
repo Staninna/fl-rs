@@ -25,6 +25,11 @@
 //! | 5, 12, 19 Stereo detune, cents | -50 to 50 | 0 |
 //! | 6, 13 Mix level of oscillator 2 and 3 | 0 to 128 | 64, 32 |
 //! | 20 Stereo phase randomness | 0 to 64 | 0 |
+//! | 23 to 107 The instrument tab's five blocks, 17 words each | by word | |
+//! | 110, 111 The tab's cutoff and resonance | 0 to 256 | 256, 0 |
+//! | 113 The tab's filter type | 0 to 7 | 0 |
+//!
+//! 21, 22, 108, 109 and 112 are nobody's.
 //!
 //! FL does not hold a state to the ranges, and its own presets go past
 //! them. Only a shape or a filter type that is none is turned down.
@@ -76,8 +81,9 @@
 //!
 //! A state with the HQ flag reads tables made for the pitch instead: each
 //! shape cut down to the harmonics that fit, a table every quarter octave,
-//! read between two points. The doc has not confirmed how FL's engine
-//! makes them, so [`Generator::fidelity`] says so.
+//! read between two points. They are made as FL's engine makes them, with
+//! its float KissFFT, and are its tables to the bit; the sine, the noise and
+//! the shapes under 22 Hz are worked out at the phase as the engine does.
 //!
 //! What is not FL's:
 //!
@@ -86,8 +92,10 @@
 //! - FL steps the envelopes on the song's ticks. Here the ticks run from
 //!   when the plugin was made or last reset. They are as long as the
 //!   song's, by [`Generator::set_ppq`], and 96 to a beat until it is told.
-//! - A slide note sounds like any other, and a note past [`VOICES`] takes
-//!   the place of the oldest.
+//! - A note past [`VOICES`] takes the place of the oldest. A slide note
+//!   sounds like any other: FL's host sends none, and moves the pitch of
+//!   what sounds instead, which a voice takes on its next tick
+//!   ([`Generator::set_note_pitch`]), as FL's reads `FinalLevels.Pitch`.
 //! - FL's box filter for its offline render mode is not built.
 //! - FL draws its random numbers from a seed it shares with everything
 //!   else. Here each plugin starts from 0.
@@ -117,7 +125,7 @@ const TABLE: usize = 16_384;
 const BASE: f64 = 2_247_346_493_527.166;
 
 /// The ticks to a beat the envelopes count in until the host says.
-const PPQ: f64 = 96.0;
+pub(crate) const PPQ: f64 = 96.0;
 
 /// The range of each parameter's wheel.
 const RANGES: [(i32, i32); 21] = [
@@ -165,10 +173,59 @@ const LFO_SHAPE: usize = 13;
 const TENSIONS: usize = 14;
 
 /// The blocks of the tab, in the order the state has them.
-const VOLUME: usize = 1;
-const MOD_X: usize = 2;
-const MOD_Y: usize = 3;
-const PITCH: usize = 4;
+pub(crate) const VOLUME: usize = 1;
+pub(crate) const MOD_X: usize = 2;
+pub(crate) const MOD_Y: usize = 3;
+pub(crate) const PITCH: usize = 4;
+
+/// The parameter the instrument tab's start at. FL's tab handler
+/// (`0x7378a0`) takes 23 to 113: `0x73ad35` hands 23 to `0x72c440`, which
+/// lays the five blocks out 17 words apiece from there and puts the
+/// cutoff, the resonance and the filter type 2, 3 and 5 past them. 21,
+/// 22, 108, 109 and 112 are nobody's: FL keeps nothing for them.
+const TAB_PARAM: usize = 23;
+const TAB_BLOCKS_END: usize = TAB_PARAM + 5 * 17;
+const TAB_CUTOFF: usize = TAB_BLOCKS_END + 2;
+const TAB_RESONANCE: usize = TAB_BLOCKS_END + 3;
+const TAB_FILTER: usize = TAB_BLOCKS_END + 5;
+/// FL's NumParams.
+const PARAMS: usize = TAB_BLOCKS_END + 6;
+
+/// How far each block's envelope and LFO amounts go either way: FL
+/// rescales words 8 and 11 by the table at `0x790a60` (`0x737820`) and not
+/// by their wheels' -128 to 128.
+const TAB_AMOUNTS: [i32; 5] = [64, 128, 128, 128, 2400];
+
+/// The range of word `word` of block `block` of the instrument tab, from
+/// the wheels of the tab's form (Tags 0x1000 + word) that `0x7364a0` lists.
+/// Word 0, the flags, has no control, so FL stores what it is given.
+/// Word 1 is the "use envelope" box.
+fn tab_range(block: usize, word: usize) -> (i32, i32) {
+    match word {
+        FLAGS => (0, 1 << 30),
+        ENABLED => (0, 1),
+        SUSTAIN => (0, 128),
+        AMOUNT | LFO_AMOUNT => (-TAB_AMOUNTS[block], TAB_AMOUNTS[block]),
+        LFO_SPEED => (200, 65_536),
+        LFO_SHAPE => (0, 2),
+        TENSIONS.. => (-128, 128),
+        _ => (100, 65_536),
+    }
+}
+
+/// The range of a parameter, and `None` for one FL keeps nothing for.
+fn param_range(index: usize) -> Option<(i32, i32)> {
+    match index {
+        0..21 => Some(RANGES[index]),
+        TAB_PARAM..TAB_BLOCKS_END => {
+            let at = index - TAB_PARAM;
+            Some(tab_range(at / 17, at % 17))
+        }
+        TAB_CUTOFF | TAB_RESONANCE => Some((0, 256)),
+        TAB_FILTER => Some((0, 7)),
+        _ => None,
+    }
+}
 
 /// A block's flags: its times are ticks whatever the tempo is, the same
 /// for its LFO, a block that is off holds 1 and not 0, and the LFO's phase
@@ -180,18 +237,18 @@ const GLOBAL_LFO: i32 = 0x20;
 
 /// The stages of an envelope, as FL numbers them.
 const WAIT: u8 = 0;
-const RISE: u8 = 1;
+pub(crate) const RISE: u8 = 1;
 const HELD: u8 = 2;
 const FALL: u8 = 3;
 const SUSTAINED: u8 = 4;
 const RELEASED: u8 = 6;
-const OVER: u8 = 9;
+pub(crate) const OVER: u8 = 9;
 
 /// An envelope under this is over.
 const TINY: f32 = 5.960_464_5e-8;
 
 /// The tab of a new plugin, and of every state older than version 14.
-fn new_tab() -> Articulation {
+pub(crate) fn new_tab() -> Articulation {
     let block = [
         0, 0, 100, 20_000, 20_000, 30_000, 50, 20_000, 0, 100, 20_000, 0, 32_950, 0, 0, 0, 0,
     ];
@@ -209,7 +266,7 @@ fn new_tab() -> Articulation {
 /// The six tables FL's host makes when it starts: sine, triangle, square,
 /// saw, rounded saw and noise.
 #[derive(Debug, PartialEq)]
-struct HostTables {
+pub(crate) struct HostTables {
     shapes: [Vec<f32>; 6],
 }
 
@@ -292,7 +349,7 @@ impl HostTables {
     }
 
     /// The tables, made once.
-    fn get() -> &'static HostTables {
+    pub(crate) fn get() -> &'static HostTables {
         static TABLES: OnceLock<HostTables> = OnceLock::new();
         TABLES.get_or_init(HostTables::new)
     }
@@ -341,7 +398,7 @@ struct MipTables {
 
 /// A fast Fourier transform in place, of a length that is a power of two.
 /// `inverse` turns it round and leaves the scale to the caller.
-fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
+pub(crate) fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let len = re.len();
     let mut j = 0;
     for i in 1..len {
@@ -380,35 +437,181 @@ fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
     }
 }
 
+/// The KissFFT the HQ engine builds its tables with, in floats: the plan
+/// `FUN_1800029d0` makes (radix 4 first, then 2, 3 and the odd numbers) and
+/// the recursion `FUN_1800027c0` with its radix 2 and 4 butterflies. The
+/// engine runs four lanes side by side, each on its own, so one lane is
+/// the same to the bit.
+struct Kiss {
+    inverse: bool,
+    /// Each stage's radix and the length under it.
+    factors: Vec<(usize, usize)>,
+    twiddles: Vec<[f32; 2]>,
+}
+
+type Complex = [f32; 2];
+
+fn cmul(a: Complex, b: Complex) -> Complex {
+    [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
+}
+
+fn csub(a: Complex, b: Complex) -> Complex {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn cadd(a: Complex, b: Complex) -> Complex {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+impl Kiss {
+    fn new(len: usize, inverse: bool) -> Kiss {
+        let step = 1.0 / len as f64;
+        let twiddles = (0..len)
+            .map(|i| {
+                let phase = i as f64 * -TAU * step;
+                let phase = if inverse { -phase } else { phase };
+                [phase.cos() as f32, phase.sin() as f32]
+            })
+            .collect();
+        let floor_sqrt = (len as f64).sqrt().floor();
+        let (mut factors, mut n, mut p) = (Vec::new(), len, 4);
+        loop {
+            while n % p != 0 {
+                p = match p {
+                    4 => 2,
+                    2 => 3,
+                    _ => p + 2,
+                };
+                if p as f64 > floor_sqrt {
+                    p = n;
+                }
+            }
+            n /= p;
+            factors.push((p, n));
+            if n <= 1 {
+                break;
+            }
+        }
+        Kiss {
+            inverse,
+            factors,
+            twiddles,
+        }
+    }
+
+    fn transform(&self, input: &[Complex]) -> Vec<Complex> {
+        let mut out = vec![[0.0; 2]; input.len()];
+        self.work(&mut out, input, 0, 1, 0);
+        out
+    }
+
+    fn work(
+        &self,
+        out: &mut [Complex],
+        input: &[Complex],
+        from: usize,
+        stride: usize,
+        stage: usize,
+    ) {
+        let (p, m) = self.factors[stage];
+        if m == 1 {
+            for (k, point) in out.iter_mut().take(p).enumerate() {
+                *point = input[from + k * stride];
+            }
+        } else {
+            for k in 0..p {
+                let part = &mut out[k * m..(k + 1) * m];
+                self.work(part, input, from + k * stride, stride * p, stage + 1);
+            }
+        }
+        match p {
+            2 => self.butterfly_2(out, stride, m),
+            4 => self.butterfly_4(out, stride, m),
+            _ => unreachable!("the HQ tables are a power of two long"),
+        }
+    }
+
+    fn butterfly_2(&self, out: &mut [Complex], stride: usize, m: usize) {
+        for k in 0..m {
+            let t = cmul(out[m + k], self.twiddles[k * stride]);
+            out[m + k] = csub(out[k], t);
+            out[k] = cadd(out[k], t);
+        }
+    }
+
+    fn butterfly_4(&self, out: &mut [Complex], stride: usize, m: usize) {
+        let tw = &self.twiddles;
+        for k in 0..m {
+            let s0 = cmul(out[k + m], tw[k * stride]);
+            let s1 = cmul(out[k + 2 * m], tw[2 * k * stride]);
+            let s2 = cmul(out[k + 3 * m], tw[3 * k * stride]);
+            let s5 = csub(out[k], s1);
+            out[k] = cadd(out[k], s1);
+            let s3 = cadd(s0, s2);
+            let s4 = csub(s0, s2);
+            out[k + 2 * m] = csub(out[k], s3);
+            out[k] = cadd(out[k], s3);
+            if self.inverse {
+                out[k + m] = [s5[0] - s4[1], s5[1] + s4[0]];
+                out[k + 3 * m] = [s5[0] + s4[1], s5[1] - s4[0]];
+            } else {
+                out[k + m] = [s5[0] + s4[1], s5[1] - s4[0]];
+                out[k + 3 * m] = [s5[0] - s4[1], s5[1] + s4[0]];
+            }
+        }
+    }
+}
+
 impl MipTables {
+    /// `FUN_180001310` and `FUN_180002d90` with 4 levels to the octave and
+    /// 16 points to each of the shape's 2048: the shape drawn straight
+    /// between its points, cut to fewer harmonics a level at a time
+    /// (`FUN_180001be0`) and turned back, all in floats as the engine has
+    /// them.
     fn new() -> Self {
+        const COARSE: usize = 2048;
+        const UP: usize = MIP_POINTS / COARSE;
+        let forward = Kiss::new(MIP_POINTS, false);
+        let inverse = Kiss::new(MIP_POINTS, true);
+        let scale = 1.0 / MIP_POINTS as f32;
+        let fewer = 2f64.powf(-1.0 / 4.0);
         let mut levels = Vec::with_capacity(4 * MIP_LEVELS);
         for shape in 1..=4 {
-            // 2048 points of the shape, with straight lines between them.
-            let coarse: Vec<f32> = (0..2048)
-                .map(|i| shape_at(shape, (f64::from(i) / 2048.0) as f32))
+            let coarse: Vec<f32> = (0..COARSE)
+                .map(|i| shape_at(shape, (i as f64 * 0.000_488_281_25) as f32))
                 .collect();
-            let mut re: Vec<f64> = (0..MIP_POINTS)
-                .map(|i| {
-                    let (a, b) = (coarse[i / 16], coarse[(i / 16 + 1) % 2048]);
-                    f64::from(a) + f64::from(b - a) * (i % 16) as f64 / 16.0
+            let mut along = 0.0f64;
+            let points: Vec<Complex> = (0..MIP_POINTS)
+                .map(|_| {
+                    let at = along as i32 as usize;
+                    let next = if at + 1 < COARSE { at + 1 } else { 0 };
+                    let frac = along as f32 - at as f32;
+                    along += 1.0 / UP as f64;
+                    [(1.0 - frac) * coarse[at] + frac * coarse[next], 0.0]
                 })
                 .collect();
-            let mut im = vec![0.0; MIP_POINTS];
-            fft(&mut re, &mut im, false);
-            for level in 0..MIP_LEVELS {
-                // The first 1024 * 2^(-level / 4) harmonics.
-                let kept = (1024.0 * (-(level as f64) / 4.0).exp2()) as usize;
-                let (mut cut_re, mut cut_im) = (re.clone(), im.clone());
-                cut_re[kept + 1..MIP_POINTS - kept].fill(0.0);
-                cut_im[kept + 1..MIP_POINTS - kept].fill(0.0);
-                fft(&mut cut_re, &mut cut_im, true);
-                let mut table: Vec<f32> = cut_re
-                    .iter()
-                    .map(|value| (value / MIP_POINTS as f64) as f32)
-                    .collect();
-                table.extend_from_within(..2);
-                levels.push(table);
+            let spectrum = forward.transform(&points);
+            // Four levels to a pass of the engine, each with its own count
+            // of harmonics kept, 1024 at the first, `2^-1/4` fewer at each.
+            let mut kept = 1024.0f64;
+            for _ in 0..MIP_LEVELS / 4 {
+                let mut counts = [0.0f64; 4];
+                for count in &mut counts {
+                    *count = kept;
+                    kept *= fewer;
+                }
+                for count in counts {
+                    let count = (count as i32).max(1) as usize;
+                    let mut cut = spectrum.clone();
+                    cut[count + 1..MIP_POINTS - count].fill([0.0; 2]);
+                    let mut table: Vec<f32> = inverse
+                        .transform(&cut)
+                        .iter()
+                        .map(|point| scale * point[0])
+                        .collect();
+                    table.extend_from_within(..2);
+                    levels.push(table);
+                }
             }
         }
         MipTables { levels }
@@ -423,6 +626,15 @@ impl MipTables {
     fn level(&self, shape: usize, level: usize) -> &[f32] {
         &self.levels[(shape - 1) * MIP_LEVELS + level]
     }
+}
+
+/// One turn of a 32-bit phase.
+const TURN: f64 = 1.0 / 4_294_967_296.0;
+
+/// How far through its turn a phase is, as the HQ engine works it out:
+/// in doubles, then a float.
+fn along(phase: u32) -> f32 {
+    (f64::from(phase) * TURN) as f32
 }
 
 /// Delphi's `Random(range)`, which FL draws a note's phases and a noise
@@ -511,36 +723,36 @@ impl Tension {
 
 /// One block of the tab, worked out for a tempo.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Block {
-    enabled: bool,
-    full_when_off: bool,
-    global_lfo: bool,
+pub(crate) struct Block {
+    pub(crate) enabled: bool,
+    pub(crate) full_when_off: bool,
+    pub(crate) global_lfo: bool,
     /// The attack knob is at no time at all.
-    no_attack: bool,
+    pub(crate) no_attack: bool,
     /// Ticks.
-    predelay: i32,
-    hold: i32,
+    pub(crate) predelay: i32,
+    pub(crate) hold: i32,
     /// What a tick adds to the straight envelope in each stretch.
-    attack: f32,
-    decay: f32,
-    release: f32,
-    sustain: f32,
+    pub(crate) attack: f32,
+    pub(crate) decay: f32,
+    pub(crate) release: f32,
+    pub(crate) sustain: f32,
     tensions: [Tension; 3],
     /// How far the envelope and the LFO move their target: of 128, and for
     /// the pitch as they are, in cents.
-    amount: f32,
-    lfo_amount: f32,
-    cents: f32,
-    lfo_cents: f32,
-    lfo_predelay: i32,
-    lfo_attack: f32,
+    pub(crate) amount: f32,
+    pub(crate) lfo_amount: f32,
+    pub(crate) cents: f32,
+    pub(crate) lfo_cents: f32,
+    pub(crate) lfo_predelay: i32,
+    pub(crate) lfo_attack: f32,
     /// What a tick adds to the LFO's 32-bit phase.
-    lfo_step: u32,
-    lfo_shape: usize,
+    pub(crate) lfo_step: u32,
+    pub(crate) lfo_shape: usize,
 }
 
 impl Block {
-    fn of(raw: &[i32; 17], tempo: f64, ppq: f64) -> Self {
+    pub(crate) fn of(raw: &[i32; 17], tempo: f64, ppq: f64) -> Self {
         let unit = ppq / 4.0 / 48.0 * 24_576.0 / 1000.0;
         let unit_for = |fixed: i32| match raw[FLAGS] & fixed {
             0 => unit * tempo / 120.0,
@@ -575,23 +787,23 @@ impl Block {
 
 /// One envelope and LFO of a note.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Envelope {
-    stage: u8,
+pub(crate) struct Envelope {
+    pub(crate) stage: u8,
     /// The ticks the stage has lasted, for the two that are counted.
-    count: i32,
+    pub(crate) count: i32,
     /// The straight envelope, and what its stretch's bend makes of it.
-    value: f32,
-    level: f32,
-    lfo_phase: u32,
+    pub(crate) value: f32,
+    pub(crate) level: f32,
+    pub(crate) lfo_phase: u32,
     /// The ticks the LFO still waits, how far it has faded in, and what
     /// it is at.
-    lfo_waits: i32,
-    lfo_fade: f32,
-    lfo: f32,
+    pub(crate) lfo_waits: i32,
+    pub(crate) lfo_fade: f32,
+    pub(crate) lfo: f32,
 }
 
 impl Envelope {
-    fn new(block: &Block) -> Self {
+    pub(crate) fn new(block: &Block) -> Self {
         let mut envelope = Envelope {
             lfo_waits: block.lfo_predelay,
             ..Envelope::default()
@@ -614,7 +826,7 @@ impl Envelope {
     }
 
     /// One tick on. `global` is the phase of an LFO the notes share.
-    fn step(&mut self, block: &Block, global: u32, shapes: &HostTables) {
+    pub(crate) fn step(&mut self, block: &Block, global: u32, shapes: &HostTables) {
         if block.enabled {
             match self.stage {
                 WAIT => {
@@ -679,7 +891,7 @@ impl Envelope {
     }
 
     /// The note off: the release starts from the level the envelope is at.
-    fn release(&mut self, block: &Block) {
+    pub(crate) fn release(&mut self, block: &Block) {
         if self.stage <= RELEASED {
             self.value = block.tensions[2].unshape(self.level);
             (self.stage, self.count) = (RELEASED, 0);
@@ -690,14 +902,14 @@ impl Envelope {
 /// The filter's kinds: FL's Fast LP, the four biquads and the
 /// state-variable low-pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Fast,
     Biquad(u8),
     Svf,
 }
 
 /// The kind of each of the eight filter types, and whether it runs twice.
-const FILTERS: [(Kind, bool); 8] = [
+pub(crate) const FILTERS: [(Kind, bool); 8] = [
     (Kind::Fast, false),
     (Kind::Biquad(1), false),
     (Kind::Biquad(2), false),
@@ -803,7 +1015,7 @@ pub fn svf(cut: f32, res: f32, s: f32) -> (f32, f32) {
 /// What a sample adds to a value that is headed for `target` from `from`
 /// over `len` samples, at no more than `limit` a sample, and where that
 /// gets it.
-fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
+pub(crate) fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
     let mut step = target - from;
     if step == 0.0 {
         return (0.0, target);
@@ -818,7 +1030,7 @@ fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
 
 /// The filter of one note.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Filter {
+pub(crate) struct Filter {
     kind: Kind,
     twice: bool,
     /// A Fast LP that is wide open does nothing until it first is not.
@@ -841,7 +1053,7 @@ struct Filter {
 }
 
 impl Filter {
-    fn new(kind: Kind, twice: bool) -> Self {
+    pub(crate) fn new(kind: Kind, twice: bool) -> Self {
         Filter {
             kind,
             twice,
@@ -861,7 +1073,7 @@ impl Filter {
 
     /// Take the cutoff and the resonance of the `len` samples to the next
     /// tick. What the note's gain is to be multiplied by comes back.
-    fn set(&mut self, cut: f32, res: f32, s: f32, first: bool, len: usize) -> f32 {
+    pub(crate) fn set(&mut self, cut: f32, res: f32, s: f32, first: bool, len: usize) -> f32 {
         match self.kind {
             Kind::Fast => {
                 let (f, fb) = fast_lp(cut, res, s);
@@ -892,7 +1104,7 @@ impl Filter {
     }
 
     /// One frame through.
-    fn run(&mut self, frame: [f32; 2]) -> [f32; 2] {
+    pub(crate) fn run(&mut self, frame: [f32; 2]) -> [f32; 2] {
         if !self.active {
             return frame;
         }
@@ -985,13 +1197,14 @@ struct Derived {
     rate: f32,
     /// `44100 / rate`.
     s: f32,
-    /// One over the rate, as the HQ engine has it.
-    period: f32,
+    /// One over the rate in whole Hz, in doubles, as the HQ engine keeps
+    /// it from its dispatch 2.
+    period: f64,
 }
 
 /// The 10 ms a note fades out by at this rate: half a turn of a cosine,
 /// from 1 down to 0.
-fn fade_out(rate: f32) -> Vec<f32> {
+pub(crate) fn fade_out(rate: f32) -> Vec<f32> {
     let len = ((f64::from(rate) * 0.01).round_ties_even() as usize).max(1);
     let step = (PI / (len + 1) as f64) as f32;
     let fade = |n: usize| (((n + 1) as f32 * step).cos() + 1.0) * 0.5;
@@ -1037,7 +1250,7 @@ impl Derived {
             resonance: tab.resonance as f32 * (1.0 / 256.0),
             rate: plugin.rate,
             s: (44_100.0 / f64::from(plugin.rate)) as f32,
-            period: 1.0 / plugin.rate,
+            period: 1.0 / plugin.rate as i64 as f64,
         }
     }
 }
@@ -1132,14 +1345,17 @@ impl Voice {
             0 => Source::Sine,
             5 => Source::Noise,
             shape => {
-                let turns = step as f32 * (1.0 / 4_294_967_296.0);
-                if f64::from(turns) < 5e-4 {
+                // `FUN_180001660`: the turns a sample, the frequency over
+                // MIDI note 0's, and 4 log2 of it less 5 kept to the levels.
+                let turns = f64::from(step) * TURN;
+                if turns < 5e-4 {
                     return Source::Shape(shape);
                 }
-                let hz = f64::from(turns / derived.period);
-                let level = (hz / 8.1758).log2() * 4.0 - 5.0;
-                let top = (MIP_LEVELS - 2) as f64;
-                Source::Mip(shape, level.clamp(0.0, top) as usize)
+                let over = (0.122_309_197_651_663_4 / derived.period) * turns;
+                let level = (over.log10() * 13.287_712_379_549_449 - 5.0) as f32;
+                let top = (MIP_LEVELS - 2) as f32;
+                let level = if 0.0 <= level { level.min(top) } else { 0.0 };
+                Source::Mip(shape, level as usize)
             }
         }
     }
@@ -1204,21 +1420,21 @@ impl Voice {
         match source {
             Source::Silent => 0.0,
             Source::Table(shape) => HostTables::get().shapes[shape][(phase >> 18) as usize],
-            Source::Sine => (phase as f32 * (TAU / 4_294_967_296.0) as f32).sin(),
+            Source::Sine => (along(phase) * TAU as f32).sin(),
             Source::Noise => {
                 *noise = noise.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
                 *noise as i32 as f32 * (1.0 / 2_147_483_648.0)
             }
-            Source::Shape(shape) => shape_at(shape, phase as f32 * (1.0 / 4_294_967_296.0)),
+            Source::Shape(shape) => shape_at(shape, along(phase)),
             Source::Mip(shape, level) => {
                 let Some(mips) = mips else {
                     return 0.0;
                 };
                 let table = mips.level(shape, level);
-                let at = phase as f32 * (1.0 / 4_294_967_296.0) * MIP_POINTS as f32;
-                let point = (at as usize).min(MIP_POINTS);
-                let along = at - point as f32;
-                table[point] + (table[point + 1] - table[point]) * along
+                let at = along(phase) * MIP_POINTS as f32;
+                let point = at as usize;
+                let frac = at - point as f32;
+                (1.0 - frac) * table[point] + frac * table[point + 1]
             }
         }
     }
@@ -1248,9 +1464,16 @@ impl Voice {
                     if source == Source::Silent {
                         continue;
                     }
-                    let sample = Voice::read(source, phase, mips, noise) * osc.gains[side];
+                    let value = Voice::read(source, phase, mips, noise);
+                    let sample = value * osc.gains[side];
                     if derived.am && k == 2 {
-                        *sum -= *sum * sample;
+                        // The HQ engine takes the gain last.
+                        let engine = !matches!(source, Source::Table(_));
+                        *sum -= if engine {
+                            *sum * value * osc.gains[side]
+                        } else {
+                            *sum * sample
+                        };
                     } else {
                         *sum += sample;
                     }
@@ -1487,6 +1710,14 @@ impl Generator for ThreeOsc {
         }
     }
 
+    /// The voice reads the note's pitch as its tick starts, where the
+    /// oscillators' steps are worked out again.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for sounding in self.voices.iter_mut().filter(|v| v.id == voice) {
+            sounding.pitch = pitch;
+        }
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         let mut at = 0;
@@ -1518,21 +1749,45 @@ impl Generator for ThreeOsc {
         }
     }
 
-    /// The 21 of the plugin's own. FL numbers the 93 of the instrument
-    /// tab after them.
+    /// The 21 of the plugin's own, then the instrument tab's from 23 on:
+    /// five blocks of 17 words, then the cutoff at 110, the resonance at
+    /// 111 and the filter type at 113.
     fn param_count(&self) -> usize {
-        RANGES.len()
+        PARAMS
     }
 
     fn param(&self, index: usize) -> f32 {
-        self.params.get(index).map_or(0.0, |value| *value as f32)
+        let tab = &self.tab;
+        let value = match index {
+            0..21 => self.params[index],
+            TAB_CUTOFF => tab.cutoff,
+            TAB_RESONANCE => tab.resonance,
+            TAB_FILTER => tab.filter,
+            TAB_PARAM..TAB_BLOCKS_END => {
+                let at = index - TAB_PARAM;
+                tab.blocks[at / 17][at % 17]
+            }
+            _ => 0,
+        };
+        value as f32
     }
 
     fn set_param(&mut self, index: usize, value: f32) {
-        if let Some(range) = RANGES.get(index) {
-            self.params[index] = knob_value(value, *range);
-            self.derive();
+        let Some(range) = param_range(index) else {
+            return;
+        };
+        let value = knob_value(value, range);
+        match index {
+            0..21 => self.params[index] = value,
+            TAB_CUTOFF => self.tab.cutoff = value,
+            TAB_RESONANCE => self.tab.resonance = value,
+            TAB_FILTER => self.tab.filter = value,
+            _ => {
+                let at = index - TAB_PARAM;
+                self.tab.blocks[at / 17][at % 17] = value;
+            }
         }
+        self.derive();
     }
 
     /// The ticks start over with the notes cut.
@@ -1555,9 +1810,7 @@ impl Generator for ThreeOsc {
 
     fn fidelity(&self) -> Fidelity {
         let heard = |osc: &Osc| osc.custom && osc.level.to_bits() != 0;
-        if self.hq {
-            Fidelity::Approximate("3x Osc HQ tables")
-        } else if self.derived.oscs.iter().any(heard) {
+        if self.derived.oscs.iter().any(heard) {
             Fidelity::Approximate("3x Osc custom shape")
         } else {
             Fidelity::Exact
@@ -1583,6 +1836,7 @@ mod tests {
             mod_x: 0.0,
             mod_y: 0.0,
             slide: false,
+            color: 0,
             porta: false,
         }
     }
@@ -1678,6 +1932,10 @@ mod tests {
         20.0 * ratio.log10()
     }
 
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        crate::testing::follows_note_pitch(|| Box::new(ThreeOsc::default()), 44_100.0);
+    }
     #[test]
     fn key_60_is_523_25_hz_and_a_new_plugin_is_three_sines_an_octave_apart() {
         // 0 cents is 523.25 Hz of a 32-bit phase.
@@ -2477,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn hq_reads_tables_cut_down_to_the_pitch_and_says_it_is_not_confirmed() {
+    fn hq_reads_tables_cut_down_to_the_pitch() {
         // A saw three octaves up, at 4186 Hz. Its sixth harmonic is over
         // half the rate and comes back down at 18984 Hz.
         let saw = |hq: u8| {
@@ -2489,7 +2747,7 @@ mod tests {
         };
         let (mut plain, mut hq) = (saw(0), saw(1));
         assert_eq!(plain.fidelity(), Fidelity::Exact);
-        assert_eq!(hq.fidelity(), Fidelity::Approximate("3x Osc HQ tables"));
+        assert_eq!(hq.fidelity(), Fidelity::Exact);
         assert_eq!(hq.flags(), ([false; 3], false, true));
         let base = turns(3600.0);
         let len = whole(base, 40_000);
@@ -2535,9 +2793,48 @@ mod tests {
     }
 
     #[test]
+    fn the_hq_tables_are_the_engine_s_to_the_bit() {
+        // Points of FL's own tables, dumped from `FUN_180001310` of
+        // `engine_x64.dll` run under an emulator
+        // (`tools/plugstate/osc3_emu.py`): shape, level, point and bits.
+        let mips = MipTables::get();
+        let points = [
+            (1, 0, 1000, 0x3df9_ffc8),
+            (2, 7, 8191, 0x3f7f_8682),
+            (3, 0, 0, 0xbf46_4898),
+            (3, 20, 5000, 0xbf2f_d678),
+            (4, 43, 123, 0x3af5_2c00),
+            (4, 12, 30_000, 0xbf81_29e2),
+            (2, 43, 32_769, 0x3b0f_ff56),
+        ];
+        for (shape, level, point, bits) in points {
+            let value = mips.level(shape, level)[point];
+            assert_eq!(value.to_bits(), bits, "{shape} {level} {point}: {value}");
+        }
+        // The float transform is a Fourier transform: a cosine of 3 turns
+        // comes out at bins 3 and -3, half the length each.
+        let kiss = Kiss::new(1024, false);
+        assert_eq!(kiss.factors, [(4, 256), (4, 64), (4, 16), (4, 4), (4, 1)]);
+        assert_eq!(Kiss::new(32_768, true).factors.last(), Some(&(2, 1)));
+        let input: Vec<Complex> = (0..1024)
+            .map(|i| [(TAU * 3.0 * i as f64 / 1024.0).cos() as f32, 0.0])
+            .collect();
+        let out = kiss.transform(&input);
+        for (bin, value) in out.iter().enumerate() {
+            let expected = if bin == 3 || bin == 1021 { 512.0 } else { 0.0 };
+            assert!(
+                (value[0] - expected).abs() < 1e-3 && value[1].abs() < 1e-3,
+                "{bin}"
+            );
+        }
+        let back = Kiss::new(1024, true).transform(&out);
+        assert!((back[5][0] / 1024.0 - input[5][0]).abs() < 1e-6);
+    }
+
+    #[test]
     fn the_parameters_are_the_21_wheels_inside_their_ranges() {
         let mut osc = crate::generator_by_name("3x osc").unwrap();
-        assert_eq!(osc.param_count(), 21);
+        assert_eq!(osc.param_count(), 114);
         let params: Vec<f32> = (0..22).map(|index| osc.param(index)).collect();
         let defaults: Vec<f32> = DEFAULTS.iter().map(|value| *value as f32).collect();
         assert_eq!(params[..21], defaults[..]);
@@ -2558,6 +2855,61 @@ mod tests {
         play(&mut osc, 400);
         let hz = pitch(&play(&mut osc, 8000).0) * RATE;
         assert!((hz / 1046.502 - 1.0).abs() < 1e-3, "{hz} Hz");
+    }
+
+    #[test]
+    fn the_instrument_tab_s_parameters_follow_from_23() {
+        let mut osc = ThreeOsc::default();
+        let tab = new_tab();
+        // The blocks, 17 words apiece, then the filter.
+        let word = |block: usize, word: usize| TAB_PARAM + 17 * block + word;
+        assert_eq!(
+            osc.param(word(VOLUME, ATTACK)),
+            tab.blocks[VOLUME][ATTACK] as f32
+        );
+        assert_eq!(osc.param(word(PITCH, TENSIONS + 2)), 0.0);
+        assert_eq!(osc.param(word(VOLUME, TENSIONS + 2)), -101.0);
+        assert_eq!(
+            (osc.param(110), osc.param(111), osc.param(113)),
+            (256.0, 0.0, 0.0)
+        );
+        // Each to its wheel's range, and the amounts to their block's.
+        for (index, value, kept) in [
+            (word(0, PREDELAY), 0.0, 100.0),
+            (word(0, LFO_SPEED), 0.0, 200.0),
+            (word(MOD_X, SUSTAIN), 999.0, 128.0),
+            (word(0, AMOUNT), -999.0, -64.0),
+            (word(PITCH, AMOUNT), 9999.0, 2400.0),
+            (word(PITCH, LFO_AMOUNT), -9999.0, -2400.0),
+            (word(MOD_Y, LFO_SHAPE), 5.0, 2.0),
+            (word(0, ENABLED), 3.0, 1.0),
+            (110, 300.0, 256.0),
+            (111, -1.0, 0.0),
+            (113, 9.0, 7.0),
+        ] {
+            osc.set_param(index, value);
+            assert_eq!(osc.param(index), kept, "{index}");
+        }
+        assert_eq!(osc.tab.blocks[PITCH][AMOUNT], 2400);
+        assert_eq!(
+            (osc.tab.cutoff, osc.tab.resonance, osc.tab.filter),
+            (256, 0, 7)
+        );
+        // FL keeps nothing for these.
+        for index in [21, 22, 108, 109, 112, 114] {
+            osc.set_param(index, 50.0);
+            assert_eq!(osc.param(index), 0.0, "{index}");
+        }
+
+        // The cutoff is heard by a note that sounds.
+        let mut osc = with(alone(3));
+        osc.note_on(note(1, 72));
+        play(&mut osc, 4000);
+        let open = rms(&play(&mut osc, 4000).0);
+        osc.set_param(TAB_CUTOFF, 20.0);
+        play(&mut osc, 2000);
+        let shut = rms(&play(&mut osc, 4000).0);
+        assert!(shut < open * 0.3, "{shut} {open}");
     }
 
     #[test]
@@ -2612,6 +2964,6 @@ mod tests {
             [(44, 1), (84, 82), (88, 70), (92, 121), (93, 2), (460, 57)]
         );
         assert_eq!(fidelity.values().sum::<i32>(), 333);
-        assert_eq!(fidelity.get("3x Osc HQ tables"), Some(&13));
+        assert_eq!(fidelity.get("3x Osc HQ tables"), None);
     }
 }

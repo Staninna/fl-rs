@@ -1,13 +1,51 @@
-# Handoff, 2026-10-19
+# Handoff, 2026-10-22
+
+Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every workspace test with the corpus and `progress.py --check` pass at the head. Corpus render at `22151e9`: 123 of 165 projects have sound and 83 play in full, up from 112 and 33 when this branch began. 1112 of 1147 reached effect slots are hosted, and 210 of 227 generator channels with notes play.
+
+## On this branch
+
+- Perf: the mixer runs the strips of each wave of the routing graph on a worker pool (`crates/engine/src/pool.rs`, `mix.rs`; `FL_RS_THREADS` sets its size, 1 is serial). Every harness hash is unchanged. The sine bank is FL's AVX kernel to its sum order and restart period (`dsp::additive`).
+- New ports, each with its doc under `docs/plugins/`: Center, Mute 2, Phase Inverter, GMS, MiniSynth, BeepMap, Drumaxx, FL Slayer, Fruity Slicer 2, Kepler Exo, Fruity Granulizer, Wave Traveller, Fruity 7 Band EQ, Emphasizer (shell; LimiterLite is missing from the install), Patcher, Morphine, Sakura, and the Envelope, Formula, Keyboard and Voltage controllers.
+- Larger pieces: Sytrus's unison, waveshapers, effects, filters, plucked operators, oversampling, global envelopes and portamento; Harmor's envelope sustain weights, release and arpeggiator, shared envelopes and global LFOs (what is left is under 3.3 of `docs/plugins/harmor.md`); linear phase for Parametric EQ 2 and Frequency Splitter; FL's sample interpolator (`dsp::interpolator`, at a render quality that is inferred); note colour, slide notes and live channel pitch for generators; automation targets that FL plays by setting nothing, Tension in controller formulas, and the sampler filter's mod X/Y (`docs/automation-234.md` lists what the render still counts unsupported).
+- Piano roll (`crates/ui/src/piano_roll.rs`, `model::note_tools`): paint and slice tools, a Tools menu (glue, quantize, chop, arpeggiate, strum, snap to scale), a snap menu, scale highlighting, note preview through the channel (`crates/engine/src/live.rs`, commands on the transport's ring), a play cursor that follows and a loop range from the ruler. Not done: a slanted slice, the tools' settings dialogs, a ruler click to seek. A sampler's preview stops hard on release, and the preview was never heard through a real device here.
+- `tools/`: a script that renders every demo project to WAV, and a record of the commit each demo rating was made with.
+
+## Left for later, with notes in `.scratch/notes/`
+
+- Morphine is registered and documented (`docs/plugins/morphine.md`, level Gaps); `notes/morphine.md` lists what is left: the noise layer and release-loop jump not rechecked against the DLL, unison and per-note tuning left out.
+- Sakura is registered and plays bit for bit against its DLL under unicorn but for the runtime's f64 `pow` (`Port::Gaps`, `docs/plugins/sakura.md`). `sakura.md` lists what is left and how to run the harness in `sakura-emu/`.
+- Fruity Convolver's EQ curve (`fruity-convolver.md`) and Transporter's DSP, TransientLooper, which is missing from the install (`transporter.md`). Slicex's declicker and Vintage Phaser's gaps are listed in their docs under `docs/plugins/`. FLEX is not started and has no note.
+- Toxic Biohazard and PoiZone are not started.
+
+The sections below are earlier states, kept for their detail.
+
+## Handoff, 2026-10-19
 
 The repo is on GitHub as `Staninna/fl-rs`, branch `main`. Everything is committed and CI is green on Linux, macOS and Windows. fmt, clippy and `cargo test -p plugins` with the corpus pass at `20f0570`, where a release corpus render hears 112 of 165 projects and 33 play in full. On 2026-10-18 the whole history was rewritten to the GitHub identity `Stan <26458805+Staninna@users.noreply.github.com>`, so hashes from before that date no longer resolve.
+
+## Parametric EQs, 2026-10-20
+
+- Fruity Parametric EQ 2's engine resampler (204 corpus states) and its matched HQ designer (61 states) are read from Frequency Splitter's `engine_x64.dll` and rebuilt in `crates/plugins/src/parametric_eq_2_engine.rs`. The designer was checked against the DLL's own code run under unicorn (`tools/plugstate/engine_emu.py`): the same to the bit with the DLL's libm. The plugin now reports 44 frames of latency with the engine resampler, and sleeps as FL does (only bands counting down are emptied).
+- Fruity Parametric EQ (the first one) is rebuilt, Exact.
+- Linear phase (8 states, 3 hosted slots) is the one part of Parametric EQ 2 left stood in for. `.scratch/notes/fruity-parametric-eq-2.md` hands it over; the same engine convolver is Frequency Splitter's, whose window guess it confirms and whose scaling it settles (IPP FFTs that do not scale).
+- Corpus render at `c8145a9`: 112 with sound, 34 play in full (was 33), 932 effect slots hosted (was 928), 46 approximated (was 113).
+
+## Plugin parameters for automation, 2026-10-20
+
+The corpus automates generator parameters the engine could not play. Three commits:
+
+- 3x Osc: FL numbers the instrument tab's parameters from 23 (`0x73ad35` hands 23 to `0x72c440`): five blocks of 17 words at 23..107, cutoff 110, resonance 111, type 113; 21, 22, 108, 109, 112 are nobody's. Parameter 110 in the corpus is the tab's cutoff and plays. `docs/plugins/3x-osc.md` section 2.
+- Sytrus: all 597 REC parameters, decoded as `0x868c90` walks the parts, ranged by their controls, and applied as `0x867930` and its recomputes do. Mod X / Mod Y glide to the wheel per control tick when ModSmoothBtn is on (1 % left after 0.209 s, `0x8658b7`); the main pitch retunes sounding notes. Unison, chorus, delay, EQ and portamento parameters are stored only. `docs/plugins/sytrus.md` section 6.
+- Harmor: articulator knobs (95..342) read and write the envelope / LFO knobs as FL does, smoothing 0..1001, and the 53 globals have FL's ranges (`harmor_state::GLOBAL_RANGES`).
+
+The corpus summary's "unsupported targets" (clips in the first 10 s) went from 140 to 133, clips evaluated from 187 to 194; across whole songs every Sytrus 0x8000+ and 3x Osc 0x8000+ binding now resolves. What is left is engine work, not plugin work: raw channel controls 4 (channel pitch, -4800..4800 cents, 36 bindings on 3x Osc channels and more on samplers), 17 (90 on Sytrus channels, unknown), 16, 0x600/0x604, and 0x2000 + n on Sytrus channels (0x2012, 0x2013, 0x2000, 0x2226, in `Synth_dfr - Overcome - Sytrus` and `nucleon - Housework`), which look like an older numbering of plugin parameters but are not confirmed from FL's REC dispatcher (`FUN_01046a70` in FLEngine). MiniSynth and FLEX are not built.
 
 ## Perf work, 2026-10-19
 
 Heavy demo projects dropped out in the app. Done so far, each measured with `crates/engine/examples/profile.rs` (README, Tests):
 
 - Dev builds optimise `dsp`, `engine` and `plugins` (`c4dbd55`). Unoptimised, Ookay - Thief played at 0.4x realtime.
-- An automation range is taken in f64 (`6df1664`). Harmor leaves part parameter 106 and globals 772 and 774 unbounded, so their range read back as the whole i32 and `high - low` overflowed in five projects. Harmor should clamp them to FL's ranges, read from its binary; not done.
+- An automation range is taken in f64 (`6df1664`). Harmor left part parameter 106 and globals 772 and 774 unbounded, so their range read back as the whole i32 and `high - low` overflowed in five projects. Harmor now clamps every parameter to FL's ranges (see "Plugin parameters for automation" below).
 - The `profile` feature on `engine` times each generator and slot per call (`af47740`); the harness prints the six costliest per project with `--features profile`.
 - Fruity Convolver's 128-tap direct filter sums 16 frames side by side (`976e553`) and the sine bank runs 8 partials side by side (`7d196fb`). Both keep all 165 harness hashes. On one core, Stroll Up went from 0.9x to 1.3x realtime and Harmless Galactic from 1.9x to 2.6x.
 
