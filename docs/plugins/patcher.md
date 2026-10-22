@@ -167,7 +167,7 @@ graph's order.
 Left out, each said in `fidelity()`: "To FL" ports other than the main
 output, MIDI ports, a node's root key and `+0x8c` (1 everywhere).
 
-In FL's states, the plugins inside that are not built are Fruity X-Y-Z
-Controller (32 nodes) and Distructor (2): their targets keep the values
-the project saved, and Distructor's sound passes through. Fruity Formula
-Controller (52 nodes) is built and runs inside.
+In FL's states, the one plugin inside that is not built is Distructor (2
+nodes), whose sound passes through. Fruity Formula Controller (52 nodes)
+and Fruity X-Y-Z Controller (32 nodes, 467 more in Patcher's presets) are
+built and run inside.

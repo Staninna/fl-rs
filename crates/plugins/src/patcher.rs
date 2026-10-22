@@ -1538,7 +1538,7 @@ mod tests {
         // render tests.
         assert_eq!(states, 35);
         let names: Vec<&str> = unhosted.keys().map(String::as_str).collect();
-        assert_eq!(names, ["Distructor", "Fruity X-Y-Z Controller"]);
+        assert_eq!(names, ["Distructor"]);
     }
 
     /// Frequency Splitter's state, version 4, at its defaults but for
