@@ -9,10 +9,10 @@
 //! The state kept here is which windows are open and where they are docked,
 //! how far the playlist is zoomed and scrolled, which channel the channel
 //! rack has selected and which insert the mixer, and the drag that is under
-//! way, and for the piano roll its tool, its lane and how far it is zoomed
-//! and scrolled, and for the browser the folders it has read and which of
-//! them are open. It lives in egui's
-//! memory, so it lasts as long as the [`egui::Context`] does. Which
+//! way, and for the piano roll its tool, its lane, its snap, its scale and
+//! how far it is zoomed and scrolled, and for the browser the folders it
+//! has read and which of them are open. It lives in egui's memory, so it
+//! lasts as long as the [`egui::Context`] does. Which
 //! playlist items and which notes are selected is in the project: the
 //! `flags` of an item and of a note say so.
 
@@ -261,6 +261,13 @@ pub enum Edit {
     StrumNotes {
         ids: Vec<NoteId>,
         delay: Ticks,
+    },
+    /// Move each note whose key is outside the scale to the nearest key in
+    /// it. `keys` has bit n set for the keys n semitones above a C that
+    /// are in the scale.
+    SnapNotesToScale {
+        ids: Vec<NoteId>,
+        keys: u16,
     },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for

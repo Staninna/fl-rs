@@ -851,8 +851,16 @@ fn a_tool_of_the_piano_roll_is_one_undo_step() {
     edit(&mut app, Edit::GlueNotes { ids: vec![4, 5] }, None);
     assert_eq!(notes(app.project())[4], (400, 48, 60));
 
+    // C minor pentatonic has neither D nor C#, so the D goes up to D#.
+    let snapped = Edit::SnapNotesToScale {
+        ids: vec![6],
+        keys: 0b0100_1010_1001,
+    };
+    edit(&mut app, snapped, None);
+    assert_eq!(notes(app.project())[6].2, 63);
+
     // Each tool comes back off in one undo, and the paint drag in one more.
-    for left in [10, 7, 6, 4] {
+    for left in [10, 10, 7, 6, 4] {
         app.apply(Command::Undo);
         assert_eq!(notes(app.project()).len(), left);
     }

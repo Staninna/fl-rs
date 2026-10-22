@@ -1,6 +1,7 @@
 //! The piano roll's tools that make notes of notes: paint, slice, glue,
-//! quantize, chop, arpeggiate and strum. Each one is a single change to a
-//! pattern, so the app's undo takes the whole of it back in one step.
+//! quantize, chop, arpeggiate, strum and snap to scale. Each one is a
+//! single change to a pattern, so the app's undo takes the whole of it
+//! back in one step.
 //!
 //! A note goes by its place in [`Pattern::notes`], as for the other note
 //! edits, and a place that has no note, or a record FL deleted, is
@@ -207,6 +208,25 @@ impl Pattern {
         }
     }
 
+    /// Move each note whose key is not in the scale to the nearest key
+    /// that is, the one under it when two are as near. `keys` has bit n
+    /// set for the keys n semitones above a C that are in the scale, and
+    /// with none set nothing moves. FL's Snap to scale.
+    pub fn snap_notes_to_scale(&mut self, notes: &[usize], keys: u16) {
+        let keys = keys & 0xfff;
+        if keys == 0 {
+            return;
+        }
+        let top = Self::TOP_KEY;
+        let fits = |key: i16| (0..=top).contains(&key) && keys & (1 << key.rem_euclid(12)) != 0;
+        self.each_live(notes, |note| {
+            let near = (0..12).flat_map(|by| [note.key - by, note.key + by]);
+            if let Some(key) = near.into_iter().find(|key| fits(*key)) {
+                note.key = key;
+            }
+        });
+    }
+
     /// The chords among the notes: two or more of one channel that start
     /// together, each from the lowest key up.
     fn chords(&self, notes: &[usize]) -> Vec<Vec<usize>> {
@@ -386,5 +406,21 @@ mod tests {
             placed(&notes),
             [(0, 24, 60), (24, 24, 62), (48, 24, 60), (72, 24, 64)]
         );
+    }
+
+    #[test]
+    fn snap_to_scale_takes_the_nearest_key_of_the_scale() {
+        let c_major = 0b1010_1011_0101;
+        let keys = [60, 61, 63, 66, 0, 131];
+        let mut notes = pattern(&keys.map(|key| note(0, 24, key)));
+        notes.snap_notes_to_scale(&[0, 1, 2, 3, 4, 5], c_major);
+        let snapped: Vec<i16> = notes.notes.iter().map(|note| note.key).collect();
+        // C# and D# go down, F# goes down to F, and B10 is in C major.
+        assert_eq!(snapped, [60, 60, 62, 65, 0, 131]);
+        // C minor pentatonic has no B: B10 goes down to A#10.
+        notes.snap_notes_to_scale(&[5], 0b0100_1010_1001);
+        assert_eq!(notes.notes[5].key, 130);
+        notes.snap_notes_to_scale(&[0, 1, 2, 3], 0);
+        assert_eq!(notes.notes[3].key, 65);
     }
 }

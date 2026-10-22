@@ -186,6 +186,13 @@ fn the_piano_roll_looks_like_its_snapshot() {
     notes[BASS[2]].flags |= Note::MUTED;
     notes[BASS[2]].velocity = 60;
     let mut harness = harness(project);
+    // C minor darkens the rows of E, A and B and lightens the C's.
+    for (menu, entry) in [("Scale", "C"), ("C Major", "Minor")] {
+        harness.get_by_label(menu).click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
     harness.remove_cursor();
     harness.run();
     assert!(harness.state().is_empty(), "{:?}", harness.state());
@@ -696,6 +703,103 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
         },
     ];
     assert_eq!(harness.state()[2..], expected.map(edit));
+}
+
+fn choose_snap(harness: &mut Harness<'_, Vec<Command>>, from: &str, to: &str) {
+    harness.get_by_value(from).click();
+    harness.run();
+    harness.get_by_label(to).click();
+    harness.run();
+}
+
+#[test]
+fn the_snap_menu_sets_where_a_note_lands() {
+    let mut harness = harness(fixture());
+    let add = |position| {
+        edit(Edit::AddNote {
+            channel: 2,
+            position,
+            length: 24,
+            key: 57,
+        })
+    };
+    let pos = at(&harness, 300.0, 57);
+    for (from, to) in [("Line", "1/2 beat"), ("1/2 beat", "Bar"), ("Bar", "(none)")] {
+        choose_snap(&mut harness, from, to);
+        click(&mut harness, pos);
+    }
+    // Tick 300 is in the half beat from 288, in the first bar, and on its
+    // own tick.
+    assert_eq!(harness.state(), &[add(288), add(0), add(300)]);
+
+    // With the bar the arrows move the selection a bar.
+    let mut project = fixture();
+    project.patterns[0].notes[BASS[0]].flags |= Note::SELECTED;
+    let mut harness = self::harness(project);
+    choose_snap(&mut harness, "Line", "Bar");
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.key_press(Key::ArrowRight);
+    harness.run();
+    assert_eq!(harness.state(), &[edit(moved(&[BASS[0]], 384, 0))]);
+}
+
+#[test]
+fn the_cell_snap_keeps_a_note_s_place_in_its_cell() {
+    // The G4 starts 4 ticks into its step.
+    let mut project = fixture();
+    project.patterns[0].notes[BASS[1]].position = 100;
+    let mut harness = harness(project);
+    // 30 points are 45 ticks: the start goes to the line at 144, 44 on.
+    let from = at(&harness, 110.0, 55);
+    let to = from + vec2(30.0, 0.0);
+    drag(&mut harness, from, &[to]);
+    harness.drop_at(to);
+    harness.run();
+    let ids = [BASS[1]];
+    assert_eq!(
+        harness.state(),
+        &[select(&ids, false), dragged(moved(&ids, 44, 0), 1)]
+    );
+    // With the cell snap it goes two whole steps, and stays 4 ticks in.
+    choose_snap(&mut harness, "Line", "Cell");
+    drag(&mut harness, from, &[to]);
+    harness.drop_at(to);
+    harness.run();
+    assert_eq!(
+        harness.state()[2..],
+        [select(&ids, false), dragged(moved(&ids, 48, 0), 2)]
+    );
+}
+
+#[test]
+fn a_scale_snaps_the_notes_to_its_keys() {
+    let mut harness = harness(fixture());
+    // Without a scale there is nothing to snap to.
+    harness.get_by_label("Tools").click();
+    harness.run();
+    harness.get_by_label("Snap to scale").click();
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    for (menu, entry) in [("Scale", "D"), ("D Major", "Dorian")] {
+        harness.get_by_label(menu).click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
+    assert!(harness.query_by_label("D Dorian").is_some());
+    harness.get_by_label("Tools").click();
+    harness.run();
+    harness.get_by_label("Snap to scale").click();
+    harness.run();
+    // D dorian has the keys of C major.
+    let snapped = Edit::SnapNotesToScale {
+        ids: BASS.to_vec(),
+        keys: 0b1010_1011_0101,
+    };
+    assert_eq!(harness.state(), &[edit(snapped)]);
 }
 
 #[test]

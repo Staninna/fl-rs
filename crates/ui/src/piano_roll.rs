@@ -49,11 +49,20 @@
 //! pointer, the wheel scrolls through the keys and Shift+wheel along the
 //! pattern.
 //!
+//! The snap menu has FL's choices, which [`Snap`] explains, and every
+//! drag, click, arrow key and tool goes by it. The scale menu takes a
+//! root and a scale, and darkens the rows of the keys outside it and
+//! lightens the root's, as FL's scale highlighting does. With a scale
+//! chosen, Snap to scale in the Tools menu moves the notes outside it to
+//! the nearest key in it, the lower one when two are as near.
+//!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
 
+mod snap;
+
 use crate::channel_rack::{name as channel_name, select_channel, selected_channel, takes_notes};
-use crate::playlist::{Lane as Timeline, bar_step, rgb, snap, snap_step};
+use crate::playlist::{Lane as Timeline, bar_step, rgb, snap};
 use crate::widgets::next_drag_id;
 use crate::{Command, Edit, Grid, NoteField, NoteId, UiState};
 use egui::{
@@ -61,6 +70,7 @@ use egui::{
     StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use model::{Channel, Note, Pattern};
+use snap::{Scale, Snap};
 use std::ops::RangeInclusive;
 
 /// The width of the keyboard down the left.
@@ -145,16 +155,18 @@ enum Action {
     Chop,
     Arpeggiate,
     Strum,
+    SnapToScale,
 }
 
 impl Action {
-    const ALL: [Action; 6] = [
+    const ALL: [Action; 7] = [
         Action::Glue,
         Action::Quantize,
         Action::QuantizeStarts,
         Action::Chop,
         Action::Arpeggiate,
         Action::Strum,
+        Action::SnapToScale,
     ];
 
     fn name(self) -> &'static str {
@@ -165,6 +177,7 @@ impl Action {
             Action::Chop => "Chop",
             Action::Arpeggiate => "Arpeggiate",
             Action::Strum => "Strum",
+            Action::SnapToScale => "Snap to scale",
         }
     }
 
@@ -173,7 +186,7 @@ impl Action {
     /// held.
     fn shortcut(self) -> Option<(Modifiers, Key)> {
         match self {
-            Action::Glue => None,
+            Action::Glue | Action::SnapToScale => None,
             Action::Quantize => Some((Modifiers::COMMAND, Key::Q)),
             Action::QuantizeStarts => Some((Modifiers::SHIFT, Key::Q)),
             Action::Chop => Some((Modifiers::ALT, Key::U)),
@@ -182,10 +195,12 @@ impl Action {
         }
     }
 
-    /// The edit, with `step` the grid's step in ticks and `ppq` the
-    /// project's.
-    fn edit(self, ids: Vec<NoteId>, step: u64, ppq: u16) -> Edit {
+    /// The edit, with `step` the snap's step in ticks, `ppq` the
+    /// project's and `keys` the keys of the scale, as
+    /// [`Edit::SnapNotesToScale`] has them.
+    fn edit(self, ids: Vec<NoteId>, step: u64, ppq: u16, keys: u16) -> Edit {
         match self {
+            Action::SnapToScale => Edit::SnapNotesToScale { ids, keys },
             Action::Glue => Edit::GlueNotes { ids },
             Action::Quantize | Action::QuantizeStarts => Edit::QuantizeNotes {
                 ids,
@@ -220,6 +235,9 @@ struct Memory {
     tool: Tool,
     /// The value the lane shows.
     lane: NoteField,
+    snap: Snap,
+    /// The root, 0 for C, and the scale the rows are highlighted for.
+    scale: Option<(u8, Scale)>,
     /// Whether a note has the colour of its colour group, and not the
     /// channel's.
     colours: bool,
@@ -247,6 +265,8 @@ impl Default for Memory {
         Memory {
             tool: Tool::Draw,
             lane: NoteField::Velocity,
+            snap: Snap::Line,
+            scale: None,
             colours: false,
             beat: BEAT,
             left: 0.0,
@@ -262,6 +282,19 @@ impl Default for Memory {
 
 fn memory_id() -> egui::Id {
     egui::Id::new("fl-rs piano roll")
+}
+
+impl Memory {
+    /// How many ticks the snap's step is at the zoom.
+    fn step(&self, grid: Grid) -> u64 {
+        self.snap.ticks(grid, self.beat / grid.beat as f32)
+    }
+
+    /// The keys of the scale, as [`Scale::keys`] has them. None without a
+    /// scale.
+    fn keys(&self) -> u16 {
+        self.scale.map_or(0, |(root, scale)| scale.keys(root))
+    }
 }
 
 /// A drag across the notes that is under way.
@@ -546,14 +579,14 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         let ids = own.iter().map(|(id, _)| *id).collect();
         out.push(edit(Edit::SelectNotes { ids, add: false }, None));
     }
-    let grid = Grid::of(project);
-    let step = snap_step(grid, memory.beat / grid.beat as f32);
+    let step = memory.step(Grid::of(project));
     if !own.is_empty() {
         for action in Action::ALL {
             if let Some((modifiers, key)) = action.shortcut()
                 && pressed(modifiers, key)
             {
-                let tool = action.edit(targets(&own), step, project.header.ppq);
+                let ppq = project.header.ppq;
+                let tool = action.edit(targets(&own), step, ppq, memory.keys());
                 out.push(edit(tool, None));
             }
         }
@@ -635,11 +668,16 @@ fn toolbar(
         });
         ui.add_enabled_ui(!own.is_empty(), |ui| {
             ui.menu_button("Tools", |ui| {
-                let grid = Grid::of(project);
-                let step = snap_step(grid, memory.beat / grid.beat as f32);
+                let step = memory.step(Grid::of(project));
+                let keys = memory.keys();
                 for action in Action::ALL {
-                    if ui.button(action.name()).clicked() {
-                        let tool = action.edit(targets(&own), step, project.header.ppq);
+                    let usable = action != Action::SnapToScale || keys != 0;
+                    if ui
+                        .add_enabled(usable, egui::Button::new(action.name()))
+                        .clicked()
+                    {
+                        let ppq = project.header.ppq;
+                        let tool = action.edit(targets(&own), step, ppq, keys);
                         out.push(edit(tool, None));
                     }
                 }
@@ -647,6 +685,25 @@ fn toolbar(
             .response
             .on_hover_text("Edit the selected notes, or all of them when none is selected");
         });
+        ui.separator();
+        egui::ComboBox::from_id_salt("fl-rs piano roll snap")
+            .width(72.0)
+            .height(320.0)
+            .selected_text(memory.snap.name())
+            .show_ui(ui, |ui| {
+                for snap in Snap::ALL {
+                    ui.selectable_value(&mut memory.snap, snap, snap.name());
+                }
+            })
+            .response
+            .on_hover_text("What a note snaps to");
+        let scale = match memory.scale {
+            Some((root, scale)) => format!("{} {}", ROOTS[usize::from(root)], scale.name()),
+            None => "Scale".to_owned(),
+        };
+        ui.menu_button(scale, |ui| scale_menu(ui, memory))
+            .response
+            .on_hover_text("The scale whose keys the rows show");
         ui.separator();
         egui::ComboBox::from_id_salt("fl-rs piano roll lane")
             .width(80.0)
@@ -666,6 +723,41 @@ fn toolbar(
             memory.colours = !memory.colours;
         }
     });
+}
+
+/// The names of the roots, from C.
+const ROOTS: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+/// The scale menu: no scale, the roots and the scales.
+fn scale_menu(ui: &mut Ui, memory: &mut Memory) {
+    if ui
+        .selectable_label(memory.scale.is_none(), "No scale")
+        .clicked()
+    {
+        memory.scale = None;
+    }
+    let (root, scale) = memory.scale.unwrap_or((0, Scale::Major));
+    ui.separator();
+    egui::Grid::new("fl-rs piano roll roots").show(ui, |ui| {
+        for (at, name) in ROOTS.iter().enumerate() {
+            let chosen = memory.scale.is_some() && usize::from(root) == at;
+            if ui.selectable_label(chosen, *name).clicked() {
+                memory.scale = Some((at as u8, scale));
+            }
+            if at % 6 == 5 {
+                ui.end_row();
+            }
+        }
+    });
+    ui.separator();
+    for other in Scale::ALL {
+        let chosen = memory.scale.is_some() && other == scale;
+        if ui.selectable_label(chosen, other.name()).clicked() {
+            memory.scale = Some((root, other));
+        }
+    }
 }
 
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
@@ -747,6 +839,9 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         // where in the pattern it is.
         playhead: (!state.song_mode).then(|| time.x(state.position as f32)),
         colours: memory.colours,
+        step: memory.step(grid),
+        cell: memory.snap == Snap::Cell,
+        scale: memory.scale.map(|(root, scale)| (root, scale.keys(root))),
     };
     roll.backdrop(ui, ruler, area, keyboard);
     roll.notes(ui, area, &mut memory, out);
@@ -794,6 +889,13 @@ struct Roll<'a> {
     /// Whether a note has the colour of its colour group, and not the
     /// channel's.
     colours: bool,
+    /// The snap's step in ticks.
+    step: u64,
+    /// Whether a move goes in whole steps from where the notes are, and
+    /// not to the grid.
+    cell: bool,
+    /// The root of the scale and its keys, as [`Scale::keys`] has them.
+    scale: Option<(u8, u16)>,
 }
 
 impl Roll<'_> {
@@ -872,6 +974,16 @@ impl Roll<'_> {
                 pos2(keyboard.right(), top + KEY - 0.5),
             );
             keys.rect_filled(plate, 0.0, fill);
+            if let Some((root, scale)) = self.scale {
+                let row = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), top + KEY));
+                let class = key.rem_euclid(12);
+                if scale & (1 << class) == 0 {
+                    painter.rect_filled(row, 0.0, Color32::from_black_alpha(110));
+                } else if class == i32::from(root) {
+                    let tint = visuals.selection.bg_fill.gamma_multiply(0.18);
+                    painter.rect_filled(row, 0.0, tint);
+                }
+            }
             if key % 12 == 0 {
                 painter.hline(area.x_range(), top + KEY, faint);
                 let at = pos2(plate.right() - 4.0, plate.center().y);
@@ -927,11 +1039,7 @@ impl Roll<'_> {
         let label = format!("{} notes", channel_name(self.channel));
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
         let modifiers = ui.input(|input| input.modifiers);
-        let step = if modifiers.alt {
-            1
-        } else {
-            snap_step(self.grid, time.scale)
-        };
+        let step = if modifiers.alt { 1 } else { self.step };
         let (tool, shift) = (memory.tool, modifiers.shift);
 
         if (tool.draws() || tool == Tool::Select)
@@ -975,6 +1083,13 @@ impl Roll<'_> {
                     ids.splice(0..0, selected(own));
                 }
                 let start = i64::from(note.position);
+                // With the cell snap a move goes from the start of the
+                // note's cell, so the note keeps its place in its cell.
+                let from = if self.cell {
+                    floor(start as f32, step) as i64
+                } else {
+                    start
+                };
                 Some(if edge {
                     sent = Some(Edit::ResizeNotes {
                         ids: ids.clone(),
@@ -995,7 +1110,7 @@ impl Roll<'_> {
                     });
                     Gesture::Move {
                         ids,
-                        start,
+                        start: from,
                         tick,
                         key,
                     }
