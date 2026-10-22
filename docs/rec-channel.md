@@ -104,9 +104,14 @@ parameters 0, 0x12, 0x13 and 0x226).
   are read (every 512th sample and where a voice starts), and goes on from
   the frame it is at. Its end is where it runs off its sample, and it is
   made to last as long as the lowest pitch the clip can reach would take.
-  A hosted generator's note takes the channel's pitch as it starts and keeps
-  it: FL refreshes `FinalLevels.Pitch` of its sounding voices every tick,
-  and `plugins::Generator` has no call for that. An audio clip channel set
+  A hosted generator's note takes the channel's pitch as it starts. FL
+  refreshes `FinalLevels.Pitch` of its sounding voices every tick, and the
+  engine reads the clip on a plugin channel's pitch every tick and hands
+  each sounding note the new pitch (`plugins::Generator::set_note_pitch`).
+  BooBass, Fruity Granulizer, Harmless, Harmor, Sakura, Sytrus, 3x Osc and
+  Fruity Envelope Controller take it, and Patcher hands it to the
+  generators inside it. The other generators keep the pitch their notes
+  started with. An audio clip channel set
   to time stretch re-stretches its sample when the pitch moves
   (`FUN_00ff86f0`, `chan+0x2f0` not -1 or -2); the engine stretches nothing
   and plays a clip's pitch by its speed, the knob's included, as it did
@@ -137,8 +142,6 @@ Left out, and why:
 - An automation clip's LFO (0x600, 0x604) when that clip's LFO is on. The
   engine plays a clip's envelope alone. A clip whose LFO is off, which
   every clip these drive in the corpus is, is played: see below.
-- Sytrus parameters: the engine's Sytrus has no parameter table, so the
-  Overcome links still have nothing to drive.
 
 ## Corpus
 
