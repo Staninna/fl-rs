@@ -1,9 +1,10 @@
 """Run one CStringDelay of the engine over a noise input; print outputs as f32 reprs.
 Usage: emu_string.py <points> <position> <feedback> <frames>"""
 import struct
+import os
 import sys
 
-sys.path.insert(0, '/root/work/sakura/scripts')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from emu import Emu, f32b, f64b  # noqa: E402
 
 points, position, feedback, frames = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])

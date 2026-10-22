@@ -1,6 +1,13 @@
+import struct
 import sys
-a = [tuple(map(float, l.split())) for l in open(sys.argv[1])]
-b = [tuple(map(float, l.split())) for l in open(sys.argv[2])]
+
+
+def f(x):
+    return struct.unpack('<f', struct.pack('<f', float(x)))[0]
+
+
+a = [tuple(map(f, l.split())) for l in open(sys.argv[1])]
+b = [tuple(map(f, l.split())) for l in open(sys.argv[2])]
 tol = float(sys.argv[3]) if len(sys.argv) > 3 else 1e-6
 n = min(len(a), len(b))
 worst = 0

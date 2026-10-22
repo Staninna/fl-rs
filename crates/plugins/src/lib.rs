@@ -130,6 +130,8 @@ pub mod port;
 pub mod razer_chroma;
 pub mod reeverb;
 pub mod reeverb_2;
+pub mod sakura;
+mod sakura_fx;
 mod sampler;
 pub mod send;
 pub mod seven_band_eq;

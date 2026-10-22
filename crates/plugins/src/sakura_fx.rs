@@ -21,20 +21,101 @@ const TINY: f32 = 1e-9;
 pub(crate) fn sin_cos_f32(x: f32) -> (f32, f32) {
     let a = x.abs();
     if a >= 1.220_703_1e-4 {
-        (x.sin(), (a + std::f32::consts::FRAC_PI_2).sin())
+        (sin_f32(x), sin_f32(a + std::f32::consts::FRAC_PI_2))
     } else {
         (x, 1.0 - a * a * 0.5)
     }
+}
+
+/// The engine's four-lane `sinf` (`0x180058720`; the AVX build at
+/// `0x180059060` does the same sums): `|x|` less the nearest multiple of
+/// pi in four parts, then an odd polynomial of degree 9, all in f32. Past
+/// 10000 the engine reduces the argument exactly; that takes the f64 sine
+/// here, which no setting of Sakura's reaches.
+pub(crate) fn sin_f32(x: f32) -> f32 {
+    let a = x.abs();
+    if a.is_nan() || a > 10_000.0 {
+        return f64::from(x).sin() as f32;
+    }
+    let f = f32::from_bits;
+    const MAGIC: f32 = 12_582_912.0;
+    let t = a * f(0x3ea2_f983) + MAGIC;
+    let odd = t.to_bits() << 31;
+    let n = t - MAGIC;
+    let r = a - f(0x4049_0000) * n - f(0x3a7d_a000) * n - f(0x3422_2000) * n - f(0x2cb4_611a) * n;
+    let r2 = r * r;
+    let r = f(r.to_bits() ^ odd);
+    let p = ((f(0x362e_def8) * r2 + f(0xb94f_b7ff)) * r2 + f(0x3c08_8766)) * r2 + f(0xbe2a_aaa6);
+    let y = r + r2 * p * r;
+    f(y.to_bits() ^ (x.to_bits() & 0x8000_0000))
 }
 
 /// The engine's `sincos` (`0x180057960`), the same in f64 with 2^-27.
 pub(crate) fn sin_cos_f64(x: f64) -> (f64, f64) {
     let a = x.abs();
     if a >= 7.450_580_596_923_828e-9 {
-        (x.sin(), (a + std::f64::consts::FRAC_PI_2).sin())
+        (sin_f64(x), sin_f64(a + std::f64::consts::FRAC_PI_2))
     } else {
         (x, 1.0 - a * a * 0.5)
     }
+}
+
+/// The engine's two-lane `sin` (`0x180057a20`; the AVX build at
+/// `0x1800580a0` has no FMA either): as [`sin_f32`] in f64, with a
+/// polynomial of degree 15 and the exact reduction from 2^24 on, which
+/// takes Rust's sine here.
+pub(crate) fn sin_f64(x: f64) -> f64 {
+    let a = x.abs();
+    if a.is_nan() || a > 16_777_216.0 {
+        return x.sin();
+    }
+    let f = f64::from_bits;
+    const MAGIC: f64 = 6_755_399_441_055_744.0;
+    let t = a * f(0x3fd4_5f30_6dc9_c883) + MAGIC;
+    let odd = t.to_bits() << 63;
+    let n = t - MAGIC;
+    let r = a
+        - f(0x4009_21fb_4000_0000) * n
+        - f(0x3e84_442d_0000_0000) * n
+        - f(0x3d08_4698_8000_0000) * n
+        - f(0x3b88_cc51_701b_839a) * n;
+    let r2 = r * r;
+    let r = f(r.to_bits() ^ odd);
+    let mut p = f(0xbd69_f151_7e9f_65f0);
+    for c in [
+        0x3de6_0e6b_ee01_d83e,
+        0xbe5a_e635_5aaa_4a53,
+        0x3ec7_1de3_806a_dd1a,
+        0xbf2a_01a0_19a6_59dd,
+        0x3f81_1111_1110_a573,
+        0xbfc5_5555_5555_54a8,
+    ] {
+        p = p * r2 + f(c);
+    }
+    let y = r + r2 * p * r;
+    f(y.to_bits() ^ (x.to_bits() & 0x8000_0000_0000_0000))
+}
+
+/// The MSVC runtime's `powf` (`0x180044590`), `expf` (`0x18005aac0`),
+/// `tanf` (`0x18005bbd0`) and `cosf` (`0x18005a5c0`) work in f64 and round
+/// once, as these do. Under emulation the DLL's agree with them on 1500
+/// arguments each but for two cosines; the runtime's FMA3 builds, which a
+/// CPU with FMA takes, part from its SSE2 ones on one argument in many
+/// thousands.
+pub(crate) fn powf(base: f32, exponent: f32) -> f32 {
+    f64::from(base).powf(f64::from(exponent)) as f32
+}
+
+fn expf(x: f32) -> f32 {
+    f64::from(x).exp() as f32
+}
+
+fn tanf(x: f32) -> f32 {
+    f64::from(x).tan() as f32
+}
+
+fn cosf(x: f32) -> f32 {
+    f64::from(x).cos() as f32
 }
 
 fn flush(x: f32) -> f32 {
@@ -66,7 +147,7 @@ impl HighPass {
         let (s, c) = sin_cos_f32(w);
         let k = 1.0 / (s + q);
         self.b0 = flush((c + 1.0) / (s / q + 2.0));
-        self.a1 = flush(c * k * q * -2.0);
+        self.a1 = flush(c * k * (q * -2.0));
         self.a2 = flush((q - s) * k);
     }
 
@@ -76,9 +157,8 @@ impl HighPass {
 
     pub(crate) fn run(&mut self, x: f32) -> f32 {
         let x = flush(x);
-        let y = ((x - (self.x1 + self.x1)) + self.x2) * self.b0
-            - self.y1 * self.a1
-            - self.a2 * self.y2;
+        let y =
+            ((x - (self.x1 + self.x1)) + self.x2) * self.b0 - self.y1 * self.a1 - self.a2 * self.y2;
         let y = flush(y);
         self.x2 = self.x1;
         self.y2 = self.y1;
@@ -143,7 +223,7 @@ impl Stamped {
         }
         loop {
             let k = half.read;
-            if k >= half.count + 1 {
+            if k > half.count {
                 return 0.0;
             }
             let after = half.stamp[10 + k];
@@ -194,7 +274,7 @@ impl Stamped {
 /// length (`0x1800257e0`, `0x180023d50`): `position * (points - 2) + 2`
 /// samples.
 fn step_for(position: f64, points: f64) -> f64 {
-    let position = position.min(0.99).max(0.0);
+    let position = position.clamp(0.0, 0.99);
     let two = 2.0 / points;
     1.0 / ((position * (1.0 - two) + two) * points)
 }
@@ -366,7 +446,7 @@ impl Tape {
     }
 
     fn set_depth(&mut self, depth: f64) {
-        self.depth = depth.min(1.0).max(0.0) as f32;
+        self.depth = depth.clamp(0.0, 1.0) as f32;
     }
 
     fn clear(&mut self) {
@@ -400,7 +480,8 @@ impl Tape {
         let value = out * self.feedback + x;
         self.line.write(value, step);
         let result = out * self.gain;
-        self.gain = flush((f64::from(self.gain_target - self.gain) * 0.01 + f64::from(self.gain)) as f32);
+        self.gain =
+            flush((f64::from(self.gain_target - self.gain) * 0.01 + f64::from(self.gain)) as f32);
         self.step += (self.target - self.step) * 0.005;
         result
     }
@@ -562,7 +643,11 @@ impl Echo {
                 9 => 1.0 / 960.0,
                 _ => 0.0,
             };
-            let scale = if beats == 0.0 { 1.0 } else { self.tempo * beats };
+            let scale = if beats == 0.0 {
+                1.0
+            } else {
+                self.tempo * beats
+            };
             let position = f64::from((0.5 / scale) as f32);
             for line in &mut self.lines {
                 line.place(position);
@@ -604,9 +689,24 @@ const REVERB_RANGES: [(f32, f32); 18] = [
 
 /// "[1] Default Reverb", the program the reverb starts on (`0x1800258f0`).
 const REVERB_DEFAULT: [u32; 18] = [
-    0x3f5b_83f4, 0x3c99_e459, 0x3e25_ed09, 0, 0x3efd_6a05, 0x3f80_0000, 0x3e92_4925,
-    0x3e76_474b, 0x3d90_1495, 0x3e25_ed09, 0x3f5b_83f4, 0x3f46_3b97, 0x3f12_8bdc,
-    0x3f00_0000, 0, 0, 0, 0,
+    0x3f5b_83f4,
+    0x3c99_e459,
+    0x3e25_ed09,
+    0,
+    0x3efd_6a05,
+    0x3f80_0000,
+    0x3e92_4925,
+    0x3e76_474b,
+    0x3d90_1495,
+    0x3e25_ed09,
+    0x3f5b_83f4,
+    0x3f46_3b97,
+    0x3f12_8bdc,
+    0x3f00_0000,
+    0,
+    0,
+    0,
+    0,
 ];
 
 /// The lengths of the plate's twelve lines, in 20000ths of the room
@@ -645,7 +745,7 @@ const RESET_FILL: f32 = f32::from_bits(0x0da2_4260);
 
 fn decibels(tenths: i32) -> f32 {
     if tenths > -361 {
-        10f32.powf(tenths as f32 * 0.005)
+        powf(10.0, tenths as f32 * 0.005)
     } else {
         0.0
     }
@@ -655,7 +755,7 @@ fn decibels(tenths: i32) -> f32 {
 /// from 22.1 kHz on.
 fn one_pole(hundreds: i32, rate: f32) -> f32 {
     if (hundreds as f32) < 221.0 {
-        let c = (hundreds as f32 * 628.318_54 / rate).cos();
+        let c = cosf(hundreds as f32 * 628.318_54 / rate);
         let x = 2.0 - c;
         1.0 - (x - (x * x - 1.0).sqrt())
     } else {
@@ -833,7 +933,7 @@ impl Plate {
         let k = &self.knobs;
         self.input = if k[14] != 0 { 0.0 } else { decibels(k[0]) };
         self.low_cut = if k[1] as f32 > 19.0 {
-            let t = ((rate * 0.5).min(k[1] as f32) * std::f32::consts::PI / rate).tan();
+            let t = tanf((rate * 0.5).min(k[1] as f32) * std::f32::consts::PI / rate);
             (t - 1.0) / (t + 1.0)
         } else {
             0.0
@@ -858,7 +958,11 @@ impl Plate {
             // Only the first tap is given a level: the binary compares the
             // tap's number with 0 where it means to with itself.
             let least = if n == 0 {
-                if left < right { left as f32 } else { right as f32 }
+                if left < right {
+                    left as f32
+                } else {
+                    right as f32
+                }
             } else {
                 0.0
             };
@@ -884,33 +988,45 @@ impl Plate {
             let second = (l[2] + l[3]) as f32;
             let third = (l[4] + l[8]) as f32;
             let fourth = (l[6] + l[10]) as f32;
-            self.diffuse_a = (first * (-49.341_11 / diffusion) * per).exp();
-            self.diffuse_b = ((-31.398_888 / diffusion) * second * per).exp();
-            self.tank_a = (third * -3.453_877_7 / rate * (2.857_142_9 / diffusion)).exp();
-            self.tank_b = ((-3.453_877_7 / rate) * fourth * (1.960_784_3 / diffusion)).exp();
+            self.diffuse_a = expf(first * (-49.341_11 / diffusion) * per);
+            self.diffuse_b = expf((-31.398_888 / diffusion) * second * per);
+            self.tank_a = expf(third * -3.453_877_7 / rate * (2.857_143 / diffusion));
+            self.tank_b = expf((-3.453_877_7 / rate) * fourth * (1.960_784_3 / diffusion));
         }
         let l = &self.len;
         let loop_len = (l[9] + l[7] + l[5] + l[11]) as f32;
         let per_tenth = loop_len / rate * -6.907_755_4;
         let tenths = k[8] as f32 * 0.1;
-        self.decay = (per_tenth / tenths).exp().powf(0.25);
+        self.decay = powf(expf(per_tenth / tenths), 0.25);
         let bass = k[6] as f32 * tenths;
-        let low = ((10.0 / bass) * per_tenth).exp().powf(0.25) / self.decay;
+        let low = powf(expf((10.0 / bass) * per_tenth), 0.25) / self.decay;
         self.shelf = (low - 1.0) * 0.5;
         let low = low.min(1.0);
-        let t = (k[7] as f32 * std::f32::consts::PI / rate).tan();
+        let t = tanf(k[7] as f32 * std::f32::consts::PI / rate);
         self.crossover = (t - low) / (low + t);
         self.damping = one_pole(k[9], rate);
         self.dry = if k[15] != 0 { 0.0 } else { decibels(k[10]) };
-        self.early = if k[16] != 0 { 0.0 } else { decibels(k[11]) * 0.5 };
-        self.wet = if k[17] != 0 { 0.0 } else { decibels(k[12]) * 0.3 };
+        self.early = if k[16] != 0 {
+            0.0
+        } else {
+            decibels(k[11]) * 0.5
+        };
+        self.wet = if k[17] != 0 {
+            0.0
+        } else {
+            decibels(k[12]) * 0.3
+        };
         self.dirty = false;
     }
 
     fn line(&mut self, n: usize) -> (&mut [f32], &mut i32, i32) {
         let at = self.start[n];
         let len = self.len[n];
-        (&mut self.memory[at..at + len as usize], &mut self.at[n], len)
+        (
+            &mut self.memory[at..at + len as usize],
+            &mut self.at[n],
+            len,
+        )
     }
 
     /// An allpass of line `n`: `subtract` takes the input off what the
@@ -968,7 +1084,8 @@ impl Plate {
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let a = self.input * *l;
             let b = self.input * *r;
-            let mut x = (((b + a) * 0.5 + DENORMAL) - self.high_state) * self.high_cut + self.high_state;
+            let mut x =
+                (((b + a) * 0.5 + DENORMAL) - self.high_state) * self.high_cut + self.high_state;
             self.high_state = x;
             let y = (x - self.low_state) * self.low_cut + self.low_last;
             self.low_last = x;
@@ -983,11 +1100,13 @@ impl Plate {
                 let tap = |offset: i32| self.memory[base + ((offset + at) & mask) as usize];
                 let (gl, gr) = (&self.early_gain_left, &self.early_gain_right);
                 let (tl, tr) = (&self.early_left, &self.early_right);
-                let el = tap(tl[3]) * gl[3] + ((tap(tl[0]) * gl[0] + tap(tl[1]) * gl[1]) - tap(tl[2]) * gl[2])
+                let el = tap(tl[3]) * gl[3]
+                    + ((tap(tl[0]) * gl[0] + tap(tl[1]) * gl[1]) - tap(tl[2]) * gl[2])
                     + tap(tl[4]) * gl[4]
                     + tap(tl[5]) * gl[5]
                     + tap(tl[6]) * gl[6];
-                let er = ((((tap(tr[0]) * gr[0] - tap(tr[1]) * gr[1]) + tap(tr[2]) * gr[2]
+                let er = ((((tap(tr[0]) * gr[0] - tap(tr[1]) * gr[1])
+                    + tap(tr[2]) * gr[2]
                     + tap(tr[3]) * gr[3])
                     - tap(tr[4]) * gr[4])
                     + tap(tr[5]) * gr[5]
@@ -1020,7 +1139,8 @@ impl Plate {
             let shelved = (back - self.left_y) * self.crossover + self.left_x;
             self.left_x = back;
             self.left_y = shelved;
-            let damped = (((shelved + back) * self.shelf + back + fed) - self.left_damp) * self.damping
+            let damped = (((shelved + back) * self.shelf + back + fed) - self.left_damp)
+                * self.damping
                 + self.left_damp;
             self.left_damp = damped;
             let q = self.allpass(4, damped, self.tank_a, self.tank_a);
@@ -1040,7 +1160,8 @@ impl Plate {
             let shelved = (back - self.right_y) * self.crossover + self.right_x;
             self.right_x = back;
             self.right_y = shelved;
-            let damped = (((shelved + back) * self.shelf + back + fed) - self.right_damp) * self.damping
+            let damped = (((shelved + back) * self.shelf + back + fed) - self.right_damp)
+                * self.damping
                 + self.right_damp;
             self.right_damp = damped;
             let q = self.allpass(8, damped, self.tank_a, self.tank_a);
@@ -1074,8 +1195,86 @@ impl Plate {
                 + self.early * er;
             let sum = wet_right + wet_left;
             let difference = (wet_left - wet_right) * width;
-            *l = a * self.dry + difference + sum;
+            *l = a * self.dry + (difference + sum);
             *r = b * self.dry + (sum - difference);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the engine DLL's own `sincosf` gives, run under emulation:
+    /// the cosines and one of the sines are a step off the true ones.
+    #[test]
+    fn sin_cos_is_the_engine_s() {
+        let cases = [
+            (0x3b95_6592, 0x3b95_6570, 0x3f7f_ff51),
+            (0xc2b9_b4cb, 0x3f7c_0a20, 0x3e33_6bbc),
+            (0xc1aa_595e, 0xbf24_6ea0, 0xbf44_3599),
+        ];
+        for (x, sin, cos) in cases {
+            let (s, c) = sin_cos_f32(f32::from_bits(x));
+            assert_eq!((s.to_bits(), c.to_bits()), (sin, cos), "{x:#x}");
+        }
+        // Small angles are the angle and a parabola.
+        assert_eq!(sin_cos_f32(1e-5), (1e-5, 1.0 - 1e-5 * 1e-5 * 0.5));
+        // The f64 pair, where the DLL and Rust's sine part in the last bit.
+        let cases = [
+            (
+                0.232_247_521_647_960_5,
+                0.230_165_282_196_216_8,
+                0.973_151_551_851_784_5,
+            ),
+            (
+                0.499_781_132_703_253_4,
+                0.479_233_452_999_808_35,
+                0.877_687_471_441_788_6,
+            ),
+            (
+                1.822_017_711_289_883,
+                0.968_609_523_723_905_7,
+                -0.248_587_189_033_040_72,
+            ),
+        ];
+        for (x, sin, cos) in cases {
+            assert_eq!(sin_cos_f64(x), (sin, cos), "{x}");
+        }
+    }
+
+    /// The four-part reduction keeps the sine within two steps of the
+    /// true one, and odd, out to the engine's 10000.
+    #[test]
+    fn sin_is_close_and_odd() {
+        let mut x = -10_000.0f32;
+        while x < 10_000.0 {
+            let s = sin_f32(x);
+            let truth = f64::from(x).sin();
+            let step = f64::from(f32::EPSILON) * truth.abs();
+            assert!((f64::from(s) - truth).abs() <= 2.0 * step + 1e-9, "{x}");
+            assert_eq!(sin_f32(-x), -s);
+            x += 0.377;
+        }
+    }
+
+    /// The 32 Hz highpass takes out DC and passes the top of the band.
+    #[test]
+    fn the_highpass_blocks_dc_and_passes_the_top() {
+        let mut high = HighPass::new(32.0, 1.0, 44_100.0);
+        let mut last = 1.0;
+        for _ in 0..44_100 {
+            last = high.run(1.0);
+        }
+        assert_eq!(last, 0.0);
+        let mut high = HighPass::new(32.0, 1.0, 44_100.0);
+        let mut peak = 0.0f32;
+        for n in 0..4410 {
+            let y = high.run(if n % 2 == 0 { 1.0 } else { -1.0 });
+            if n > 2205 {
+                peak = peak.max(y.abs());
+            }
+        }
+        assert!((peak - 1.0).abs() < 0.01, "{peak}");
     }
 }

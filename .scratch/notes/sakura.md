@@ -1,56 +1,51 @@
-# Sakura: handover (work in progress, 2026-10-22)
+# Sakura: what is left (2026-10-22)
 
-Stopped mid-task when usage ran out. Rebuilt from
-`Plugins/Fruity/Generators/Sakura/engine_x64.dll` (MSVC `CSakuraSynth` in
-FL's `CFLWrapper` frame, as BassDrum's; `Sakura_x64.dll` is only the Delphi
-panel). Used by 3 shipped projects (Africa's Calling, Exoplanet with two
-channels, Lightning) and the render test `Sakura.flp`.
+Sakura is registered, tested and documented (`docs/plugins/sakura.md`,
+`Port::Gaps`). Against `engine_x64.dll` run under unicorn it plays bit for
+bit on every preset state swept but one, whose pitch moves and whose voice
+step drifts by an f64 step through the runtime's `pow`. What is left is
+optional:
 
-## What is in the tree
+- Transcribe the MSVC runtime's f64 `pow` (`0x180042ef0`, called through
+  `0x18002e650` for `2^x` and directly for the lo-cut, damping and noise
+  gate). Rust's parts from it in the last bit on 6 of 4000 arguments of
+  `2^x`. Read the FMA3 build too (the CPU switch the runtime reads is
+  `0x180083040`; FL on a CPU with AVX and FMA runs that one, the emulator
+  the SSE2 one). `low_lifter.rs`'s `msvc` module transcribed the f32
+  `tanf`, `expf` and `powf` of another DLL's runtime the same way.
+- The same for the f32 `powf`, `expf`, `tanf`, `cosf` (`0x180044590`,
+  `0x18005aac0`, `0x18005bbd0`, `0x18005a5c0`): the port rounds f64
+  results once, which matched the SSE2 builds on 1500 arguments each but
+  for two cosines.
+- The engine's noise is one static generator for every Sakura FL has
+  loaded; the port gives each instance its own.
 
-- `crates/plugins/src/sakura.rs`: state (`SSLF`, 0x24c, `1rkS`, 114 f32
-  parameters in the engine's order, 128-byte program name), voices (99,
-  the engine at 48 kHz read out at the host's rate in straight lines, 48
-  frames at a time), exciter, two strings of two stamped delay lines, the
-  mod matrix. The module comment describes the voice step by step.
-- `crates/plugins/src/sakura_fx.rs`: what follows the voices: highpass,
-  the eight resonators, chorus, plate reverb (`fxReverb`), tape delay
-  (`CStringDelay`, `CTapeDelay`).
-- `.scratch/notes/sakura-emu/`: the unicorn harness that runs the engine
-  DLL's own `CSakuraSynth` for reference output (`emu_sakura.py <state>
-  <key> <frames> [block] [rate] [release_at]`; `emu_string.py` runs one
-  `CStringDelay`; `cmp.py a b [tol]` compares two outputs). It is
-  `tools/plugstate/vst_emu.py` cut down. Paths in it point at
-  `/root/work/sakura/`; change `PATH` in `emu.py` to your engine DLL. Run
-  with `pefile` and `unicorn` in a venv. The test `dump_for_dll` in
-  `sakura.rs` prints the port's output for the same arguments
-  (`SAKURA_STATE`, `SAKURA_KEY`, `SAKURA_FRAMES`, `SAKURA_BLOCK`,
-  `SAKURA_RATE`, `SAKURA_RELEASE`).
+## The harness (`sakura-emu/`)
 
-## State of the work
+`pip install pefile unicorn capstone numpy` into a venv. `emu.py` loads the
+DLL from `SAKURA_DLL` (default: this container's FL install path).
 
-- Builds (`cargo check -p plugins --tests` passed with it registered).
-- Against the DLL under the harness, the agent's last two comparisons
-  (one plucked, one bowed state, 20000 and 4096 frames) agree to a worst
-  difference of 2.5e-5 and 3.6e-5 at peaks of 0.22 and 0.13: the model is
-  right, with a small drift left to find, which starts around frame 14439 and frame 454.
-- **Not registered**, so CI stays green (no doc yet, and
-  `tools/progress.py --check` fails when `port.rs` has a plugin that
-  `docs/plugins.md` does not). To pick up, add back:
-  - `lib.rs`: `pub mod sakura;` and `mod sakura_fx;` (after `reeverb_2`)
-  - `generator.rs` GENERATORS: `(crate::sakura::NAME, || { Box::new(crate::sakura::Sakura::default()) }),`
-  - `port.rs`: `(crate::sakura::NAME, Port::Gaps),` (or `Exact` once the
-    drift is found)
-- Missing: unit tests from the maths (only the two probe tests
-  `probe_render_test` and `dump_for_dll` exist, and they assert nothing), a
-  corpus test that every shipped state loads and plays,
-  `docs/plugins/sakura.md` with addresses (they live only in code
-  comments), its `docs/plugins.md` row, clippy, and fmt.
+- `dump.py <FL Data dir> <work dir>` writes every Sakura state in the
+  corpus to `<work dir>/states/<file>_<n>.bin` (the render test is
+  `Sakura_3.bin`).
+- `emu_sakura.py <state> <key> <frames> [block] [rate] [release_at]
+  [velocity]` prints the DLL's output, a block ending at each event, the
+  velocity a MIDI one. With `SAKURA_INNER=<prefix>` it also writes the
+  engine's 48 kHz samples (`.0`), the host-rate samples before and after
+  the effects (`.1`, `.2`), after the highpass, resonators, chorus and
+  reverb (`.3` to `.6`), and voice 0's block state (`.v`).
+- The port's side is the test `sakura::tests::dump_for_dll`
+  (`SAKURA_STATE`, `SAKURA_KEY`, `SAKURA_FRAMES`, `SAKURA_RELEASE`,
+  `SAKURA_VELOCITY` as FL's 0..128, `SAKURA_RATE`, `SAKURA_OUT`;
+  `SAKURA_FTZ` sets the harness's MXCSR). It writes only the output; to
+  bisect, mirror the `.0` to `.6` stages with a test-only hook at the
+  matching points of `process`, `render_inner` and `effects`.
+- `run.sh <state> <key> <frames> [release]` (with `SAKURA_WORK`, `PYTHON`,
+  `BIN` or `CARGO_TARGET_DIR`) runs both and compares with `cmp.py`, which
+  compares as f32.
 
-## Next
-
-Register it, find the drift with the harness, turn the probes into real
-tests, write the doc and the row, run the checks in
-`.scratch/agent-rules.md`.
-
-`sakura-emu/emu_sakura.py` used to send an event that fell inside a block at the next block's start. It now ends a block at the next event. The differences quoted above were measured before that change, so render them again before trusting them for a note-off that is not on a 512-frame boundary.
+What the bit-matching needed, for the next engine of this kind: constants
+that are not the nearest f32 to their decimal (1.8 as `0x3fe66667`, 0.002
+as `0x3b03126e`, 0.8995 a step low in f64, pi as 3.141592653 for the LFO),
+the order of every product and sum as the listing has it, the engine's own
+vector `sinf` and `sin`, and the runtime's f32 maths through f64.
