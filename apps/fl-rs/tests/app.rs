@@ -869,6 +869,36 @@ fn a_tool_of_the_piano_roll_is_one_undo_step() {
 }
 
 #[test]
+fn the_loop_range_is_the_pattern_s_and_a_key_plays_without_a_change() {
+    let dir = Dir::new("range");
+    let (mut app, _) = open_fixture(&dir);
+    // Without an output device the app says so when it opens.
+    let opened = app.error().map(str::to_owned);
+    app.apply(Command::SetLoopRange(Some((96, 192))));
+    assert_eq!(app.state().loop_range, Some((96, 192)));
+    // A range with no ticks is the whole pattern.
+    app.apply(Command::SetLoopRange(Some((96, 96))));
+    assert_eq!(app.state().loop_range, None);
+    // Another pattern plays the whole of it.
+    app.apply(Command::SetLoopRange(Some((0, 96))));
+    app.apply(Command::SelectPattern(1));
+    assert_eq!(app.state().loop_range, Some((0, 96)));
+    app.apply(Command::SelectPattern(2));
+    assert_eq!(app.state().loop_range, None);
+    assert_eq!(app.error(), opened.as_deref());
+
+    // A key of the keyboard plays, and changes nothing.
+    app.apply(Command::NoteOn {
+        channel: 0,
+        key: 60,
+        velocity: 100,
+    });
+    app.apply(Command::NoteOff { key: 60 });
+    assert_eq!(app.error(), opened.as_deref());
+    assert!(!app.is_modified());
+}
+
+#[test]
 fn a_deleted_note_keeps_its_place_until_the_save_leaves_it_out() {
     let dir = Dir::new("compact");
     let (mut app, path) = open_fixture(&dir);

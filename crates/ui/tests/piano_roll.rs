@@ -75,7 +75,15 @@ fn fixture() -> Project {
 /// The shell with the piano roll in front, showing the bass. The pattern
 /// plays, a beat and a half in.
 fn harness(project: Project) -> Harness<'static, Vec<Command>> {
-    let state = UiState {
+    harness_with(project, |_| {})
+}
+
+/// [`harness`] with something of the state changed.
+fn harness_with(
+    project: Project,
+    change: impl FnOnce(&mut UiState),
+) -> Harness<'static, Vec<Command>> {
+    let mut state = UiState {
         project: Arc::new(project),
         position: 144,
         peaks: (0.0, 0.0),
@@ -90,7 +98,9 @@ fn harness(project: Project) -> Harness<'static, Vec<Command>> {
         last_error: None,
         busy: None,
         progress: None,
+        loop_range: None,
     };
+    change(&mut state);
     let mut harness = Harness::builder()
         .with_size(vec2(800.0, 400.0))
         .with_theme(egui::Theme::Dark)
@@ -102,7 +112,7 @@ fn harness(project: Project) -> Harness<'static, Vec<Command>> {
     harness.run();
     harness.get_by_label("Bass").click();
     harness.run();
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
     harness
 }
 
@@ -151,6 +161,15 @@ fn drag(harness: &mut Harness<'_, Vec<Command>>, from: Pos2, to: &[Pos2]) {
     }
 }
 
+/// What the piano roll sent, without the keys it played: a press on a
+/// note plays it.
+fn edits(harness: &Harness<'_, Vec<Command>>) -> Vec<Command> {
+    let sent = harness.state().iter();
+    let played =
+        |command: &&Command| matches!(command, Command::NoteOn { .. } | Command::NoteOff { .. });
+    sent.filter(|command| !played(command)).cloned().collect()
+}
+
 fn edit(edit: Edit) -> Command {
     Command::Edit {
         edit,
@@ -185,7 +204,8 @@ fn the_piano_roll_looks_like_its_snapshot() {
     notes[BASS[1]].flags |= Note::SELECTED;
     notes[BASS[2]].flags |= Note::MUTED;
     notes[BASS[2]].velocity = 60;
-    let mut harness = harness(project);
+    // The pattern plays round its second half.
+    let mut harness = harness_with(project, |state| state.loop_range = Some((192, 384)));
     // C minor darkens the rows of E, A and B and lightens the C's.
     for (menu, entry) in [("Scale", "C"), ("C Major", "Minor")] {
         harness.get_by_label(menu).click();
@@ -195,7 +215,7 @@ fn the_piano_roll_looks_like_its_snapshot() {
     }
     harness.remove_cursor();
     harness.run();
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
     harness.snapshot("piano_roll");
 }
 
@@ -214,7 +234,7 @@ fn a_click_with_the_draw_tool_adds_a_note_where_it_snaps() {
             key,
         })
     };
-    assert_eq!(harness.state(), &[add(240, 24, 57)]);
+    assert_eq!(edits(&harness), &[add(240, 24, 57)]);
 
     // A click on a note selects it, and the next note is as long.
     let pos = at(&harness, 110.0, 55);
@@ -222,7 +242,7 @@ fn a_click_with_the_draw_tool_adds_a_note_where_it_snaps() {
     let pos = at(&harness, 400.0, 50);
     click(&mut harness, pos);
     assert_eq!(
-        harness.state()[1..],
+        edits(&harness)[1..],
         [select(&[BASS[1]], false), add(384, 48, 50)]
     );
 
@@ -232,12 +252,12 @@ fn a_click_with_the_draw_tool_adds_a_note_where_it_snaps() {
     click(&mut harness, pos);
     harness.event(egui::Event::ModifiersChanged(Modifiers::NONE));
     harness.run();
-    assert_eq!(harness.state()[3..], [add(250, 48, 57)]);
+    assert_eq!(edits(&harness)[3..], [add(250, 48, 57)]);
 
     // The snare's notes are another channel's: a click on one draws.
     let pos = at(&harness, 100.0, 52);
     click(&mut harness, pos);
-    assert_eq!(harness.state()[4..], [add(96, 48, 52)]);
+    assert_eq!(edits(&harness)[4..], [add(96, 48, 52)]);
 }
 
 #[test]
@@ -258,13 +278,14 @@ fn a_drag_with_the_draw_tool_draws_one_note_as_long_as_the_drag() {
         };
         dragged(add, 1)
     };
-    assert_eq!(harness.state(), &[add(72), add(144)]);
+    assert_eq!(edits(&harness), &[add(72), add(144)]);
 
     // The next click adds a note as long as the drawn one.
-    let pos = at(&harness, 0.0, 60);
+    let pos = at(&harness, 0.0, 58);
     click(&mut harness, pos);
-    let Some(Command::Edit { edit, drag_id }) = harness.state().last() else {
-        panic!("{:?}", harness.state());
+    let sent = edits(&harness);
+    let Some(Command::Edit { edit, drag_id }) = sent.last() else {
+        panic!("{:?}", edits(&harness));
     };
     let Edit::AddNote { length, .. } = edit else {
         panic!("{edit:?}");
@@ -280,7 +301,7 @@ fn a_drag_on_a_note_moves_it_and_each_edit_says_the_whole_way() {
     harness.hover_at(from);
     harness.drag_at(from);
     harness.step();
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
 
     // 48 points are 72 ticks, two rows up are two keys, and 96 points
     // are six steps.
@@ -290,7 +311,7 @@ fn a_drag_on_a_note_moves_it_and_each_edit_says_the_whole_way() {
     harness.run();
     let ids = [BASS[0]];
     assert_eq!(
-        harness.state(),
+        edits(&harness),
         &[
             // The note was not selected, so the drag selects it first.
             select(&ids, false),
@@ -307,7 +328,7 @@ fn a_drag_on_a_note_moves_it_and_each_edit_says_the_whole_way() {
     harness.event(egui::Event::ModifiersChanged(Modifiers::NONE));
     harness.run();
     assert_eq!(
-        harness.state()[3..],
+        edits(&harness)[3..],
         [select(&ids, false), dragged(moved(&ids, 15, -1), 2)]
     );
 }
@@ -325,7 +346,7 @@ fn a_drag_on_a_selected_note_takes_the_selection_and_its_edge_resizes() {
     harness.run();
     let ids = [BASS[0], BASS[2]];
     // The app stops the group at the start of the pattern.
-    assert_eq!(harness.state(), &[dragged(moved(&ids, -96, -1), 1)]);
+    assert_eq!(edits(&harness), &[dragged(moved(&ids, -96, -1), 1)]);
 
     // The G4 ends at tick 144, which is at 96 points, and is not
     // selected. Its end goes a beat on.
@@ -338,7 +359,7 @@ fn a_drag_on_a_selected_note_takes_the_selection_and_its_edge_resizes() {
         delta_ticks: 96,
     };
     assert_eq!(
-        harness.state()[1..],
+        edits(&harness)[1..],
         [select(&[BASS[1]], false), dragged(resized, 2)]
     );
 }
@@ -352,10 +373,10 @@ fn a_rubber_band_selects_the_notes_it_spans() {
     let from = at(&harness, 80.0, 57);
     let to = at(&harness, 300.0, 50);
     drag(&mut harness, from, &[to]);
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
     harness.drop_at(to);
     harness.run();
-    assert_eq!(harness.state(), &[select(&[BASS[1], BASS[2]], false)]);
+    assert_eq!(edits(&harness), &[select(&[BASS[1], BASS[2]], false)]);
 
     // With Shift the notes join the selection, and a click beside the
     // notes has nothing to let go of.
@@ -365,9 +386,9 @@ fn a_rubber_band_selects_the_notes_it_spans() {
     harness.drop_at(to);
     harness.event(egui::Event::ModifiersChanged(Modifiers::NONE));
     harness.run();
-    assert_eq!(harness.state()[1..], [select(&[BASS[0]], true)]);
+    assert_eq!(edits(&harness)[1..], [select(&[BASS[0]], true)]);
     click(&mut harness, from);
-    assert_eq!(harness.state().len(), 2);
+    assert_eq!(edits(&harness).len(), 2);
 
     // With the draw tool Ctrl makes a drag a rubber band.
     harness.get_by_label("Draw").click();
@@ -378,7 +399,7 @@ fn a_rubber_band_selects_the_notes_it_spans() {
     harness.drop_at(to);
     harness.event(egui::Event::ModifiersChanged(Modifiers::NONE));
     harness.run();
-    assert_eq!(harness.state()[2..], [select(&[BASS[1]], false)]);
+    assert_eq!(edits(&harness)[2..], [select(&[BASS[1]], false)]);
 }
 
 #[test]
@@ -394,34 +415,34 @@ fn the_right_button_and_the_tools_delete_and_mute() {
     };
 
     right_click(&mut harness, notes[0]);
-    assert_eq!(harness.state(), &[edit(delete(BASS[0]))]);
+    assert_eq!(edits(&harness), &[edit(delete(BASS[0]))]);
     // Beside the notes there is nothing to delete.
     let beside = at(&harness, 30.0, 58);
     right_click(&mut harness, beside);
-    assert_eq!(harness.state().len(), 1);
+    assert_eq!(edits(&harness).len(), 1);
 
     harness.get_by_label("Delete").click();
     harness.run();
     click(&mut harness, notes[1]);
-    assert_eq!(harness.state()[1..], [edit(delete(BASS[1]))]);
+    assert_eq!(edits(&harness)[1..], [edit(delete(BASS[1]))]);
     // A drag deletes each note it passes, once, in one drag.
     drag(&mut harness, notes[0], &[notes[1], notes[2], notes[1]]);
     harness.drop_at(notes[1]);
     harness.run();
     let passed: Vec<Command> = BASS.iter().map(|id| dragged(delete(*id), 1)).collect();
-    assert_eq!(harness.state()[2..], passed);
+    assert_eq!(edits(&harness)[2..], passed);
 
     harness.get_by_label("Mute").click();
     harness.run();
     click(&mut harness, notes[2]);
-    assert_eq!(harness.state()[5..], [edit(mute(BASS[2], false))]);
+    assert_eq!(edits(&harness)[5..], [edit(mute(BASS[2], false))]);
     // A drag makes of every note what it made of its first: the D#4 is
     // muted already.
     drag(&mut harness, notes[0], &[notes[1], notes[2]]);
     harness.drop_at(notes[2]);
     harness.run();
     assert_eq!(
-        harness.state()[6..],
+        edits(&harness)[6..],
         [
             dragged(mute(BASS[0], true), 2),
             dragged(mute(BASS[1], true), 2)
@@ -445,7 +466,7 @@ fn the_keys_act_on_the_selection_under_the_pointer() {
     harness.key_press(Key::Delete);
     harness.key_press_modifiers(ctrl, Key::A);
     harness.run();
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
 
     harness.hover_at(at(&harness, 30.0, 58));
     harness.run();
@@ -488,7 +509,7 @@ fn the_keys_act_on_the_selection_under_the_pointer() {
             add: false,
         },
     ];
-    assert_eq!(harness.state(), &expected.map(edit));
+    assert_eq!(edits(&harness), &expected.map(edit));
 }
 
 #[test]
@@ -510,16 +531,16 @@ fn the_lane_sets_the_value_it_shows() {
                 },
             drag_id: None,
         },
-    ] = harness.state()[..]
+    ] = edits(&harness)[..]
     else {
-        panic!("{:?}", harness.state());
+        panic!("{:?}", edits(&harness));
     };
     assert_eq!(id, BASS[1]);
     assert!((62..=66).contains(&value), "velocity {value}");
     // The G4 ends at 96 points, and the D#4 starts at 128: between them
     // there is no note to set.
     click(&mut harness, pos + vec2(40.0, 0.0));
-    assert_eq!(harness.state().len(), 1);
+    assert_eq!(edits(&harness).len(), 1);
 
     // The lane shows the pan when asked, and a drag along the bottom
     // pans every note it comes under to the left, in one drag.
@@ -538,7 +559,7 @@ fn the_lane_sets_the_value_it_shows() {
         let (field, value) = (NoteField::Pan, 0);
         dragged(Edit::SetNoteField { id, field, value }, 1)
     };
-    assert_eq!(harness.state()[1..], [pan(BASS[0]), pan(BASS[1])]);
+    assert_eq!(edits(&harness)[1..], [pan(BASS[0]), pan(BASS[1])]);
 }
 
 #[test]
@@ -562,6 +583,7 @@ fn a_channel_that_plays_no_notes_shows_none() {
         last_error: None,
         busy: None,
         progress: None,
+        loop_range: None,
     };
     let mut harness = Harness::builder()
         .with_size(vec2(800.0, 400.0))
@@ -581,7 +603,7 @@ fn a_channel_that_plays_no_notes_shows_none() {
     harness.get_by_label("Snare").click();
     harness.run();
     assert!(harness.query_by_label("Snare notes").is_some());
-    assert!(harness.state().is_empty());
+    assert!(edits(&harness).is_empty());
 }
 
 #[test]
@@ -613,14 +635,14 @@ fn a_paint_drag_lays_a_note_at_every_step_in_one_drag() {
     let mut all = first.to_vec();
     all.extend([(336, 54), (360, 54), (384, 54)]);
     assert_eq!(
-        harness.state(),
+        edits(&harness),
         &[paint(&first[..1]), paint(&first), paint(&all)]
     );
 
     // On a note a click selects it, as the draw tool's does.
     let pos = at(&harness, 30.0, 48);
     click(&mut harness, pos);
-    assert_eq!(harness.state()[3..], [select(&[BASS[0]], false)]);
+    assert_eq!(edits(&harness)[3..], [select(&[BASS[0]], false)]);
 }
 
 #[test]
@@ -632,19 +654,19 @@ fn the_slice_tool_cuts_the_notes_on_the_keys_it_crosses() {
     let from = at(&harness, 130.0, 56);
     let to = at(&harness, 130.0, 47);
     drag(&mut harness, from, &[to]);
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
     harness.drop_at(to);
     harness.run();
     let slice = |ids: &[usize], at| {
         let ids = ids.to_vec();
         edit(Edit::SliceNotes { ids, at })
     };
-    assert_eq!(harness.state(), &[slice(&[BASS[1]], 120)]);
+    assert_eq!(edits(&harness), &[slice(&[BASS[1]], 120)]);
 
     // A click cuts the note under it.
     let pos = at(&harness, 250.0, 51);
     click(&mut harness, pos);
-    assert_eq!(harness.state()[1..], [slice(&[BASS[2]], 240)]);
+    assert_eq!(edits(&harness)[1..], [slice(&[BASS[2]], 240)]);
 }
 
 #[test]
@@ -663,7 +685,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
     }
     let step = 24;
     assert_eq!(
-        harness.state(),
+        edits(&harness),
         &[
             edit(Edit::GlueNotes { ids: ids.clone() }),
             edit(Edit::ArpeggiateNotes {
@@ -702,7 +724,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
             delay: 6,
         },
     ];
-    assert_eq!(harness.state()[2..], expected.map(edit));
+    assert_eq!(edits(&harness)[2..], expected.map(edit));
 }
 
 fn choose_snap(harness: &mut Harness<'_, Vec<Command>>, from: &str, to: &str) {
@@ -730,7 +752,7 @@ fn the_snap_menu_sets_where_a_note_lands() {
     }
     // Tick 300 is in the half beat from 288, in the first bar, and on its
     // own tick.
-    assert_eq!(harness.state(), &[add(288), add(0), add(300)]);
+    assert_eq!(edits(&harness), &[add(288), add(0), add(300)]);
 
     // With the bar the arrows move the selection a bar.
     let mut project = fixture();
@@ -740,7 +762,7 @@ fn the_snap_menu_sets_where_a_note_lands() {
     harness.hover_at(at(&harness, 30.0, 58));
     harness.key_press(Key::ArrowRight);
     harness.run();
-    assert_eq!(harness.state(), &[edit(moved(&[BASS[0]], 384, 0))]);
+    assert_eq!(edits(&harness), &[edit(moved(&[BASS[0]], 384, 0))]);
 }
 
 #[test]
@@ -757,7 +779,7 @@ fn the_cell_snap_keeps_a_note_s_place_in_its_cell() {
     harness.run();
     let ids = [BASS[1]];
     assert_eq!(
-        harness.state(),
+        edits(&harness),
         &[select(&ids, false), dragged(moved(&ids, 44, 0), 1)]
     );
     // With the cell snap it goes two whole steps, and stays 4 ticks in.
@@ -766,7 +788,7 @@ fn the_cell_snap_keeps_a_note_s_place_in_its_cell() {
     harness.drop_at(to);
     harness.run();
     assert_eq!(
-        harness.state()[2..],
+        edits(&harness)[2..],
         [select(&ids, false), dragged(moved(&ids, 48, 0), 2)]
     );
 }
@@ -779,7 +801,7 @@ fn a_scale_snaps_the_notes_to_its_keys() {
     harness.run();
     harness.get_by_label("Snap to scale").click();
     harness.run();
-    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
     harness.key_press(Key::Escape);
     harness.run();
 
@@ -799,7 +821,7 @@ fn a_scale_snaps_the_notes_to_its_keys() {
         ids: BASS.to_vec(),
         keys: 0b1010_1011_0101,
     };
-    assert_eq!(harness.state(), &[edit(snapped)]);
+    assert_eq!(edits(&harness), &[edit(snapped)]);
 }
 
 #[test]
@@ -814,5 +836,113 @@ fn without_a_selection_a_tool_takes_every_note_of_the_channel() {
         step: 24,
         lengths: true,
     };
-    assert_eq!(harness.state(), &[edit(quantized)]);
+    assert_eq!(edits(&harness), &[edit(quantized)]);
+}
+
+fn played(command: &Command) -> bool {
+    matches!(command, Command::NoteOn { .. } | Command::NoteOff { .. })
+}
+
+fn on(key: u8, velocity: u8) -> Command {
+    Command::NoteOn {
+        channel: 2,
+        key,
+        velocity,
+    }
+}
+
+fn off(key: u8) -> Command {
+    Command::NoteOff { key }
+}
+
+#[test]
+fn the_keyboard_plays_the_keys_it_is_held_on() {
+    let mut harness = harness(fixture());
+    let keys = harness.get_by_label("Bass keyboard").rect();
+    let row = |key| pos2(keys.center().x, at(&harness, 0.0, key).y);
+    let (from, to) = (row(55), row(57));
+    // Held on the G4 it plays, and dragged up two keys it plays the A4.
+    drag(&mut harness, from, &[]);
+    assert_eq!(harness.state(), &[on(55, 100)]);
+    drag(&mut harness, from, &[to]);
+    harness.drop_at(to);
+    harness.run();
+    assert_eq!(harness.state()[1..], [off(55), on(57, 100), off(57)]);
+}
+
+#[test]
+fn a_press_on_a_note_plays_it_at_its_velocity() {
+    let mut project = fixture();
+    project.patterns[0].notes[BASS[1]].velocity = 80;
+    let mut harness = harness(project);
+    let pos = at(&harness, 110.0, 55);
+    drag(&mut harness, pos, &[]);
+    harness.drop_at(pos);
+    harness.run();
+    assert_eq!(
+        harness.state(),
+        &[on(55, 80), off(55), select(&[BASS[1]], false)]
+    );
+
+    // The draw tool plays the key of the note it adds.
+    let pos = at(&harness, 250.0, 57);
+    drag(&mut harness, pos, &[]);
+    harness.drop_at(pos);
+    harness.run();
+    let add = edit(Edit::AddNote {
+        channel: 2,
+        position: 240,
+        length: 48,
+        key: 57,
+    });
+    assert_eq!(harness.state()[3..], [on(57, 100), off(57), add]);
+
+    // The select tool plays a note and adds none, and the mute tool plays
+    // nothing.
+    harness.get_by_label("Mute").click();
+    harness.run();
+    let pos = at(&harness, 30.0, 48);
+    drag(&mut harness, pos, &[]);
+    harness.drop_at(pos);
+    harness.run();
+    assert!(!harness.state()[6..].iter().any(played));
+}
+
+#[test]
+fn a_drag_along_the_ruler_sets_the_loop_range() {
+    let mut harness = harness(fixture());
+    let ruler = harness.get_by_label("Loop range").rect();
+    // 64 points a beat: ticks 100 and 290 snap to the steps at 96 and
+    // 288. A drag to the left gives the same range.
+    let x = |tick: f32| pos2(ruler.left() + tick * 64.0 / 96.0, ruler.center().y);
+    for (from, to) in [(100.0, 290.0), (290.0, 100.0)] {
+        drag(&mut harness, x(from), &[x(to)]);
+        harness.drop_at(x(to));
+        harness.run();
+    }
+    let range = Command::SetLoopRange(Some((96, 288)));
+    assert_eq!(harness.state(), &[range.clone(), range]);
+
+    // A click plays the whole pattern again, when a range is set.
+    let mut harness = harness_with(fixture(), |state| state.loop_range = Some((96, 288)));
+    click(&mut harness, x(200.0));
+    assert_eq!(harness.state(), &[Command::SetLoopRange(None)]);
+}
+
+#[test]
+fn the_view_turns_a_page_when_the_play_cursor_leaves_it() {
+    // Eight bars, and the clock at tick 1500, past what the view shows.
+    let mut project = fixture();
+    project.patterns[0].length = Some(8 * 384);
+    let mut harness = harness_with(project, |state| state.position = 1500);
+    // The view starts at the cursor, so a point 12 ticks in is tick 1512.
+    let pos = at(&harness, 12.0, 58);
+    click(&mut harness, pos);
+    let add = edit(Edit::AddNote {
+        channel: 2,
+        position: 1512,
+        length: 24,
+        key: 58,
+    });
+    assert_eq!(edits(&harness), &[add]);
 }
