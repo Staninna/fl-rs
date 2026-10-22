@@ -571,56 +571,88 @@ impl LinearSetting {
     }
 }
 
-/// A finite impulse response on a stereo signal, with a history a channel.
+/// The FIR crossover: the three bands' finite impulse responses, all as
+/// long, on one stereo history. Each channel's history holds every frame
+/// twice, `len` apart, so the frames the taps read lie in one run.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Fir {
-    taps: Vec<f32>,
+    taps: [Vec<f32>; 3],
     history: [Vec<f32>; 2],
     at: usize,
 }
 
 impl Fir {
     fn make_room(&mut self, longest: usize) {
-        self.taps
-            .reserve_exact(longest.saturating_sub(self.taps.len()));
+        for taps in &mut self.taps {
+            taps.reserve_exact(longest.saturating_sub(taps.len()));
+        }
         for history in &mut self.history {
-            history.reserve_exact(longest.saturating_sub(history.len()));
+            history.reserve_exact((2 * longest).saturating_sub(history.len()));
         }
     }
 
-    /// Take these taps and start from silence.
-    fn set(&mut self, taps: &[f64]) {
-        self.taps.clear();
-        self.taps.extend(taps.iter().map(|tap| *tap as f32));
+    fn len(&self) -> usize {
+        self.taps[0].len()
+    }
+
+    /// Take the bands' taps, LOW, MID and HIGH. The history goes on
+    /// unless their length changes, when it starts from silence.
+    fn set(&mut self, bands: [&[f64]; 3]) {
+        let kept = self.len();
+        for (taps, band) in self.taps.iter_mut().zip(bands) {
+            taps.clear();
+            taps.extend(band.iter().map(|tap| *tap as f32));
+        }
+        if self.len() != kept {
+            self.reset();
+        }
+    }
+
+    fn clear(&mut self) {
+        for taps in &mut self.taps {
+            taps.clear();
+        }
         self.reset();
     }
 
     fn reset(&mut self) {
+        let len = self.len();
         for history in &mut self.history {
             history.clear();
-            history.resize(self.taps.len(), 0.0);
+            history.resize(2 * len, 0.0);
         }
         self.at = 0;
     }
 
-    fn run(&mut self, frame: [f32; 2]) -> [f32; 2] {
-        let len = self.taps.len();
-        if len == 0 {
-            return frame;
+    /// Each band's output for the next frame. Every band and channel sums
+    /// its taps in order from the newest frame, in doubles; the six sums
+    /// run side by side.
+    fn run(&mut self, frame: [f32; 2]) -> [[f32; 2]; 3] {
+        let len = self.len();
+        for (history, sample) in self.history.iter_mut().zip(frame) {
+            history[self.at] = sample;
+            history[self.at + len] = sample;
         }
-        let mut out = [0.0; 2];
-        for (channel, history) in self.history.iter_mut().enumerate() {
-            history[self.at] = frame[channel];
-            let mut sum = 0.0f64;
-            let mut place = self.at;
-            for tap in &self.taps {
-                sum += f64::from(*tap) * f64::from(history[place]);
-                place = if place == 0 { len - 1 } else { place - 1 };
+        // Tap k reads the frame k before this one, at `at + len - k`.
+        let window = self.at + 1..self.at + len + 1;
+        let [left, right] = &self.history;
+        let frames = left[window.clone()]
+            .iter()
+            .rev()
+            .zip(right[window].iter().rev());
+        let [low, mid, high] = &self.taps;
+        let taps = low.iter().zip(mid).zip(high);
+        let mut sums = [[0.0f64; 2]; 3];
+        for (((low, mid), high), (left, right)) in taps.zip(frames) {
+            let (left, right) = (f64::from(*left), f64::from(*right));
+            for (sum, tap) in sums.iter_mut().zip([low, mid, high]) {
+                let tap = f64::from(*tap);
+                sum[0] += tap * left;
+                sum[1] += tap * right;
             }
-            out[channel] = sum as f32;
         }
         self.at = (self.at + 1) % len;
-        out
+        sums.map(|[left, right]| [left as f32, right as f32])
     }
 }
 
@@ -868,8 +900,8 @@ pub struct Maximus {
     mid_high: Vec<Section>,
     mid_low: Vec<Section>,
     high: Vec<Section>,
-    /// The FIR crossover's three filters.
-    firs: [Fir; 3],
+    /// The FIR crossover.
+    fir: Fir,
     /// The low cut's four sections, when it is on.
     low_cut: Vec<Section>,
     low_cut_on: bool,
@@ -908,7 +940,7 @@ impl Default for Maximus {
             mid_high: Vec::with_capacity(STAGES),
             mid_low: Vec::with_capacity(STAGES),
             high: Vec::with_capacity(STAGES),
-            firs: std::array::from_fn(|_| Fir::default()),
+            fir: Fir::default(),
             low_cut: Vec::with_capacity(LOW_CUT_ALPHAS.len()),
             low_cut_on: false,
             oversampler: Oversampler::default(),
@@ -943,10 +975,7 @@ impl Maximus {
         for (b, band) in self.bands.iter_mut().enumerate() {
             band.make_room(if b == MASTER { longest } else { longest * os });
         }
-        let taps = self.fir_len();
-        for fir in &mut self.firs {
-            fir.make_room(taps);
-        }
+        self.fir.make_room(self.fir_len());
         // The engine's op 2, which FL sends when it first sends a
         // magnitude: done here, off the audio thread.
         if self.switches.linear {
@@ -1010,7 +1039,7 @@ impl Maximus {
             self.tune_band(b);
         }
         let band_delay = (0..MASTER).map(|b| self.bands[b].delay.frames.len()).max();
-        let fir_half = if self.firs[0].taps.is_empty() {
+        let fir_half = if self.fir.len() == 0 {
             0
         } else {
             (self.fir_len() - 1) / 2
@@ -1089,7 +1118,6 @@ impl Maximus {
         self.remainder = off.unwrap_or(1);
 
         let fir = self.switches.fir && !self.switches.linear;
-        let was_fir = !self.firs[0].taps.is_empty();
         let (low, mid_high, mid_low, high) = (
             self.sections(Kind::Low, low_hz, low_slope, low_slope + 1),
             self.sections(Kind::High, low_hz, low_slope, low_slope + 1),
@@ -1138,33 +1166,17 @@ impl Maximus {
             let mut other = vec![0.0; total];
             sinc_low_pass(&mut buffer, total, n_low, f_low);
             window(&mut buffer, total, n_low);
-            if !was_fir || self.firs[0].taps.len() != total {
-                self.firs[0].set(&buffer);
-            } else {
-                self.firs[0].taps.clear();
-                self.firs[0].taps.extend(buffer.iter().map(|t| *t as f32));
-            }
+            let low_taps = buffer.clone();
             sinc_low_pass(&mut other, total, n_high, f_high);
             invert(&mut other, total);
             window(&mut other, total, n_high);
-            let high_taps = other.clone();
             for (a, b) in buffer.iter_mut().zip(&other) {
                 *a += b;
             }
             invert(&mut buffer, total);
-            for (fir, taps) in self.firs[1..].iter_mut().zip([buffer, high_taps]) {
-                if !was_fir || fir.taps.len() != total {
-                    fir.set(&taps);
-                } else {
-                    fir.taps.clear();
-                    fir.taps.extend(taps.iter().map(|t| *t as f32));
-                }
-            }
+            self.fir.set([&low_taps, &buffer, &other]);
         } else {
-            for fir in &mut self.firs {
-                fir.taps.clear();
-                fir.reset();
-            }
+            self.fir.clear();
         }
     }
 
@@ -1326,8 +1338,8 @@ impl Maximus {
             }
             return bands;
         }
-        if !self.firs[0].taps.is_empty() {
-            return std::array::from_fn(|b| self.firs[b].run(frame));
+        if self.fir.len() != 0 {
+            return self.fir.run(frame);
         }
         let low = run(&mut self.low, frame);
         let high_passed = run(&mut self.mid_high, frame);
@@ -1441,9 +1453,7 @@ impl Maximus {
         for section in sections {
             section.reset();
         }
-        for fir in &mut self.firs {
-            fir.reset();
-        }
+        self.fir.reset();
     }
 
     /// Read a state's parameters, switches and curves. `None` where the
@@ -2044,7 +2054,7 @@ mod tests {
         // Its taps: the LOW band's low pass and the HIGH band's high pass
         // are each other's complement with the MID band.
         let sum: Vec<f32> = (0..193)
-            .map(|k| fir.firs.iter().map(|f| f.taps[k]).sum())
+            .map(|k| fir.fir.taps.iter().map(|taps| taps[k]).sum())
             .collect();
         assert!(
             sum.iter()
@@ -2721,8 +2731,11 @@ mod tests {
                 places.push(band.delay.frames.as_ptr().cast());
                 places.push(band.table.gains.as_ptr());
             }
-            for fir in &plugin.firs {
-                places.push(fir.taps.as_ptr());
+            for taps in &plugin.fir.taps {
+                places.push(taps.as_ptr());
+            }
+            for history in &plugin.fir.history {
+                places.push(history.as_ptr());
             }
             places
         };
