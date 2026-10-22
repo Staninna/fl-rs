@@ -312,9 +312,91 @@ pub(crate) struct Track {
     /// What the attack, decay, sustain and release knobs make a segment's
     /// length.
     scales: [f32; 4],
+    /// The knobs' scales as the envelope itself has them, without what a
+    /// plugin puts over them (Sytrus's quick ADSR): what a run that
+    /// [`Run::follow`]s another voice's takes (`0x789e90` copies them from
+    /// the envelope's +0xa8).
+    raw: [f32; 4],
+    /// Every point's value as FL keeps it (an f32), and how much of an
+    /// offset it takes (`FUN_007859c0`, the point's +0x1c): see
+    /// [`weights`].
+    ys: Vec<f32>,
+    weights: Vec<f32>,
+    centre: f64,
+    /// A run carries an offset its points take by their weights, and the
+    /// sustain knob is that offset from the decay on (Sytrus: `0x787230`,
+    /// `0x789e50`, `0x789f30`). Off, as every plugin but Sytrus has it
+    /// here, the points are where they are drawn.
+    offsets: bool,
     active: bool,
     /// `x` is in beats, and in half seconds otherwise.
     pub(crate) tempo: bool,
+}
+
+/// How much of an offset each point of an envelope takes (`FUN_007859c0`
+/// writes it to every point's +0x1c, `0x787230` reads it), from the
+/// points' lengths and the decay, loop start and loop end markers. With
+/// `D` the decay marker (0 without one), `E` the loop end (the last point
+/// without one) and `S` the loop start (`E` without one), and `A`, `M`
+/// and `R` the lengths of the points up to `D`, after `D` up to `S` and
+/// after `E`:
+///
+/// - up to `D`, the share of `A` still to come after the point: 1 at the
+///   start of the envelope, 0 at `D`;
+/// - after `D` up to `S`, the share of `M` played by the point, rising to 1;
+/// - after `S` up to `E`, 1;
+/// - after `E`, the share of `R` still to come after the point, falling
+///   to 0 at the end (1 for a class with bit 0x80 of its mask, which none
+///   has).
+///
+/// A share's whole is never under 2^-16 (`0x7864e0`).
+pub(crate) fn weights(lengths: &[f32], decay: i32, loop_start: i32, loop_end: i32) -> Vec<f32> {
+    const LEAST: f64 = 1.525_878_906_25e-5;
+    let count = lengths.len() as i32;
+    let d = decay.max(0);
+    let e = if loop_end < 0 { count - 1 } else { loop_end };
+    let s = if loop_start < 0 { e } else { loop_start };
+    let (mut attack, mut middle, mut release) = (0.0f64, 0.0f64, 0.0f64);
+    for (i, x) in (0..count).zip(lengths) {
+        let x = f64::from(*x);
+        if i > d {
+            if i <= s {
+                middle += x;
+            }
+        } else {
+            attack += x;
+        }
+        if i > e {
+            release += x;
+        }
+    }
+    let mut run = attack;
+    let mut out = Vec::with_capacity(lengths.len());
+    for (i, x) in (0..count).zip(lengths) {
+        let x = f64::from(*x);
+        let mut weight = 0.0f32;
+        let next;
+        if i > d {
+            weight = 1.0;
+            if i > e {
+                next = run - x;
+                weight = (next / release.max(LEAST)) as f32;
+            } else {
+                if i <= s {
+                    weight = ((run + x) / middle.max(LEAST)) as f32;
+                }
+                next = if i == e { release } else { run + x };
+            }
+        } else if i == d {
+            next = 0.0;
+        } else {
+            next = run - x;
+            weight = (next / attack.max(LEAST)) as f32;
+        }
+        out.push(weight);
+        run = next;
+    }
+    out
 }
 
 /// Where one voice is in a [`Track`].
@@ -336,6 +418,14 @@ pub(crate) struct Run {
     /// What this voice's attack and decay segments are stretched by, on
     /// top of the knobs: Sytrus's unison spreads them (`0x86af20`).
     stretch: [f32; 2],
+    /// The offset the points take by their weights (+0x28), and the one
+    /// the decay switches to, the sustain knob (+0x34). Both 0 unless the
+    /// track has [`Track::with_offsets`].
+    offset: f32,
+    sustain: f32,
+    /// The run times its segments by the envelope's own knobs
+    /// ([`Track::set_raw`]).
+    raw: bool,
 }
 
 impl Run {
@@ -343,6 +433,37 @@ impl Run {
     /// unison voice's copy of the knobs. This allocates nothing.
     pub(crate) fn stretch(&mut self, attack: f32, decay: f32) {
         self.stretch = [attack, decay];
+    }
+
+    /// Scale this run's attack segments by `by` on top of what stretches
+    /// them, as Sytrus does to the run's +0x50 for the attack by velocity
+    /// and for a portamento (`0x86af20`).
+    pub(crate) fn scale_attack(&mut self, by: f32) {
+        self.stretch[0] *= by;
+    }
+
+    /// Take over `other`'s place in the envelope, as Sytrus's global
+    /// envelopes do (`0x789e90` copies the first 0x50 bytes of a sounding
+    /// voice's run): stage, point, phase, step, segment, value and
+    /// offsets. The run then times its segments by the envelope's own
+    /// knobs, with nothing stretching them.
+    pub(crate) fn follow(&mut self, other: &Run) {
+        *self = Run {
+            stretch: [1.0; 2],
+            raw: true,
+            ..*other
+        };
+    }
+
+    /// Whether the run is still before its decay, where an offset set now
+    /// holds (`0x789f30` takes it under stage 2).
+    pub(crate) fn attacking(&self) -> bool {
+        self.stage < 2
+    }
+
+    /// Set the offset the points take.
+    pub(crate) fn set_offset(&mut self, offset: f32) {
+        self.offset = offset;
     }
 
     /// Whether the run has played the envelope out.
@@ -387,19 +508,79 @@ impl Track {
         let stuck = last >= 0
             && envelope.loop_start >= 0
             && place(last) - place(envelope.loop_start) <= 1e-9;
+        let lengths: Vec<f32> = points.iter().map(|p| p.x.max(0.0) as f32).collect();
+        let scales = envelope.knobs.map(|knob| knob as f32 / 128.0);
         Track {
             curve: Curve::new(points),
-            lengths: points.iter().map(|p| p.x.max(0.0) as f32).collect(),
+            weights: weights(
+                &lengths,
+                envelope.decay,
+                envelope.loop_start,
+                envelope.loop_end,
+            ),
+            lengths,
             values: points.iter().map(|p| (p.y - centre) as f32).collect(),
+            ys: points.iter().map(|p| p.y as f32).collect(),
+            centre,
+            offsets: false,
             decay: envelope.decay,
             loop_start: envelope.loop_start,
             loop_end: envelope.loop_end,
             last,
             stuck,
-            scales: envelope.knobs.map(|knob| knob as f32 / 128.0),
+            scales,
+            raw: scales,
             active: envelope.active,
             tempo: envelope.flags & TEMPO != 0,
         }
+    }
+
+    /// Let the runs carry offsets (see the field).
+    pub(crate) fn with_offsets(mut self) -> Self {
+        self.offsets = true;
+        self
+    }
+
+    /// The envelope's own knobs, without what a plugin puts over them.
+    /// This allocates nothing.
+    pub(crate) fn set_raw(&mut self, knobs: [i32; 4]) {
+        self.raw = knobs.map(|knob| knob as f32 / 128.0);
+    }
+
+    /// Point `i`'s value with `offset` on it by its weight, kept to 0..1,
+    /// less the centre (`0x787230`; the clamp is the base constructor's
+    /// +0x21, +0x70 and +0x78, `0x781a9e`).
+    fn value(&self, i: usize, offset: f32) -> f32 {
+        if offset == 0.0 {
+            self.values[i]
+        } else {
+            let lifted = f64::from(self.ys[i]) + f64::from(self.weights[i] * offset);
+            (lifted.clamp(0.0, 1.0) - self.centre) as f32
+        }
+    }
+
+    /// Knob `k`'s scale for `run`.
+    fn scale(&self, run: &Run, k: usize) -> f32 {
+        if run.raw { self.raw[k] } else { self.scales[k] }
+    }
+
+    /// The length of the points up to and with `index`, as `0x7872f0`
+    /// adds them.
+    pub(crate) fn place(&self, index: i32) -> f64 {
+        let upto = usize::try_from(index + 1)
+            .unwrap_or(0)
+            .min(self.lengths.len());
+        self.lengths[..upto].iter().map(|x| f64::from(*x)).sum()
+    }
+
+    /// The decay marker, or -1.
+    pub(crate) fn decay(&self) -> i32 {
+        self.decay
+    }
+
+    /// The attack's scale for `run`: what jumping into it is counted in.
+    pub(crate) fn attack_scale(&self, run: &Run) -> f32 {
+        self.scale(run, 0) * run.stretch[0]
     }
 
     /// Take the attack, decay, sustain and release knobs anew, as
@@ -427,12 +608,24 @@ impl Track {
             rise: 0.0,
             out: 0.0,
             stretch: [1.0; 2],
+            offset: 0.0,
+            sustain: 0.0,
+            raw: false,
         };
         let (Some(first), true) = (self.lengths.first(), self.active) else {
             return run;
         };
         run.stage = if self.decay < 0 { DECAY } else { 1 };
         run.held = run.stage;
+        // `0x789e50`: with a loop end the sustain knob is the offset from
+        // the decay on, and a run that starts in its decay takes it at
+        // once (`0x789f30`).
+        if self.offsets && self.loop_end >= 0 {
+            run.sustain = self.scales[2];
+            if run.stage >= 2 {
+                run.offset = run.sustain;
+            }
+        }
         if *first == 0.0 {
             (run.step, run.phase) = (1.0, 1.0);
         } else {
@@ -463,6 +656,10 @@ impl Track {
         if run.stage >= RELEASE {
             return;
         }
+        if self.offsets {
+            self.let_go(run);
+            return;
+        }
         run.stage = RELEASE;
         run.held = RELEASE;
         let count = self.values.len();
@@ -479,12 +676,37 @@ impl Track {
         }
         run.from = run.out;
         run.point = next;
-        run.rise = self.values[next] - run.from;
-        let length = f64::from(self.lengths[next]) * f64::from(self.scales[3]);
+        run.rise = self.value(next, run.offset) - run.from;
+        let length = f64::from(self.lengths[next]) * f64::from(self.scale(run, 3));
         if length <= 0.0 {
             (run.step, run.phase) = (1.0, 1.0);
         } else {
             (run.step, run.phase) = (rate / length, 0.0);
+        }
+    }
+
+    /// FL's release (Sytrus `0x787c90`, Harmor `FUN_007a09f0`), for a track
+    /// with offsets: with a loop end the run goes to it and carries the
+    /// offset over by what the point is short of where the run is, so the
+    /// release starts from there and its points take the difference by
+    /// their weights; the segment ends at the next tick. Without one the
+    /// run plays on. A run that stands still moves on at the next tick.
+    fn let_go(&self, run: &mut Run) {
+        let count = self.values.len();
+        if self.loop_end >= 0 && (self.loop_end as usize) < count {
+            let end = self.loop_end as usize;
+            // The point's value without the clamp (`0x787c90` clears +0x21
+            // around it).
+            let now =
+                f64::from(self.ys[end]) + f64::from(self.weights[end] * run.offset) - self.centre;
+            run.offset = (f64::from(run.offset) + (f64::from(run.out) - now)) as f32;
+            run.point = end;
+            run.phase = 1.0;
+            run.held = RELEASE;
+        }
+        run.stage = RELEASE;
+        if run.step == 0.0 {
+            run.phase = 1.0;
         }
     }
 
@@ -516,12 +738,14 @@ impl Track {
             } else {
                 (run.phase - 1.0) / run.step
             };
-            run.from = self.values[run.point];
+            run.from = self.value(run.point, run.offset);
             let at = run.point as i32;
             let done = if at < self.last || self.last < 0 || run.stage > HELD {
                 if self.decay <= at && self.decay >= 0 && run.held < DECAY {
                     run.stage = run.stage.max(DECAY);
                     run.held = DECAY;
+                    // The decay takes the sustain offset (`0x787e50`).
+                    run.offset = run.sustain;
                 }
                 if run.point + 1 < count {
                     run.point += 1;
@@ -537,7 +761,7 @@ impl Track {
                 run.point = (self.loop_start as usize + 1).min(count - 1);
                 self.stuck
             };
-            run.rise = self.values[run.point] - run.from;
+            run.rise = self.value(run.point, run.offset) - run.from;
             turns += 1;
             if done || turns > TURNS {
                 (run.phase, run.step) = (0.0, 0.0);
@@ -545,7 +769,7 @@ impl Track {
             }
             let released = run.stage >= RELEASE && self.loop_end >= 0;
             let knob = usize::from(run.stage > 2) + 2 * usize::from(released);
-            let mut scale = self.scales[knob];
+            let mut scale = self.scale(run, knob);
             if knob < 2 {
                 scale *= run.stretch[knob];
             }
