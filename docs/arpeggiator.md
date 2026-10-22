@@ -236,7 +236,9 @@ tick by tick, for every channel whose direction is not 0. The notes of
 those channels are replaced with what FL starts: the step notes of a
 master, or a sounding master with its pitch moves. The engine then plays
 those like any note, on sampler and plugin channels alike. A clip on 0x303
-or 0x304 is read at the tick of each step.
+or 0x304 is read at the tick of each step. A render with a time limit
+works the arpeggios out up to the first tick on or past it, where it lets
+go of what still sounds; the output before the limit is the same.
 
 Built as the code reads: every direction, range (0 included), repeat,
 the held notes as chord (-1 and -2, which differ only in the one-note case
