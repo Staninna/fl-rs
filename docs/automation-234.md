@@ -291,9 +291,6 @@ The corpus render counts the bindings and controller links of the first
   `Sacco - Pumping objects`: the rebuilt Limiter has 18 parameters
   (`docs/plugins/fruity-limiter.md`), and what FL drives with these
   numbers is not read.
-- Slicex parameter 5 (control 0x8005) of the eight channels of `Drumloop
-  Masher.flp`, linked from a controller: the rebuilt Slicex has no
-  parameter table (`docs/plugins/slicex.md` maps no `ProcessParam`).
 - The arpeggiator's time (0x303) of `nucleon - Harmless Galactic` channel
   14, whose arpeggiator is on: the engine has no arpeggiator.
 - A clip bound to nothing: `Asher Postman - Future House` channel 34. FL

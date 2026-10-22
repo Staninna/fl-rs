@@ -476,7 +476,7 @@ struct Run {
 /// One biquad stage, FL's direct form I in f64 over a stereo pair
 /// (`FUN_00626ec0`): `b0 b1 b2 a1 a2` and the two pairs of history.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Biquad {
+pub(crate) struct Biquad {
     c: [f64; 5],
     x1: [f64; 2],
     x2: [f64; 2],
@@ -489,7 +489,7 @@ impl Biquad {
     /// 3 notch, 4 high pass, 6 low shelf, 7 peak, 8 high shelf. `a` is the
     /// shelf or peak gain and `alpha` the width term (for the shelves the
     /// factor that times `sin` is `2 sqrt(A) alpha`).
-    fn design(&mut self, kind: i32, a: f64, alpha: f64, sin: f64, cos: f64) {
+    pub(crate) fn design(&mut self, kind: i32, a: f64, alpha: f64, sin: f64, cos: f64) {
         self.c = match kind {
             1..=4 => {
                 let d = 1.0 / (alpha + 1.0);
@@ -549,7 +549,7 @@ impl Biquad {
     }
 
     /// Run over interleaved stereo frames in place.
-    fn run(&mut self, frames: &mut [f32]) {
+    pub(crate) fn run(&mut self, frames: &mut [f32]) {
         let [b0, b1, b2, a1, a2] = self.c;
         for pair in frames.as_chunks_mut::<2>().0 {
             for s in 0..2 {
@@ -933,7 +933,7 @@ fn pan_law(pan: f32, gain: f32) -> (f32, f32) {
 
 /// `FUN_00617ae0`: a voice's four gains for a pan and a level: left,
 /// right, right into left, left into right.
-fn stereo_pan(pan: f32, vol: f32) -> [f32; 4] {
+pub(crate) fn stereo_pan(pan: f32, vol: f32) -> [f32; 4] {
     if pan == 0.0 {
         return [vol, vol, 0.0, 0.0];
     }
@@ -956,7 +956,14 @@ fn stereo_pan(pan: f32, vol: f32) -> [f32; 4] {
 
 /// `FUN_0062cc10`: a gain's ramp from where the last one ended to
 /// `target` over `ticks` samples, no steeper than `cap` a sample.
-fn ramp(step: &mut f32, end: &mut f32, now: &mut f32, target: f32, cap: f32, ticks: i32) {
+pub(crate) fn ramp(
+    step: &mut f32,
+    end: &mut f32,
+    now: &mut f32,
+    target: f32,
+    cap: f32,
+    ticks: i32,
+) {
     let ticks = ticks.max(1) as f32;
     *now = *end;
     *step = target - *now;
