@@ -683,13 +683,65 @@ previous tick's dt, speed and LFO amount (stack order, `code` at 0x88b073).
 Rate: `SetRate(halfsec = 2T/SR, beats = T·BPM/(60 SR))` (`FUN_00897710`):
 one x unit is a half second, or a beat in tempo mode, per tick.
 
-What Harmor's curve runtime has that `menvelope.rs` lacks: sustain weights
-and the sustain-offset knob, FL's release (offset carried over the release
-points, plays on when there is no loop end), the arpeggiator (stage 5, rank
-and count from `FUN_007a24b0`), decay scale <= 0 freezing the loop, mode 10
-neighbours across the loop wrap, live scale changes, shared envelope runs
-(flag 2, `FUN_007a2cc0`), global LFO phase (`this+0x2cf0`), song-position
-resync (`0x897390`), negative seek (predelay) and the attack jump.
+What Harmor's curve runtime has that `menvelope.rs`'s `Track` lacks, and
+`harmor_art.rs`'s `Envelope` builds:
+
+- Sustain weights. `FUN_0079e680` writes every point's +0x1c, the share of
+  an offset it takes (`menvelope::weights`, the same code as Sytrus's), and
+  `FUN_0079fef0` reads a point as `y + weight·offset`, kept to 0..1 while
+  +0x21 is set. The run's offset (+0x28) is 0 before the decay marker and
+  the sustain offset (+0x34, the sustain scale with a loop end, else 0)
+  from it on (`FUN_007a2c80`, `FUN_007a2d60`); a run that starts without
+  a decay marker starts in stage 3 and takes it at once (`FUN_007a07a0`).
+- FL's release (`FUN_007a09f0`): with a loop end the run goes to it and
+  its offset grows by `out - point(loop end)` read without the clamp, so
+  the release starts where the run is and its points take the difference
+  by their weights; the segment ends at the next tick. Without one the
+  run plays on in stage 6.
+- The arpeggiator. `FUN_0079e680` sets +0x8d when a point up to the loop
+  end has its byte (+0xd) set and the loop has length (+0x8c clear).
+  `Gen_Render` (`0x891320`) ranks the held keys after a voice starts
+  (`0x88508b`) or is released (`0x88549f`) sets this+0xe90, when
+  this+0x113d says a main-list envelope or LFO has such points (set by
+  `0x8974d0`): every voice of kind 0 with no +0x130 and state under 6
+  puts its key (+0x64) in a list once, ascending, or descending when
+  InvArpBox (REC 788, this+0xd88) is on, and every main-list envelope and
+  LFO level of those voices gets its rank and the count (`FUN_007a24b0`;
+  a voice whose key is not found takes the last rank). In the tick
+  (`FUN_007a0c60`), a point with byte `b` in stage under 6 moves the
+  rank that plays (+0x3c) to `(max(pick, 0) - 2 + b) mod count`; a run of
+  another rank holds (+0x39) at the point's value (+0x48) until its rank
+  comes round. Letting go of a run that plays, with another key held and
+  an arpeggiator point ahead of it round the loop, puts it in stage 5; its
+  next arpeggiator point, or the count dropping to 0, lets it go. A
+  voice does not end while a main-list envelope or LFO level with
+  arpeggiator points is under stage 9 (`0x88ab10`).
+- Shared runs (flag 2). TriggerVoice (`0x883cd0`) finds, once per note,
+  the first voice of the list at this+0xe20 of kind 0, the same part and
+  state under 6, and points every active flag-2 envelope of the main list
+  at its run (+0xc0); `FUN_007a2cc0` copies the first 0x50 bytes of it
+  (stage, point, segment, offsets, arpeggiator place; a run that plays an
+  arpeggio rank holds at +0x48), then the envelope's own knobs, and the
+  voice takes `-|count|` of the other voice's tick countdown and sets
+  +0x3330. In the tick a negative count is a first tick with dt 0 and the
+  next tick `|count|` frames on, so both voices tick together; 0 is an
+  ordinary tick. A voice with +0x3330 set skips the attack jump on its
+  flag-2 envelopes.
+- Global LFOs (flag 2 on the LFO). `0x8974d0` lists the main list's
+  active ones at this+0x2cf0. Their phase (+0xa8) starts at the
+  oscillator's start plus the phase knob (`FUN_007a33e0`), and
+  `Gen_Render` moves it on after the voices by `round(len / tick · pace)`
+  with the pace FL keeps before freezing (+0x98: a frozen LFO's global
+  phase moves too). A new voice's run starts there (`FUN_007a34c0`).
+  `0x897390` sets them from the song position when the host asks; fl-rs
+  plays from the start, where that is the start phase.
+- The speed articulator (39) moves the LFO's phase only: the level runs
+  by dt, the phase by `round(speed · turn · pace)` (`FUN_00897d90`).
+
+Not built: decay scale <= 0 freezing the loop (`FUN_007a2c80` ORs it
+into the run's +0x38), mode 10 neighbours across the loop wrap, live scale
+changes, negative seek (predelay), and the arpeggiator on an LFO's level,
+which runs on `menvelope::Track`.
 
 The LFO level run has centre 0.5, checked in all three DLLs: `TMLFO`'s
 constructor stores 0.5 at +0x18 before the base constructor runs (Harmor
@@ -1354,7 +1406,7 @@ mix, not an input gain.
 - Small fields without a found writer: `this+0x10d8` is set in
   `FUN_00878690` but nothing clamps against it outside oct spacing;
   `part+0x5a0` / `+0x5b0` (phaser motion start and scale), `part+0x128`'s
-  use in the phase seed, `this+0x113d` (arpeggiator re-sort gate), the ModX
+  use in the phase seed, the ModX
   copy at `this+0x1114`, the shape interpolation flag S+0x10.
 - Map centring: subtracting the centre in the non-flat sampler branch is
   `inferred`; the default shapes come from `System/*.fnv` files.
@@ -1415,11 +1467,11 @@ and unison; with steps 9 to 13 the shared FX cover most states; steps 14 to
 | 3 | pitch, ratios, partial count, global EQ, taper | built. A note's pitch follows the host's (`Generator::set_note_pitch`, for slide notes and a clip on the channel's pitch) from its voices' next tick, a note held under a legato voice included |
 | 4 | timbres, mix, start phases, harmonic phase | built, with the blend modes and phase randomness |
 | 5 | voice lifecycle, pan, FX / dry, part mix, volumes | built. MaxPoly is not read; a full pool of 128 voices steals the oldest, released ones first |
-| 6 | articulators | built on `menvelope.rs`'s `Lfo` (with its centre at 0.5) and a Harmor envelope runner in `harmor_art.rs`: per-voice scales, global scales, the attack jump, sustain offset and the release carried over from where the run is. Approximated: the per-point sustain weights (taken as 1 from the decay marker to the loop end), shared runs (flag 2) run per voice, arpeggiator points are not read, the LFO's speed articulator also speeds its level envelope, the global LFO phase (articulator 40) is not applied |
+| 6 | articulators | built on `menvelope.rs`'s `Lfo` (with its centre at 0.5) and a Harmor envelope runner in `harmor_art.rs` (section 3.3): per-voice and global scales, the attack jump, the sustain weights and offsets, FL's release, the arpeggiator points of envelopes and the held-key rank, shared envelope runs (flag 2) with their tick countdown, global LFOs (flag 2) and their phase, the global LFO phase (articulator 40) and the speed articulator on the phase only. Left out: the arpeggiator on an LFO's level, decay scale <= 0 freezing a loop, the song-position resync of global LFOs (fl-rs plays from the start) |
 | 7 | filters 1 and 2, their mix | built, with masks. Types 0..16 are Harmless's tables (`harmless::shape`); the custom types 17 and 18 skip the edge trim, so their range takes a reach of 1 on both sides |
 | 8 | unison | built; type 4 (Hz) detunes whole voices instead of each partial |
 | 9 | compressor | built: `System/Compression/<n>.fst` on the Maximus port, REC 821..824 forwarded |
-| 10 | resonance | built: tables 100..111 from section 3.6.5 and the noise type 109 (its random numbers are a hash, not `ippsRandUniform`) |
+| 10 | resonance | built: tables 100..111 from section 3.6.5 and the noise type 109, its numbers `ippsRandUniform_Direct_32f` (through the pointer at 0x92bbd0, `0x8876b8`) from a copy of the held seed |
 | 11 | vibrato | built |
 | 12 | distortion | built from section 4.2, all eleven modes, the halfband chains and the DC block |
 | 13 | reverb | built on `fl_fx::FruityReverb` |
@@ -1437,7 +1489,7 @@ and unison; with steps 9 to 13 the shared FX cover most states; steps 14 to
 | 25 | images | not built (8 embedded, 9 resynthesised parts) |
 | 26 | blur | built: time blur and harmonic blur with mask |
 | 27 | sub-harmonics, unit order, local EQ, detuning, FX order, oct spacing | built |
-| 28 | strum, arpeggiator rank, VelToPortaTime | not built (none in the corpus) |
+| 28 | strum, arpeggiator rank, VelToPortaTime | the arpeggiator rank is built (section 3.3); strum and VelToPortaTime are not (none in the corpus) |
 | - | harmonic randomness (unit 2) | not built: shape 4 sits flat at its centre in all 128 parts, which makes the unit do nothing |
 
 Corpus (FL_RS_CORPUS render of every project, first 10 s): before Harmor,

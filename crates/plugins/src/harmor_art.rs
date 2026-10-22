@@ -39,29 +39,34 @@ const MAP_STEPS: usize = 256;
 pub struct Envelope {
     curve: Curve,
     lengths: Vec<f32>,
-    /// Each point's value less the centre, and how much of the sustain
-    /// offset it takes.
+    /// Each point's value less the centre; its value as FL keeps it (an
+    /// f32); how much of an offset it takes (`menvelope::weights`, the
+    /// point's +0x1c), and its arpeggiator byte (+0xd).
     values: Vec<f32>,
+    ys: Vec<f32>,
     weights: Vec<f32>,
-    /// The values a lifted point is kept between, less the centre.
-    low: f32,
-    high: f32,
+    arp: Vec<u8>,
+    centre: f64,
+    /// A point up to the loop end steps the arpeggiator, and the loop is
+    /// not one of no length (+0x8d, `FUN_007859c0`).
+    pub arp_on: bool,
     decay: i32,
     loop_start: i32,
     loop_end: i32,
     last: i32,
     stuck: bool,
     /// The attack, decay and release knobs as scales and the sustain knob
-    /// as an offset.
+    /// as an offset (+0xa8).
     knobs: [f32; 4],
     pub active: bool,
     /// `x` counts beats, and half seconds otherwise.
     pub tempo: bool,
-    /// One run for every voice (flag 2), which this does not share.
+    /// One run for every voice (flag 2): a new voice takes over the run of
+    /// the first voice of its part that is held (`FUN_007a2cc0`).
     pub shared: bool,
 }
 
-/// Where a voice is in an [`Envelope`].
+/// Where a voice is in an [`Envelope`]: the first 0x60 bytes of FL's run.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EnvRun {
     stage: i32,
@@ -71,7 +76,21 @@ pub struct EnvRun {
     step: f64,
     from: f32,
     rise: f32,
-    /// Attack, decay, sustain offset and release, with the global scales.
+    /// The offset the points take by their weights (+0x28) and the one the
+    /// decay switches to (+0x34).
+    offset: f32,
+    sustain: f32,
+    /// The arpeggiator: the rank the run plays on (+0x3c, -1 for none),
+    /// the voice's rank among the held keys and their count (+0x40,
+    /// +0x44, -1 until the first count), and whether the run holds while
+    /// another rank plays (+0x39), at what (+0x48).
+    pick: i32,
+    rank: i32,
+    count: i32,
+    hold: bool,
+    hold_value: f32,
+    /// Attack, decay, sustain and release, with the global scales
+    /// (+0x50..+0x5c).
     scales: [f32; 4],
     pub out: f32,
 }
@@ -95,9 +114,24 @@ impl EnvRun {
             step: 0.0,
             from: 0.0,
             rise: 0.0,
+            offset: 0.0,
+            sustain: 0.0,
+            pick: -1,
+            rank: -1,
+            count: -1,
+            hold: false,
+            hold_value: 0.0,
             scales: [1.0, 1.0, 0.0, 1.0],
             out: 0.0,
         }
+    }
+}
+
+impl EnvRun {
+    /// The voice's rank among the held keys and their count.
+    #[cfg(test)]
+    pub fn arp_rank(&self) -> (i32, i32) {
+        (self.rank, self.count)
     }
 }
 
@@ -116,25 +150,30 @@ impl Envelope {
         let stuck = last >= 0
             && envelope.loop_start >= 0
             && place(last) - place(envelope.loop_start) <= 1e-9;
-        // The sustain knob lifts the points after the decay marker up to
-        // the loop end (the weights FL keeps per point are not read).
-        let weights = (0..count)
-            .map(|i| {
-                if envelope.loop_end >= 0 && i > envelope.decay && i <= envelope.loop_end {
-                    1.0
-                } else {
-                    0.0
-                }
-            })
-            .collect();
+        let lengths: Vec<f32> = points.iter().map(|p| p.x.max(0.0) as f32).collect();
+        let weights = crate::menvelope::weights(
+            &lengths,
+            envelope.decay,
+            envelope.loop_start,
+            envelope.loop_end,
+        );
+        let mut arp = envelope.arp.clone();
+        arp.resize(points.len(), 0);
+        let arp_on = !stuck
+            && arp
+                .iter()
+                .enumerate()
+                .any(|(i, byte)| *byte != 0 && i as i32 <= envelope.loop_end);
         let [a, d, s, r] = envelope.knobs;
         Envelope {
             curve: Curve::new(points),
-            lengths: points.iter().map(|p| p.x.max(0.0) as f32).collect(),
+            lengths,
             values: points.iter().map(|p| (p.y - centre) as f32).collect(),
+            ys: points.iter().map(|p| p.y as f32).collect(),
             weights,
-            low: -centre as f32,
-            high: (1.0 - centre) as f32,
+            arp,
+            centre,
+            arp_on,
             decay: envelope.decay,
             loop_start: envelope.loop_start,
             loop_end: envelope.loop_end,
@@ -152,14 +191,34 @@ impl Envelope {
         }
     }
 
-    /// Point `i`'s value with the sustain offset on it (`FUN_0079fef0`).
+    /// Point `i`'s value with `offset` on it by its weight, kept to 0..1,
+    /// less the centre (`FUN_0079fef0`).
     fn value(&self, i: usize, offset: f32) -> f32 {
-        let v = self.values[i];
-        if offset == 0.0 || self.weights[i] == 0.0 {
-            v
+        if offset == 0.0 {
+            self.values[i]
         } else {
-            (v + self.weights[i] * offset).clamp(self.low, self.high)
+            let lifted = f64::from(self.ys[i]) + f64::from(self.weights[i] * offset);
+            (lifted.clamp(0.0, 1.0) - self.centre) as f32
         }
+    }
+
+    /// The same without the clamp, as the release reads the loop end
+    /// (`FUN_007a09f0` clears +0x21 around it).
+    fn value_free(&self, i: usize, offset: f32) -> f64 {
+        f64::from(self.ys[i]) + f64::from(self.weights[i] * offset) - self.centre
+    }
+
+    /// The sustain offset from the sustain scale (`FUN_007a2c80`), then
+    /// the offset a run before its decay keeps and one after it takes
+    /// (`FUN_007a2d60`).
+    fn settle(&self, run: &mut EnvRun, before: f32) {
+        run.sustain = if self.loop_end >= 0 {
+            run.scales[2]
+        } else {
+            0.0
+        };
+        run.offset = if run.stage < 2 { before } else { run.sustain };
+        run.out = self.value(0, run.offset);
     }
 
     /// Take the attack, decay, sustain and release knobs anew, as
@@ -169,7 +228,8 @@ impl Envelope {
         self.knobs = knobs.map(|knob| knob as f32 / 128.0);
     }
 
-    /// A run at the first point.
+    /// A run at the first point (`FUN_007a07a0`, then `FUN_007a2cc0`'s
+    /// knobs and `FUN_007a2da0`).
     pub fn start(&self, rate: f64) -> EnvRun {
         let mut run = EnvRun::idle();
         run.scales = self.knobs;
@@ -183,18 +243,39 @@ impl Envelope {
         } else {
             run.step = rate / f64::from(*first);
         }
-        run.from = self.value(0, run.scales[2]);
-        run.out = run.from;
+        run.from = self.values[0];
+        self.settle(&mut run, 0.0);
         run
     }
 
+    /// Take over `other`'s run, as a shared envelope does (`FUN_007a2cc0`
+    /// copies its first 0x50 bytes): its stage, point, segment, value and
+    /// offsets and the arpeggiator's place, holding on an arpeggiator that
+    /// plays, with the envelope's own knobs.
+    pub fn follow(&self, run: &mut EnvRun, other: &EnvRun) {
+        *run = EnvRun {
+            scales: self.knobs,
+            ..*other
+        };
+        if run.pick >= 0 {
+            run.hold = true;
+            run.from = run.hold_value;
+            run.rise = 0.0;
+            run.out = run.from;
+        }
+        let offset = run.offset;
+        self.settle(run, offset);
+    }
+
     /// Put the global scales on a run, on a voice's first tick: attack,
-    /// decay and release times and the sustain offset.
+    /// decay and release times and the sustain offset (`FUN_0088ab10`,
+    /// then `FUN_007a2c80` and `FUN_007a2d60` with 0).
     pub fn scale(&self, run: &mut EnvRun, globals: [f32; 4]) {
         run.scales[0] *= globals[0];
         run.scales[1] *= globals[1];
         run.scales[2] += globals[2];
         run.scales[3] *= globals[3];
+        self.settle(run, 0.0);
     }
 
     /// Jump `share` of the way into the attack (`FUN_007a2580`).
@@ -208,52 +289,123 @@ impl Envelope {
         self.advance(run, ticks, rate);
     }
 
-    /// Let go (`FUN_007a09f0`): a run at or before the loop end moves to
-    /// it, with the offset carried over so the release starts where the
-    /// run is.
+    /// Set the voice's rank among the held keys and their count
+    /// (`FUN_007a24b0`): a run that arpeggiates after its release lets go
+    /// when no key is held.
+    pub fn rank(&self, run: &mut EnvRun, rank: i32, count: i32) {
+        run.rank = rank;
+        run.count = count;
+        if run.stage == HELD && run.count < 1 {
+            self.let_go(run);
+        }
+    }
+
+    /// Voice_Release (`0x885390`): the release knob times `scale`, then
+    /// [`Envelope::let_go`].
     pub fn release(&self, run: &mut EnvRun, scale: f32) {
         if run.stage >= RELEASE {
             return;
         }
         run.scales[3] *= scale;
-        if self.loop_end >= 0 && (self.loop_end as usize) < self.values.len() {
-            let end = self.loop_end as usize;
-            let now = self.value(end, run.scales[2]);
-            run.scales[2] += run.out - now;
-            // The carried offset reaches the points the loop end has.
-            run.point = end;
-            run.from = run.out;
-            run.rise = 0.0;
-            (run.phase, run.step) = (1.0, 1.0);
-        }
-        run.stage = RELEASE;
-        run.held = RELEASE;
+        self.let_go(run);
     }
 
-    /// Move a run on by `dt` ticks. This allocates nothing.
+    /// Let go (`FUN_007a09f0`). A run on the arpeggiator with another key
+    /// held and an arpeggiator point ahead of it, round its loop, plays on
+    /// (stage 5). Otherwise, with a loop end, the run goes to it and
+    /// carries the offset over by what the point is short of where the run
+    /// is, so the release starts from there and its points take the
+    /// difference by their weights; the segment ends at the next tick.
+    /// Without one the run plays on.
+    fn let_go(&self, run: &mut EnvRun) {
+        if run.stage >= RELEASE {
+            return;
+        }
+        let count = self.values.len() as i32;
+        let mut arp_ahead = false;
+        let at = run.point as i32;
+        if run.pick >= 0 && !run.hold && run.count >= 2 && at < count {
+            let (mut u, mut until) = (at, at);
+            loop {
+                if self.arp[u as usize] != 0 {
+                    arp_ahead = true;
+                    break;
+                }
+                if u == self.loop_end && self.loop_end >= 0 && self.loop_start >= 0 {
+                    u = self.loop_start + 1;
+                    until = until.max(u);
+                } else {
+                    u += 1;
+                    if u > count - 1 {
+                        break;
+                    }
+                }
+                if u == until {
+                    break;
+                }
+            }
+        }
+        if arp_ahead {
+            run.stage = HELD;
+        } else {
+            if self.loop_end >= 0 && self.loop_end < count {
+                let end = self.loop_end as usize;
+                let now = self.value_free(end, run.offset);
+                run.offset = (f64::from(run.offset) + (f64::from(run.out) - now)) as f32;
+                run.point = end;
+                run.phase = 1.0;
+                run.hold = false;
+                run.held = RELEASE;
+            }
+            run.stage = RELEASE;
+        }
+        if run.step == 0.0 {
+            run.phase = 1.0;
+        }
+    }
+
+    /// Move a run on by `dt` ticks (`FUN_007a0c60`). This allocates
+    /// nothing.
     pub fn advance(&self, run: &mut EnvRun, dt: f64, rate: f64) {
         let count = self.values.len();
-        if run.point >= count || run.stage >= OVER {
+        if run.point >= count {
             return;
         }
         run.phase += dt * run.step;
         let mut turns = 0;
         while run.phase >= 1.0 {
-            let left = if run.step == 0.0 {
+            let mut left = if run.step == 0.0 {
                 dt
             } else {
                 (run.phase - 1.0) / run.step
             };
-            run.from = if run.stage >= RELEASE && run.point as i32 == self.loop_end {
-                run.out
-            } else {
-                self.value(run.point, run.scales[2])
-            };
+            run.from = self.value(run.point, run.offset);
+            // The arpeggiator: a point with its byte set moves the rank
+            // that plays by `byte - 2`, and a voice of another rank holds;
+            // after the release the next such point lets go.
+            if self.arp_on && run.stage < RELEASE && self.arp[run.point] != 0 {
+                if run.stage == HELD {
+                    // FL keeps what is left of the tick in the phase, which
+                    // the release may set.
+                    run.pick = -1;
+                    run.phase = left;
+                    self.let_go(run);
+                    left = run.phase;
+                } else if run.count > 0 {
+                    let byte = i64::from(self.arp[run.point]);
+                    let n = i64::from(run.count);
+                    let pick = i64::from(run.pick.max(0)) - 2 + byte + n;
+                    run.pick = pick.rem_euclid(n) as i32;
+                    run.hold = run.pick != run.rank;
+                    run.hold_value = run.from;
+                }
+            }
             let at = run.point as i32;
             let done = if at < self.last || self.last < 0 || run.stage > HELD {
                 if self.decay <= at && self.decay >= 0 && run.held < DECAY {
                     run.stage = run.stage.max(DECAY);
                     run.held = DECAY;
+                    run.offset = run.sustain;
                 }
                 if run.point + 1 < count {
                     run.point += 1;
@@ -269,7 +421,12 @@ impl Envelope {
                 run.point = (self.loop_start as usize + 1).min(count - 1);
                 self.stuck
             };
-            run.rise = self.value(run.point, run.scales[2]) - run.from;
+            if run.hold {
+                run.from = run.hold_value;
+                run.rise = 0.0;
+            } else {
+                run.rise = self.value(run.point, run.offset) - run.from;
+            }
             turns += 1;
             if done || turns > TURNS {
                 (run.phase, run.step) = (0.0, 0.0);
@@ -336,6 +493,9 @@ pub struct Articulator {
     pub envelope: Envelope,
     pub lfo: Lfo,
     lfo_on: bool,
+    /// The LFO is global (flag 2): a voice starts it at the phase the
+    /// plugin keeps for it (`FUN_007a34c0`, this+0x2cf0).
+    pub lfo_global: bool,
     /// The maps read every tick: keyboard, velocity, mod X, Y, Z, held
     /// index and mod X speed. The random and unison ones are read once.
     maps: [Option<Map>; 9],
@@ -390,6 +550,7 @@ impl Articulator {
             envelope: Envelope::new(&state.envelope, centre),
             lfo: Lfo::new(&state.lfo),
             lfo_on: state.lfo.active,
+            lfo_global: state.lfo.flags & 2 != 0,
             maps,
             smoothing: 0.0,
         }
@@ -434,8 +595,10 @@ impl Articulator {
             };
         }
         if let Some(lfo) = &mut run.lfo {
-            let rate = inputs.rates[usize::from(self.lfo.tempo())] * inputs.speed;
-            self.lfo.advance(lfo, inputs.dt, rate);
+            // The speed articulator moves the phase, not the level
+            // (`FUN_00897d90`).
+            let rate = inputs.rates[usize::from(self.lfo.tempo())];
+            self.lfo.advance_at(lfo, inputs.dt, inputs.speed, rate);
             let l = lfo.out * inputs.lfo_amount;
             acc = match self.mode {
                 Mode::Add => acc + l,
@@ -541,6 +704,101 @@ mod tests {
         let mut run = env.start(0.1);
         env.jump(&mut run, 0.5, 0.1);
         assert!((run.out - 0.5).abs() < 1e-5, "{}", run.out);
+    }
+
+    #[test]
+    fn a_shared_envelope_takes_over_the_held_voice_s_place() {
+        let mut e = adsr(&[(0.0, 0.0), (1.0, 1.0), (1.0, 0.5), (1.0, 0.0)], 1, 2);
+        e.flags = 2;
+        e.knobs = [128, 256, 0, 128];
+        let env = Envelope::new(&e, 0.0);
+        assert!(env.shared);
+        let mut first = env.start(0.25);
+        env.advance(&mut first, 2.0, 0.25);
+        let mut second = env.start(0.25);
+        env.follow(&mut second, &first);
+        // It plays on from where the first voice is, with its own knobs.
+        env.advance(&mut second, 0.0, 0.25);
+        assert_eq!(second.out, first.out);
+        assert_eq!(second.scales, [1.0, 2.0, 0.0, 1.0]);
+        env.advance(&mut first, 2.0, 0.25);
+        env.advance(&mut second, 2.0, 0.25);
+        assert_eq!(second.out, first.out);
+    }
+
+    /// Up to 1, down to 0.5, looping back to the top, with an arpeggiator
+    /// byte on the top point.
+    fn arpeggiated(byte: u8) -> Envelope {
+        let mut e = adsr(&[(0.0, 0.0), (1.0, 1.0), (1.0, 0.5)], -1, 2);
+        e.loop_start = 0;
+        e.arp = vec![0, byte, 0];
+        Envelope::new(&e, 0.0)
+    }
+
+    #[test]
+    fn the_arpeggiator_holds_the_ranks_that_do_not_play() {
+        let env = arpeggiated(3);
+        assert!(env.arp_on);
+        let mut runs = [env.start(1.0), env.start(1.0)];
+        for (rank, run) in runs.iter_mut().enumerate() {
+            env.rank(run, rank as i32, 2);
+        }
+        // At the top the byte moves the rank that plays on by 3 - 2: 1.
+        // Rank 0 holds there, rank 1 goes down.
+        for run in &mut runs {
+            env.advance(run, 1.5, 1.0);
+        }
+        assert_eq!(runs[0].out, 1.0);
+        assert!((runs[1].out - 0.75).abs() < 1e-6, "{}", runs[1].out);
+        // Round the loop the next top hands it back to rank 0, and rank 1
+        // holds there.
+        for run in &mut runs {
+            env.advance(run, 2.0, 1.0);
+        }
+        assert!((runs[0].out - 0.75).abs() < 1e-6, "{}", runs[0].out);
+        assert_eq!(runs[1].out, 1.0);
+        // Without a byte nothing holds.
+        let env = arpeggiated(0);
+        assert!(!env.arp_on);
+    }
+
+    #[test]
+    fn a_released_arpeggio_plays_to_its_next_point_while_keys_are_held() {
+        let env = arpeggiated(3);
+        let mut run = env.start(1.0);
+        env.rank(&mut run, 1, 2);
+        env.advance(&mut run, 1.5, 1.0);
+        // It plays rank 1, so it waits for the arpeggiator point ahead.
+        env.release(&mut run, 1.0);
+        assert_eq!(run.stage, HELD);
+        // When no key is held it lets go.
+        let mut alone = run;
+        env.rank(&mut alone, 0, 0);
+        assert_eq!(alone.stage, RELEASE);
+        // Otherwise the next arpeggiator point, round the loop, lets it go:
+        // to the loop end, the last point, so it is over.
+        env.advance(&mut run, 1.0, 1.0);
+        assert_eq!(run.stage, HELD);
+        env.advance(&mut run, 1.0, 1.0);
+        assert!(run.over());
+        assert_eq!(run.pick, -1);
+    }
+
+    #[test]
+    fn a_release_carries_the_offset_over_from_where_the_run_is() {
+        // With a sustain knob of 0.5 the hold sits at 1.0; letting go
+        // in the attack, at 0.5, the release point takes the difference.
+        let mut e = adsr(&[(0.0, 0.0), (1.0, 1.0), (1.0, 0.5), (1.0, 0.0)], 1, 2);
+        e.knobs = [128, 128, 64, 128];
+        let env = Envelope::new(&e, 0.0);
+        let mut run = env.start(1.0);
+        env.advance(&mut run, 0.5, 1.0);
+        assert!((run.out - 0.5).abs() < 1e-6, "{}", run.out);
+        env.release(&mut run, 1.0);
+        env.advance(&mut run, 0.0, 1.0);
+        assert!((run.out - 0.5).abs() < 1e-6, "{}", run.out);
+        env.advance(&mut run, 1.0, 1.0);
+        assert!(run.over() && run.out.abs() < 1e-6, "{}", run.out);
     }
 
     #[test]
