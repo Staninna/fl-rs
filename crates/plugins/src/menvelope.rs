@@ -489,6 +489,18 @@ impl LfoRun {
     pub(crate) fn over(&self) -> bool {
         self.level.over()
     }
+
+    /// Start the oscillator at `phase`, as a global LFO's voice does
+    /// (Harmor `FUN_007a34c0`).
+    pub(crate) fn set_phase(&mut self, phase: u32) {
+        self.phase = phase;
+    }
+
+    /// Move the oscillator's phase on by `by`, as Harmor's global LFO
+    /// phase articulator does on a voice's first tick.
+    pub(crate) fn shift_phase(&mut self, by: u32) {
+        self.phase = self.phase.wrapping_add(by);
+    }
 }
 
 impl Track {
@@ -976,6 +988,13 @@ impl Lfo {
         if self.frozen {
             return 0.0;
         }
+        self.pace_unfrozen(rate)
+    }
+
+    /// The same for a frozen LFO too, which Harmor moves its global LFOs
+    /// by (`0x7a3070` keeps it at +0x98, and the pace at +0xa0 is 0 when
+    /// frozen).
+    pub(crate) fn pace_unfrozen(&self, rate: f64) -> f64 {
         let knob = (f64::from(self.speed) * 1.525_878_906_25e-5) as f32;
         let speed = ((f64::from(knob) * 10_001f64.ln()).exp() - 1.0) as f32;
         let pace = f64::from(speed) * 6_871_947.673_6 * rate;
@@ -1004,9 +1023,17 @@ impl Lfo {
         self.level.release(&mut run.level, rate);
     }
 
-    /// Move a run on by `dt` ticks. The oscillator waits until the level
-    /// has left its first point, which is the LFO's delay.
-    pub(crate) fn advance(&self, run: &mut LfoRun, dt: f64, rate: f64) {
+    /// The phase a voice starts at, and where a global LFO's phase starts
+    /// (Harmor `FUN_007a33e0`: the oscillator's start plus the phase
+    /// knob).
+    pub(crate) fn start_phase(&self) -> u32 {
+        self.start
+    }
+
+    /// Move a run on by `dt` ticks with its phase `speed` times as fast
+    /// (Harmor `FUN_00897d90`: the level by `dt`, the phase by
+    /// `round(speed x turn x pace)`). This allocates nothing.
+    pub(crate) fn advance_at(&self, run: &mut LfoRun, dt: f64, speed: f64, rate: f64) {
         let waiting = |level: &Run| level.point == 0 && level.stage < OVER && level.phase < 1.0;
         let mut turn = dt;
         if waiting(&run.level) {
@@ -1014,10 +1041,16 @@ impl Lfo {
         }
         self.level.advance(&mut run.level, dt, rate);
         if !waiting(&run.level) {
-            let moved = (turn * self.pace(rate)).round_ties_even() as i64;
+            let moved = (speed * turn * self.pace(rate)).round_ties_even() as i64;
             run.phase = run.phase.wrapping_add(moved as u32);
             run.out = run.level.out * self.oscillator.at(run.phase);
         }
+    }
+
+    /// Move a run on by `dt` ticks. The oscillator waits until the level
+    /// has left its first point, which is the LFO's delay.
+    pub(crate) fn advance(&self, run: &mut LfoRun, dt: f64, rate: f64) {
+        self.advance_at(run, dt, 1.0, rate);
     }
 }
 
@@ -1373,6 +1406,30 @@ pub(crate) mod tests {
         // The pace has a ceiling, and a frozen LFO has none.
         assert_eq!(lfo([65_536, 0, 0, 0], 1, 0).pace(1.0), 805_306_368.0);
         assert_eq!(lfo([26_259, 0, 0, 0], 1 | 8, 0).pace(1.0), 0.0);
+        // Harmor's global LFOs move by the pace a frozen one had.
+        assert_eq!(
+            lfo([26_259, 0, 0, 0], 1 | 8, 0).pace_unfrozen(1.0),
+            lfo([26_259, 0, 0, 0], 1, 0).pace(1.0)
+        );
+    }
+
+    #[test]
+    fn a_speed_moves_the_phase_and_leaves_the_level() {
+        let lfo = lfo([26_259, 0, 0, 0], 1, 0);
+        let rate = CYCLE / 64.0 / lfo.pace(1.0);
+        let (mut once, mut twice, mut fast) = (lfo.start(rate), lfo.start(rate), lfo.start(rate));
+        lfo.advance(&mut once, 1.0, rate);
+        lfo.advance(&mut twice, 1.0, rate);
+        lfo.advance(&mut twice, 1.0, rate);
+        lfo.advance_at(&mut fast, 1.0, 2.0, rate);
+        assert_eq!(fast.phase, twice.phase);
+        assert_eq!(fast.level, once.level);
+        // A voice can start a run anywhere and move it on.
+        let mut run = lfo.start(rate);
+        run.set_phase(7);
+        run.shift_phase(u32::MAX);
+        assert_eq!(run.phase, 6);
+        assert_eq!(lfo.start_phase(), lfo.start(rate).phase);
     }
 
     #[test]
