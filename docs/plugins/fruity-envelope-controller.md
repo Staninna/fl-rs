@@ -161,7 +161,8 @@ drops the notes, and a loaded state starts so.
 - LollieVox & Lezina J - I'll Be Your Madonna: "Harmony Notes", one sum
   with an envelope and a key map, output 0 to a slot's parameter 0. Plays.
 - Sacco - FlashyWaves: output 0 to a ZGameEditor Visualizer parameter,
-  which the engine does not play.
+  which moves only its pictures. The engine plays the link by setting
+  nothing.
 - nucleon - Steptime: version 5, no link.
 
 Every corpus articulator runs its envelope only, no LFO, so nothing the

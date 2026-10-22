@@ -16,10 +16,12 @@
 //! buses run the global units in their order.
 //!
 //! `docs/plugins/harmor.md` section 8 has what is built, step by step.
-//! Images and resynthesis, strum, the arpeggiator points and harmonic
-//! randomness are left out, and [`Generator::fidelity`] names the first
-//! of them a state asks for. The HQ offline render (0.5 ms tick, 520
-//! partials, perfect precision) is not used: this plays what FL plays live.
+//! Images and resynthesis, strum, the arpeggiator points on an LFO's level
+//! and harmonic randomness are left out. [`Generator::fidelity`] names the
+//! first of the first three a state asks for; a state that asks for none
+//! is still approximate, as nothing is null-tested. The HQ offline render
+//! (0.5 ms tick, 520 partials, perfect precision) is not used: this plays
+//! what FL plays live.
 
 use crate::autogun_engine::rand_uniform;
 use crate::harmless::shape;
