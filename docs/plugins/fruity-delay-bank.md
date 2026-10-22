@@ -12,10 +12,10 @@ The DSP is in the DLL itself, in Delphi: nothing in FLEngine is called for
 audio. It is a big plugin. Eight units, each with two multi-stage filters of
 eight modes, a delay line with ten read and write routines, a grain window
 and an optional 2x oversampler around the lot. This map has the state, the
-parameters, the routing, the delay line, the gains, the grain and the
-filters (section 3.1). The oversampler's kernels and the grain's shape curve
-were located and not read through: section 4 lists them with their
-addresses.
+parameters, the routing, the delay line, the gains, the grain, the
+filters (section 3.1) and the oversampler (section 3.2). The grain's shape
+curve was located and not read through: section 4 lists it with its
+address.
 
 Confidence tags: `loader`, `dfm`, `corpus`, `preset`, `asm`, `inferred`.
 
@@ -46,8 +46,8 @@ Object fields:
 | 0x21c8 | i32 | host block size (Dispatcher 3) |
 | 0x21cc | f32 | tempo, 140 until `ProcessEvent(FPE_Tempo)` |
 | 0x21d0 / 0x21d4 | i32 | host sample rate / oversampling factor 1 or 2 |
-| 0x21d8, 0x21e0 | ptr | the up and the down sampler |
-| 0x21e8 | u8 | host flag bit 1 of Dispatcher 1: forces the oversampler on |
+| 0x21d8, 0x21e0 | ptr | the up and the down sampler (`TOversampler`, section 3.2) |
+| 0x21e8 | u8 | host flag bit 1 of Dispatcher 1: forces one stage on |
 
 A unit `U`:
 
@@ -335,10 +335,31 @@ form I in doubles on interleaved stereo, `y = x b0 + (((x1 b1 - y2 a2) + x2
 b2) - y1 a1)`, the output cast to float, then the eight state doubles
 flushed (`DAT_007445c8`). It is `dsp::biquad::Biquad64` to the operation.
 
+### 3.2 The oversampler (`FUN_006dff00`, `FUN_006db930`, `FUN_006db9d0`)
+
+`FUN_006dff00` runs on a state load and on Dispatcher 4 (the rate): both
+oversamplers are rebuilt (`FUN_006db830`) with `param[132]` stages, or 1
+when the host renders with its HQ flag (`0x21e8`), all zeroed
+(`FUN_006db8d0`); `0x21d4 = 1 << stages` (`FUN_006db8c0`); and the
+renderer is told the rate `0x21d0 * 0x21d4` (slot 0 of `this+0xcc`). So
+every unit works at the doubled rate: its times and stereo offset in
+frames (`FUN_006df830` reads the renderer's `+8`), its grain, its filters
+(`renderer+0x20 = 44100 / rate`) and its gain glides (`+0x34`).
+
+`Eff_Render` goes up when `param[132] > 0` (`FUN_006db930`) and runs the
+units on `n * 0x21d4` frames, then goes down into `Dest` (`FUN_006db9d0`).
+The class is WaveShaper's to the instruction, at other addresses: the SSE2
+kernels `FUN_006db400` (up) and `FUN_006db5d0` (down), picked by
+`FUN_006dbaf0` over the stubs `FUN_006db390` / `FUN_006db560`; the 13
+doubles at `0x00733fa0`, copied twice over into `0x00746578` by
+`FUN_006dba60`; and after each kernel the flush at `PTR_DAT_007350e8`
+(`DAT_007445c8`, `FUN_005e27a0`) with a count of 12, which zeroes an
+allpass output under 2^-24. `docs/plugins/fruity-waveshaper.md` section
+3.1 has the filter, and `crates/dsp/src/halfband.rs` rebuilds it, checked
+to the bit against these kernels run under unicorn
+(`tools/plugstate/halfband_emu.py`). The plugin reports no latency.
+
 ## 4. What stays unknown
-- The oversampler: class at `PTR_DAT_006db258`, constructor `FUN_006db740`,
-  setup `FUN_006db830` / `FUN_006db8d0` (0xc0 bytes a stage), kernels behind
-  `0x746568` (up) and `0x746570` (down).
 - The grain's shape curve, `FUN_005db7d0`.
 - The delay line's other nine routines (`FUN_006d9550` .. `FUN_006d9c80`, and
   their SSE twins from `FUN_006da1d0`). `Eff_Render` calls only the tenth,
@@ -355,13 +376,17 @@ flushed (`DAT_007445c8`). It is `dsp::biquad::Biquad64` to the operation.
   modes, the first echo switch, the time in seconds or beats, the grain with
   a shape of 0, the fade in after a state and the flush.
 - The filters are `Filter` (section 3.1), run a frame at a time, which is the
-  same as FL's blocks and chunks for a recursive filter; their states are
-  flushed at the end of each block rather than of each chunk, which only
-  differs for subnormals. A type above 2 is held at three stages, all the
-  filter has room for. Rust's `ln`, `exp`, `sinh` and `sin_cos` stand in for
-  Delphi's and may be an ulp off.
-- Not built, and `fidelity` says which: the 2x oversampling (the unit runs at
-  the host rate, with the same times), the grain's shape (the window stays a
+  same as FL's blocks and chunks for a recursive filter. FL's kernel flushes
+  the eight state doubles after each call with `DAT_007445c8`, which zeroes
+  what is under 2^-24 (`FUN_005e27a0`); here only subnormals are zeroed, at
+  the end of each block. That differs below -144 dB. A type above 2 is held
+  at three stages, all the filter has room for. Rust's `ln`, `exp`, `sinh`
+  and `sin_cos` stand in for Delphi's and may be an ulp off.
+- The 2x oversampling is built as section 3.2 has it, a frame at a time
+  (`dsp::halfband::Oversampler`): each stage is a recursion of its own, so
+  that is FL's block-at-a-time result to the bit. A switch other than 0 or
+  1 is turned down.
+- Not built, and `fidelity` says so: the grain's shape (the window stays a
   raised cosine).
 - The gains glide over the block the host hands over. FL glides the feedback
   gains over each chunk of the line instead, which is the same unless they
