@@ -408,7 +408,10 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
     /// that sound with the index of their glide, and the glides.
     #[allow(clippy::type_complexity)]
     fn finish(mut self) -> (Vec<(Played, Option<usize>)>, Vec<Vec<(u64, f32)>>) {
-        let notes = std::mem::take(&mut self.notes);
+        let mut notes = std::mem::take(&mut self.notes);
+        // A pattern played on its own keeps its notes in the order they
+        // were drawn. Notes that start together keep theirs.
+        notes.sort_by_key(|(_, played)| played.tick);
         let mut next = 0;
         let Some(first) = notes.first() else {
             return (self.out, self.glides);
@@ -1039,6 +1042,17 @@ mod tests {
         let (out, _) = run.finish();
         let velocities: Vec<_> = out.iter().map(|(p, _)| p.note.velocity).collect();
         assert_eq!(velocities, [30, 90]);
+    }
+
+    #[test]
+    fn notes_that_come_out_of_order_play_in_the_order_they_start() {
+        // A pattern keeps its notes in the order they were drawn, which
+        // PAT mode plays from without sorting.
+        let out = run(
+            settings(1, 1),
+            &[note(96, 24, 64, 100), note(0, 24, 60, 100)],
+        );
+        assert_eq!(out, [(0, 24, 60), (96, 24, 64)]);
     }
 
     #[test]
