@@ -374,12 +374,15 @@ struct Band {
 
 impl Band {
     /// Run both sides through the band's filters, one filter after the
-    /// other.
+    /// other. The sides take each sample together, so that their
+    /// recursions run side by side.
     fn run(&mut self, left: &mut [f32], right: &mut [f32]) {
         let filters = self.filters.iter().zip(&mut self.state);
         for (filter, [l, r]) in filters.take(self.count) {
-            l.process_block(filter, left);
-            r.process_block(filter, right);
+            for (x, y) in left.iter_mut().zip(right.iter_mut()) {
+                *x = l.process(filter, f64::from(*x)) as f32;
+                *y = r.process(filter, f64::from(*y)) as f32;
+            }
             l.flush();
             r.flush();
         }
