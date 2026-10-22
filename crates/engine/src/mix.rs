@@ -753,7 +753,7 @@ fn visit(
 ///
 /// A plugin with [`Effect::controller_outputs`], a controller such as
 /// Fruity Peak Controller, Control Surface or the Envelope, Formula,
-/// Keyboard and X-Y Controllers, is told every tick of the song by
+/// Keyboard, X-Y and X-Y-Z Controllers, is told every tick of the song by
 /// [`Mixer::tick`], which hands back the outputs that moved. An insert
 /// with such a plugin that drives a link is in the mixer whether sound
 /// reaches it or not, because a controller drives its controls in silence

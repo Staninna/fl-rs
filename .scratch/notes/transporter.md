@@ -1,11 +1,13 @@
 # Transporter: handover
 
-Stopped because the DSP is not on the machine. Transporter_x64.dll is a
+Stopped because the DSP was not on the machine. Transporter_x64.dll is a
 Delphi shell; the sound is `TransientLooper`, from
 `TransientLooper_CreateInstance` in `Shared/ildsp_x64.dll`
 (`FUN_00710800` -> `FUN_005e8910` -> `FUN_005e8890` loads `ildsp`). The
 FL install at `/root/fl-studio/drive_c/Program Files/Image-Line/FL Studio 2026`
-has no `Shared/` directory at all, so nothing of the engine could be read.
+had no `Shared/` directory. The one at `/shared/code/fl-studio-target/.../FL
+Studio 2026/Shared/ildsp_x64.dll` has it and exports
+`TransientLooper_CreateInstance`, so step 1 below can start.
 
 ## Done
 

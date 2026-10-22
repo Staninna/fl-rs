@@ -1,4 +1,30 @@
-# Handoff, 2026-10-22
+# Handoff, 2026-10-22, later
+
+Branch `claude/next-five`, PR Staninna/fl-rs#2, off `main` at `d0e458d`. fmt, clippy, the dsp, flp, model, plugins and engine lib and fixtures tests with the corpus, and `progress.py --check` pass at the head. Corpus render at `a2e02e4`: 123 of 165 projects have sound and 92 play in full (83 before). 5 reached effect slots pass through (35 before), 10 hosted slots are approximated (24), 28 generator channels are approximated (34), 15 automation targets are unsupported (16) and 0 controller links (8).
+
+The five pieces were picked from the baseline render's per-project lines, by how many projects each would finish. Each was built by its own agent in its own worktree and merged here:
+
+- Fruity X-Y-Z Controller (`xyz_controller.rs`, Gaps). It was the most-passed slot: 30 instances, all inside Patchers, in Stroll Up and the Funk, Jazz, Metal and Rock templates. Patcher's only unbuilt inner plugin is now Distructor.
+- The channel arpeggiator (`crates/engine/src/arp.rs`, `docs/arpeggiator.md`). 14 channels in 8 projects have it on, and the engine played them as held chords without counting anything missing. The per-project line now has an `unplayed arpeggiators` field, which `progress.py` reads. Left: FL's chord table (chords above 0), the MT19937 state at song start, controller links to 0x303/0x304. `notes/arpeggiator.md`.
+- Slicex: declicker, pan/volume/filter articulators, the group filter, the 352-parameter table, both decks, reverse, start delay. Approximate to Gaps; Drumloop Masher's 8 controller links apply. Left: speed and sample-start articulators, maps, cut groups, layer modes, none used in the corpus. `notes/slicex.md`.
+- `dsp::halfband`, FL's shared 2x allpass half band, bit for bit against the DLLs under unicorn (`tools/plugstate/halfband_emu.py`). WaveShaper oversamples up to 16x with its smooth modulation (now Exact); Delay Bank runs at 2x when asked. EQUO, Love Philter, Maximus and Parametric EQ 2 use the shared copy, output unchanged.
+- An empty sidechain input: FL hands the plugin nil (`FUN_0132baa0`) and Vocodex falls back on its own input, which the engine already did, so the approximation flag is gone (`docs/rec-225.md`). Vocodex's carrier noise is IPP's `ippsRandUniform_Direct_32f` from FL's seed, matched to the DLL's code.
+- A docs audit set every `docs/plugins.md` row, plugin doc and engine doc to what the code builds. It moved BooBass from Exact to Gaps (its own code names a stand-in pan law and an unbuilt HQ path), and added the 7 Band EQ to Fruity Wrapper's swap.
+
+## Next, by what the render at `a2e02e4` says
+
+- FLEX: 13 silent channels, the biggest gap left. Still waiting on the user: crack `.flexpack` or leave FLEX out.
+- Emphasis's Versatile and Loud modes (DEDZII, P.Priime, its render test, Bien Duro): they follow FL's block boundaries, which are not known here.
+- Emphasizer's LimiterLite and Transporter's TransientLooper: `Shared/ildsp_x64.dll` is in this install after all, and exports both. Their notes have the steps.
+- Distructor (2 slots, 2 inside Patchers in Bien Duro), Fruity Vocoder, Hardcore, and the silent render tests of PoiZone, Sawer, SimSynth and the Voltage Controller.
+- Eight generators ignore `set_note_pitch`, so slides and pitch clips do not bend them: GMS, MiniSynth, Kepler, Kepler Exo, Autogun, Ogun, Morphine, FL Slayer. 3x Osc ignores the channel sample the engine hands it.
+- The channel parts the engine leaves out ("Left out" in `docs/rec-channel.md`: the instrument envelopes 0x1000.., time stretch, tracking, echo delay, TS404). Count how many corpus channels turn each on, as was done for the arpeggiator, and have the render count them; it may not today.
+
+## Earlier claims that no longer hold
+
+The sections below are kept as written. Where they disagree with the tree: the Voltage Controller is not built; MiniSynth is; `notes/fruity-parametric-eq-2.md` does not exist and linear phase is built; Ogun, DX10, Frequency Splitter, Pitch Shifter and Drumpad are registered and committed, so their notes are history; the Fruity Wrapper corpus states are FL's own effects, not third-party VSTs; Patcher is built; `ildsp_x64.dll` is not missing.
+
+# Handoff, 2026-10-22, PR #1
 
 Branch `claude/fervent-carson-e2hf4w`, PR Staninna/fl-rs#1. fmt, clippy, every workspace test with the corpus and `progress.py --check` pass at the head. Corpus render at `22151e9`: 123 of 165 projects have sound and 83 play in full, up from 112 and 33 when this branch began. 1112 of 1147 reached effect slots are hosted, and 210 of 227 generator channels with notes play.
 
