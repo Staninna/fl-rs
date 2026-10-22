@@ -567,8 +567,15 @@ impl Rack<'_> {
                 (false, false) => Color32::from_rgb(58, 64, 70),
                 (false, true) => Color32::from_rgb(80, 60, 60),
             };
+            // A step is a small button, as in FL: a dark rim, and a light
+            // top edge on a lit one.
             let cell = steps.cell(step, area);
-            painter.rect_filled(cell, 2.0, fill);
+            let rim = Stroke::new(1.0, fill.lerp_to_gamma(Color32::BLACK, 0.45));
+            painter.rect(cell, 2.0, fill, rim, StrokeKind::Inside);
+            if lit(step) {
+                let shine = fill.lerp_to_gamma(Color32::WHITE, 0.5);
+                painter.hline(cell.x_range().shrink(2.0), cell.top() + 1.5, (1.0, shine));
+            }
             if self.playing == Some(u64::from(step)) {
                 let mark = cell.with_min_y(cell.bottom() - 3.0);
                 painter.rect_filled(mark, 0.0, LIT);

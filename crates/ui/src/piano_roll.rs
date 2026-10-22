@@ -72,7 +72,7 @@
 mod snap;
 
 use crate::channel_rack::{name as channel_name, select_channel, selected_channel, takes_notes};
-use crate::playlist::{Lane as Timeline, bar_step, rgb, snap};
+use crate::playlist::{Lane as Timeline, bar_step, rgb, snap, text_on};
 use crate::widgets::next_drag_id;
 use crate::{Command, Edit, Grid, NoteField, NoteId, UiState};
 use egui::{
@@ -89,7 +89,7 @@ const KEYS: f32 = 48.0;
 const KEY: f32 = 12.0;
 const RULER: f32 = 18.0;
 /// The height of the lane under the notes.
-const LANE: f32 = 56.0;
+const LANE: f32 = 80.0;
 const TOP_KEY: i32 = Pattern::TOP_KEY as i32;
 /// The key the view opens on when the channel has no notes: C5, which FL
 /// labels as the middle C.
@@ -102,9 +102,14 @@ const BEAT: f32 = 64.0;
 const BEAT_WIDTH: RangeInclusive<f32> = 8.0..=512.0;
 /// Empty bars past the end of the pattern that the view scrolls to.
 const SPARE_BARS: u64 = 4;
-/// The colour of the notes of a channel that has none.
-const PLAIN: Color32 = Color32::from_rgb(92, 112, 128);
+/// The colour of the notes of a channel that has none: a light green.
+const PLAIN: Color32 = Color32::from_rgb(130, 205, 120);
 const PLAYHEAD: Color32 = Color32::from_rgb(120, 220, 110);
+/// The rows of the black keys and of the white keys, and the white keys of
+/// the keyboard.
+const BLACK_ROW: Color32 = Color32::from_rgb(39, 45, 50);
+const WHITE_ROW: Color32 = Color32::from_rgb(48, 55, 61);
+const WHITE_KEY: Color32 = Color32::from_gray(226);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -933,12 +938,17 @@ struct Roll<'a> {
 }
 
 impl Roll<'_> {
-    /// A note's colour, which is a shade of itself for a muted note.
+    /// A note's colour, which is a shade of itself for a muted note. A
+    /// dark channel colour is lifted, so that the notes stand out from the
+    /// rows as FL's do.
     fn colour(&self, note: &Note) -> Color32 {
         let colour = if self.colours {
             group_colour(note.color())
         } else {
-            self.channel.color.map_or(PLAIN, rgb)
+            let mut colour = egui::ecolor::Hsva::from(self.channel.color.map_or(PLAIN, rgb));
+            colour.v = colour.v.max(0.8);
+            colour.s = colour.s.max(0.3);
+            colour.into()
         };
         if note.muted() {
             colour.gamma_multiply(0.3)
@@ -971,8 +981,10 @@ impl Roll<'_> {
         let (view, time, grid) = (self.view, self.view.time, self.grid);
         let visuals = ui.visuals();
         let font = FontId::proportional(10.0);
-        let line = visuals.widgets.noninteractive.bg_stroke;
-        let faint = Stroke::new(1.0, line.color.gamma_multiply(0.4));
+        // The grid is darker than the rows it lies on, a bar more than a
+        // beat.
+        let line = Stroke::new(1.0, Color32::from_rgb(24, 28, 31));
+        let faint = Stroke::new(1.0, Color32::from_rgb(33, 38, 42));
 
         let painter = ui.painter_at(ruler);
         painter.rect_filled(ruler, 0.0, visuals.faint_bg_color);
@@ -987,29 +999,33 @@ impl Roll<'_> {
         self.playhead(&painter, ruler);
 
         // The rows are lighter for the white keys, with a line under
-        // every C.
+        // every C. The keyboard is a piano's: the white keys are the full
+        // width and meet halfway along a black key, or at the line between
+        // E and F and between B and C, and the black keys are shorter.
         let painter = ui.painter_at(area);
-        painter.rect_filled(area, 0.0, visuals.extreme_bg_color);
-        let white = visuals.text_color().gamma_multiply(0.05);
+        painter.rect_filled(area, 0.0, BLACK_ROW);
         let lowest = view.key(area.bottom() - 1.0).max(0);
         let highest = view.key(area.top()).min(TOP_KEY);
         let keys = ui.painter_at(keyboard);
+        keys.rect_filled(keyboard, 0.0, WHITE_KEY);
+        let seam = Stroke::new(1.0, Color32::from_gray(150));
         for key in lowest..=highest {
             let top = view.y(key);
-            let (fill, ink) = if is_black(key) {
-                (Color32::from_gray(40), Color32::from_gray(200))
+            let row = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), top + KEY));
+            if is_black(key) {
+                keys.hline(keyboard.x_range(), top + KEY / 2.0, seam);
+                let plate = Rect::from_min_max(
+                    pos2(keyboard.left(), top + 1.0),
+                    pos2(keyboard.left() + keyboard.width() * 0.6, top + KEY - 1.0),
+                );
+                keys.rect_filled(plate, 1.0, Color32::from_gray(34));
             } else {
-                let row = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), top + KEY));
-                painter.rect_filled(row, 0.0, white);
-                (Color32::from_gray(225), Color32::from_gray(40))
-            };
-            let plate = Rect::from_min_max(
-                pos2(keyboard.left(), top + 0.5),
-                pos2(keyboard.right(), top + KEY - 0.5),
-            );
-            keys.rect_filled(plate, 0.0, fill);
+                painter.rect_filled(row, 0.0, WHITE_ROW);
+                if matches!(key.rem_euclid(12), 4 | 11) {
+                    keys.hline(keyboard.x_range(), top, seam);
+                }
+            }
             if let Some((root, scale)) = self.scale {
-                let row = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), top + KEY));
                 let class = key.rem_euclid(12);
                 if scale & (1 << class) == 0 {
                     painter.rect_filled(row, 0.0, Color32::from_black_alpha(110));
@@ -1019,11 +1035,14 @@ impl Roll<'_> {
                 }
             }
             if key % 12 == 0 {
-                painter.hline(area.x_range(), top + KEY, faint);
-                let at = pos2(plate.right() - 4.0, plate.center().y);
+                painter.hline(area.x_range(), top + KEY, line);
+                let at = pos2(keyboard.right() - 4.0, top + KEY / 2.0);
+                let ink = Color32::from_gray(60);
                 keys.text(at, Align2::RIGHT_CENTER, key_name(key), font.clone(), ink);
             }
         }
+        // The keys stop at an edge, as the rows start at one.
+        keys.vline(keyboard.right() - 0.5, keyboard.y_range(), line);
         let unit = if grid.beat as f32 * time.scale >= 12.0 {
             grid.beat
         } else {
@@ -1154,7 +1173,27 @@ impl Roll<'_> {
             if !area.intersects(rect) {
                 continue;
             }
-            painter.rect_filled(rect, 1.0, self.colour(note));
+            // As in FL a quiet note is a darker one, with its key's name on
+            // it when it is wide enough.
+            let quiet = 1.0 - f32::from(note.velocity.min(128)) / 128.0;
+            let fill = self
+                .colour(note)
+                .lerp_to_gamma(Color32::BLACK, quiet * 0.45);
+            let edge = Stroke::new(1.0, fill.lerp_to_gamma(Color32::BLACK, 0.5));
+            painter.rect(rect, 1.0, fill, edge, StrokeKind::Inside);
+            let shine = fill.lerp_to_gamma(Color32::WHITE, 0.35);
+            painter.hline(rect.x_range().shrink(1.0), rect.top() + 1.5, (1.0, shine));
+            if rect.width() >= 24.0 {
+                let at = pos2(rect.left() + 3.0, rect.center().y + 0.5);
+                let font = FontId::proportional(9.0);
+                painter.with_clip_rect(rect.intersect(area)).text(
+                    at,
+                    Align2::LEFT_CENTER,
+                    key_name(i32::from(note.key)),
+                    font,
+                    text_on(fill),
+                );
+            }
             if note.selected() {
                 let stroke = Stroke::new(1.5, strong);
                 painter.rect_stroke(rect, 1.0, stroke, StrokeKind::Inside);
