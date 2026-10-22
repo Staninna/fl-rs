@@ -4,19 +4,23 @@
 //! Usage: FL_RS_CORPUS=<FL's Data> cargo run --release -p engine --example profile -- [options] [filter]
 //!
 //!   --frames N   frames per call, as the output device asks for them (512)
+//!   --warmup N   untimed rounds between the cold round and the timed one (2)
 //!   --whole      play each song once from start to end instead of the windows
 //!   filter       keep the projects whose path contains it
 //!
 //! Each project decodes its samples and builds an engine, then plays four
 //! windows round and round: 20 s from the start, and 10 s from a quarter,
-//! a half and three quarters of the song. The first second of each window
-//! is warm-up and not timed, but for the very first call, which is
-//! reported on its own: the app pays it once, at play.
+//! a half and three quarters of the song. It plays them in rounds. The
+//! first round is cold: every call of it is timed, as the app first plays
+//! the song. The warm-up rounds are not timed. In the last round the first
+//! second of each window is warm-up and not timed either.
 //!
 //! A line per project, slowest first: how many times faster than realtime
-//! it plays, its 99th percentile and slowest call against the time a call
-//! lasts, how many calls ran over that, where in the song the slowest
-//! fell, and a hash of every sample it put out. A change that keeps the
+//! it plays in the last round, its 99th percentile and slowest call
+//! against the time a call lasts, how many calls ran over that, where in
+//! the song the slowest fell, the very first call, which the app pays once
+//! at play, how fast the cold round played and its slowest call, and a
+//! hash of every sample it put out in every round. A change that keeps the
 //! sound keeps every hash. Compare hashes taken at the same `--frames`:
 //! some plugins work once per block, and a note splits the blocks
 //! differently for a different call size, so they sound a little
@@ -80,7 +84,10 @@ impl Hash {
 struct Timing {
     name: String,
     first: Duration,
-    /// Every timed call, in order.
+    /// Every call of the cold round, and the seconds it played.
+    cold: Vec<Duration>,
+    cold_played: f64,
+    /// Every timed call of the last round, in order.
     calls: Vec<Duration>,
     /// The song second each timed call starts at.
     at: Vec<f64>,
@@ -94,16 +101,30 @@ struct Timing {
 
 struct Options {
     frames: usize,
+    warmup: usize,
     whole: bool,
     filter: String,
 }
 
-/// Play `seconds` from `start` in calls of `frames`, timing those after
-/// the warm-up.
+/// Which round a project is playing.
+#[derive(Clone, Copy, PartialEq)]
+enum Round {
+    /// The first: every call is timed.
+    Cold,
+    /// Not timed.
+    Warm,
+    /// The last: the calls after each window's warm-up are timed.
+    Timed,
+}
+
+/// Play `seconds` from `start` in calls of `frames`, timing those the
+/// round times.
+#[allow(clippy::too_many_arguments)]
 fn play(
     engine: &mut Engine,
     start: Ticks,
     seconds: f64,
+    round: Round,
     timing: &mut Timing,
     hash: &mut Hash,
     frames: usize,
@@ -127,7 +148,11 @@ fn play(
         hash.add(left, right);
         if timing.first.is_zero() {
             timing.first = took;
-        } else if done >= warm && count == frames {
+        }
+        if round == Round::Cold {
+            timing.cold.push(took);
+            timing.cold_played += count as f64 / f64::from(RATE);
+        } else if round == Round::Timed && done >= warm && count == frames {
             timing.calls.push(took);
             timing.at.push(at as f64);
             timing.played += frames as f64 / f64::from(RATE);
@@ -162,6 +187,8 @@ fn time(path: &Path, root: &Path, options: &Options) -> Option<Timing> {
     let mut timing = Timing {
         name: String::new(),
         first: Duration::ZERO,
+        cold: Vec::new(),
+        cold_played: 0.0,
         calls: Vec::new(),
         at: Vec::new(),
         played: 0.0,
@@ -187,27 +214,29 @@ fn time(path: &Path, root: &Path, options: &Options) -> Option<Timing> {
     let mut hash = Hash::new();
     engine.play();
     let frames = options.frames;
-    if options.whole {
+    let windows = if options.whole {
         let seconds = engine::song_length(&project, RATE) as f64 / f64::from(RATE);
-        play(
-            &mut engine,
-            0,
-            seconds,
-            &mut timing,
-            &mut hash,
-            frames,
-            &label,
-        );
+        vec![(0, seconds)]
     } else {
         engine.set_loop(true);
-        for (part, seconds) in WINDOWS {
-            let start = (ticks as f64 * part) as Ticks;
+        let start = |part: f64| (ticks as f64 * part) as Ticks;
+        WINDOWS
+            .map(|(part, seconds)| (start(part), seconds))
+            .to_vec()
+    };
+    let rounds = std::iter::once(Round::Cold)
+        .chain(std::iter::repeat_n(Round::Warm, options.warmup))
+        .chain(std::iter::once(Round::Timed));
+    for round in rounds {
+        for &(start, seconds) in &windows {
+            let (timing, hash) = (&mut timing, &mut hash);
             play(
                 &mut engine,
                 start,
                 seconds,
-                &mut timing,
-                &mut hash,
+                round,
+                timing,
+                hash,
                 frames,
                 &label,
             );
@@ -224,6 +253,7 @@ fn time(path: &Path, root: &Path, options: &Options) -> Option<Timing> {
 fn options() -> Options {
     let mut options = Options {
         frames: 512,
+        warmup: 2,
         whole: false,
         filter: String::new(),
     };
@@ -235,6 +265,12 @@ fn options() -> Options {
                     .next()
                     .and_then(|n| n.parse().ok())
                     .expect("--frames N")
+            }
+            "--warmup" => {
+                options.warmup = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .expect("--warmup N")
             }
             "--whole" => options.whole = true,
             _ => options.filter = arg,
@@ -284,8 +320,10 @@ fn main() {
             .map_or((0.0, Duration::ZERO), |(i, d)| (t.at[i], *d));
         let over = t.calls.iter().filter(|d| **d > budget).count();
         over_projects += usize::from(over > 0);
+        let cold = t.cold.iter().sum::<Duration>().as_secs_f64().max(1e-9);
+        let cold_worst = t.cold.iter().max().copied().unwrap_or_default();
         println!(
-            "{:>6.1}x  p99 {:>5.2} ms ({:>3.0}%)  worst {:>6.2} ms ({:>4.0}%) at {:>5.1} s  over {:>4}  first {:>6.2} ms  {:016x}  {}",
+            "{:>6.1}x  p99 {:>5.2} ms ({:>3.0}%)  worst {:>6.2} ms ({:>4.0}%) at {:>5.1} s  over {:>4}  first {:>6.2} ms  cold {:>5.1}x worst {:>6.2} ms ({:>4.0}%)  {:016x}  {}",
             t.played / total(t).as_secs_f64().max(1e-9),
             ms(p99),
             share(p99),
@@ -294,6 +332,9 @@ fn main() {
             worst_at,
             over,
             ms(t.first),
+            t.cold_played / cold,
+            ms(cold_worst),
+            share(cold_worst),
             t.hash,
             t.name,
         );
@@ -306,10 +347,11 @@ fn main() {
     }
     let all: Duration = timings.iter().map(total).sum();
     println!(
-        "{} projects at {} frames ({:.2} ms a call): {over_projects} with a call over, {:.1} s timed",
+        "{} projects at {} frames ({:.2} ms a call), {} warm-up rounds: {over_projects} with a call over, {:.1} s timed",
         timings.len(),
         options.frames,
         ms(budget),
+        options.warmup,
         all.as_secs_f64(),
     );
 }
