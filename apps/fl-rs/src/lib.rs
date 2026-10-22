@@ -184,7 +184,23 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
                 });
             }
         }
+        Edit::AddNotes {
+            channel,
+            length,
+            ref notes,
+        } => {
+            if project.channel(channel).is_some() && !notes.is_empty() {
+                let pattern = project.pattern_to_edit(pattern);
+                pattern.add_notes(channel, length, notes);
+            }
+        }
         Edit::DeleteNotes { .. }
+        | Edit::SliceNotes { .. }
+        | Edit::GlueNotes { .. }
+        | Edit::QuantizeNotes { .. }
+        | Edit::ChopNotes { .. }
+        | Edit::ArpeggiateNotes { .. }
+        | Edit::StrumNotes { .. }
         | Edit::MoveNotes { .. }
         | Edit::ResizeNotes { .. }
         | Edit::SetNotesMuted { .. }
@@ -265,6 +281,12 @@ fn edit_notes(pattern: &mut Pattern, edit: &Edit) {
         Edit::SetNotesMuted { ids, muted } => pattern.set_notes_muted(ids, *muted),
         Edit::SetNoteField { id, field, value } => pattern.set_note_field(*id, *field, *value),
         Edit::SelectNotes { ids, add } => pattern.select_notes(ids, *add),
+        Edit::SliceNotes { ids, at } => pattern.slice_notes(ids, *at),
+        Edit::GlueNotes { ids } => pattern.glue_notes(ids),
+        Edit::QuantizeNotes { ids, step, lengths } => pattern.quantize_notes(ids, *step, *lengths),
+        Edit::ChopNotes { ids, step } => pattern.chop_notes(ids, *step),
+        Edit::ArpeggiateNotes { ids, step } => pattern.arpeggiate_notes(ids, *step),
+        Edit::StrumNotes { ids, delay } => pattern.strum_notes(ids, *delay),
         _ => {}
     }
 }
