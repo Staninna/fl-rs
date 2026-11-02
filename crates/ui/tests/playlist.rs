@@ -69,7 +69,7 @@ fn fixture() -> Project {
 fn state(project: Project) -> UiState {
     UiState {
         project: Arc::new(project),
-        position: 3 * 384,
+        position: 4 * 384,
         peaks: (0.0, 0.0),
         insert_peaks: Vec::new(),
         playing: false,
@@ -184,4 +184,34 @@ fn the_arrows_move_the_selection_a_beat_or_a_track_a_press() {
         panic!("{:?}", harness.state());
     };
     assert!(*delta_ticks < 96 && 96 % *delta_ticks == 0, "{delta_ticks}");
+}
+
+#[test]
+fn ctrl_e_splits_the_selected_items_under_the_play_cursor() {
+    // The cursor is at bar 5, inside the bass and the vocal, which are
+    // selected, at the end of the first drum pattern and at the start of
+    // the second, which are selected too and stay whole.
+    let mut project = fixture();
+    for drums in &mut project.arrangements[0].items[..2] {
+        drums.flags |= PlaylistItem::SELECTED;
+    }
+    let mut harness = harness(project);
+    harness.key_press_modifiers(CTRL, egui::Key::E);
+    harness.run();
+    let split = edit(Edit::SplitItems {
+        ids: vec![2, 4],
+        at: 4 * 384,
+    });
+    assert_eq!(harness.state(), &[split]);
+
+    // Items under the cursor that are not selected stay whole.
+    let mut project = fixture();
+    for item in &mut project.arrangements[0].items {
+        item.flags = 0;
+    }
+    project.arrangements[0].items[1].flags = PlaylistItem::SELECTED;
+    let mut harness = self::harness(project);
+    harness.key_press_modifiers(CTRL, egui::Key::E);
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
 }

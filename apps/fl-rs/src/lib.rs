@@ -237,6 +237,11 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
             enabled,
         } => project.set_slot_enabled(insert, slot, enabled),
         Edit::SetSlotMix { insert, slot, mix } => project.set_slot_mix_raw(insert, slot, mix),
+        Edit::SplitItems { ref ids, at } => {
+            if let Ok(at) = i32::try_from(at) {
+                project.split_items(ids, at);
+            }
+        }
         Edit::MoveItems { .. }
         | Edit::ResizeItems { .. }
         | Edit::SetMuted { .. }

@@ -155,6 +155,14 @@ pub enum Edit {
         ids: Vec<ItemId>,
         add: bool,
     },
+    /// Cut each item that tick `at` falls inside of in two at `at`. The
+    /// first part keeps the item's ID, and the second parts go to the end
+    /// of the list in the order of `ids`, each showing its source from
+    /// where its first part stops.
+    SplitItems {
+        ids: Vec<ItemId>,
+        at: Ticks,
+    },
     /// Light or clear a step of the pattern the top bar has selected, for
     /// the channel with this index. Step 0 is the pattern's first
     /// sixteenth note.

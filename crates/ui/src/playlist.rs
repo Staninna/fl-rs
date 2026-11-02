@@ -12,6 +12,9 @@
 //! Ctrl+D lets go of them, as in FL. The left and right arrows move the
 //! selection along by the step a drag snaps to, and the up and down arrows
 //! by a track (inferred: FL's own keys for this were not looked up).
+//! Ctrl+E cuts the selected items under the play cursor in two, which is
+//! this app's key: FL cuts with its slice tool, and this playlist has no
+//! tools.
 //!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
@@ -273,6 +276,19 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();
         out.push(edit(Edit::SelectItems { ids, add: false }));
+    }
+    if pressed(ctrl, Key::E) {
+        let at = state.position;
+        let under = blocks
+            .iter()
+            .filter(|block| block.start < at && at < block.end);
+        let ids: Vec<ItemId> = under
+            .filter(|block| block.selected)
+            .map(|block| block.id)
+            .collect();
+        if !ids.is_empty() {
+            out.push(edit(Edit::SplitItems { ids, at }));
+        }
     }
     // Each press is a step for Undo of its own.
     let step = snap_step(Grid::of(&state.project), memory.scale) as i64;

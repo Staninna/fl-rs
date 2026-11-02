@@ -10,7 +10,7 @@ use flp::event::Id;
 use flp::event::layout::{InsertFlags, Levels};
 use model::{
     Arrangement, Channel, ChannelKind, Insert, Item, ItemSource, Note, Pattern, Placed,
-    PlaylistItem, Project, RecTarget,
+    PlaylistItem, Project, RecTarget, Trim,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -520,6 +520,44 @@ fn a_selection_is_no_change_to_save_or_undo() {
     assert!(app.is_modified() && !selected(&app));
     app.apply(Command::Undo);
     assert!(!app.is_modified() && selected(&app));
+    assert_eq!(places(app.project()), [(0, 1)]);
+}
+
+#[test]
+fn a_split_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("split");
+    let (mut app, path) = open_fixture(&dir);
+    let split = Edit::SplitItems {
+        ids: vec![0],
+        at: 96,
+    };
+    edit(&mut app, split, None);
+    assert_eq!(places(app.project()), [(0, 1), (96, 1)]);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+
+    // The second part shows the pattern from its second beat on.
+    let saved = fl_rs::read(&path).unwrap();
+    let items = &saved.current_arrangement().unwrap().items;
+    let parts: Vec<_> = items
+        .iter()
+        .map(|item| (item.position, item.length, item.trim()))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (0, 96, Some(Trim::Ticks { start: 0, end: 96 })),
+            (
+                96,
+                288,
+                Some(Trim::Ticks {
+                    start: 96,
+                    end: 384
+                })
+            ),
+        ]
+    );
+    app.apply(Command::Undo);
     assert_eq!(places(app.project()), [(0, 1)]);
 }
 
