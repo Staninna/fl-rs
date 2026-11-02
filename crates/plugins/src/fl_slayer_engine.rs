@@ -237,7 +237,7 @@ pub struct Voice {
     velocity: f32,
     velocity_held: f32,
     /// +0x18: cents of detune, an index into the cents table.
-    detune: i8,
+    pub detune: i8,
     /// +0x19: whether the key is down.
     held: bool,
     /// +0x1c..+0x34: the excitation envelope: its output, phase, the level
@@ -355,8 +355,19 @@ impl Held {
 /// One event, taken on the next control tick.
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
-    On { key: i32, velocity: f32, detune: i8 },
-    Off { key: i32 },
+    On {
+        key: i32,
+        velocity: f32,
+        detune: i8,
+    },
+    Off {
+        key: i32,
+    },
+    /// The note on this key now lies `detune` cents from it.
+    Pitch {
+        key: i32,
+        detune: i8,
+    },
 }
 
 /// The whole engine object.
@@ -623,6 +634,7 @@ impl Engine {
                         detune,
                     } => self.note_on(key, velocity, detune),
                     Event::Off { key } => self.note_off(key),
+                    Event::Pitch { key, detune } => self.note_pitch(key, detune),
                 }
             }
             self.pending = pending;
@@ -774,6 +786,36 @@ impl Engine {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A note's pitch has moved: the strings its note-on started take the
+    /// detune that note-on would have given them. Not the engine's own (a
+    /// VST 2 note cannot be retuned); it follows `note_on` by the Aid
+    /// mode. AutoChords pluck with no detune, so they keep theirs; in the
+    /// solo modes only the string the first key plucked has it.
+    fn note_pitch(&mut self, key: i32, detune: i8) {
+        let tones: [(i32, i8); 3] = match self.aid() {
+            0 | 3..=5 => [(key, detune); 3],
+            2 if key < 60 => [
+                (key + 12, detune),
+                (key + 17, detune.wrapping_add(5)),
+                (key + 24, detune.wrapping_add(2)),
+            ],
+            2 => [
+                (key - 12, detune),
+                (key - 5, detune.wrapping_sub(4)),
+                (key, detune.wrapping_sub(2)),
+            ],
+            _ => return,
+        };
+        for (key, detune) in tones {
+            if !(0..128).contains(&key) {
+                continue;
+            }
+            for v in self.voices.iter_mut().filter(|v| v.key() == key as i8) {
+                v.detune = detune;
+            }
         }
     }
 
@@ -1830,6 +1872,30 @@ mod tests {
         assert!((e.cents[126] * e.cents[128] - 1.0).abs() < 1e-6);
         // 1200 cents would be 2: 127 of them are 2^(127/1200).
         assert!((e.cents[254] - 2f32.powf(127.0 / 1200.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_moved_pitch_detunes_the_strings_its_note_plucked_by_the_aid_mode() {
+        let detunes = |aid: f32| {
+            let mut e = Engine::new();
+            e.params[p::AID] = aid;
+            e.note_on(48, 1.0, 0);
+            e.note_pitch(48, 10);
+            let mut on: Vec<(i8, i8)> = e
+                .voices
+                .iter()
+                .filter(|v| v.gate > 0.5)
+                .map(|v| (v.key(), v.detune))
+                .collect();
+            on.sort();
+            on
+        };
+        // None: the one string.
+        assert_eq!(detunes(0.0), [(48, 10)]);
+        // PwrChords under key 60: +12, +17 five cents up, +24 two up.
+        assert_eq!(detunes(2.0 / 5.0), [(60, 10), (65, 15), (72, 12)]);
+        // AutoChords pluck with no detune and keep it.
+        assert!(detunes(1.0 / 5.0).iter().all(|&(_, d)| d == 0));
     }
 
     #[test]
