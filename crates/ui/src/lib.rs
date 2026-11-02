@@ -214,6 +214,11 @@ pub enum Edit {
         channel: u16,
         name: String,
     },
+    /// Switch the channel on and every other off, or, when it is the one
+    /// channel on already, every channel back on.
+    SoloChannel {
+        channel: u16,
+    },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
     /// 60 is C5, and 131 is the highest. A `length` of 0 is a step, which

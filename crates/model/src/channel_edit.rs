@@ -1,4 +1,5 @@
-//! The channel rack's edits of whole channels: a channel's name.
+//! The channel rack's edits of whole channels: a channel's name, and its
+//! solo.
 //!
 //! Like the edits in `pattern.rs`, each sets a field and sees to it that
 //! the field has an event to be written in, see "Changing a project" in
@@ -74,6 +75,33 @@ impl Project {
         if let Some(at) = behind {
             let (pos, item) = (order[at].pos, Item::Field(Id::PluginName));
             order.insert(at + 1, Placed { pos, item });
+        }
+    }
+
+    /// Solo the channel, as a right click on its switch does in FL: switch
+    /// it on and every other channel off. When it is the one channel that
+    /// is on already, every channel goes back on (inferred: FL is not
+    /// known to remember which were on before the solo). A channel without
+    /// a 0 counts as on.
+    ///
+    /// Only a channel whose switch changes is set, so one that keeps its
+    /// state gets no event it did not have.
+    pub fn solo_channel(&mut self, channel: u16) {
+        let on = |c: &crate::Channel| c.enabled != Some(false);
+        let Some(soloed) = self.channels.iter().find(|c| c.index == channel) else {
+            return;
+        };
+        let others = self.channels.iter().filter(|c| c.index != channel);
+        let alone = on(soloed) && !others.clone().any(on);
+        let changes: Vec<(u16, bool)> = self
+            .channels
+            .iter()
+            .map(|c| (c.index, alone || c.index == channel, on(c)))
+            .filter(|(_, want, was)| want != was)
+            .map(|(index, want, _)| (index, want))
+            .collect();
+        for (index, enabled) in changes {
+            self.set_channel_enabled(index, enabled);
         }
     }
 }
@@ -185,6 +213,43 @@ mod tests {
         assert_eq!(project.channels[0].name, None);
         project.set_channel_name(0, "Kick");
         assert_eq!(to_flp(&project).unwrap().events, self::file().events);
+    }
+
+    fn enabled(project: &Project) -> Vec<Option<bool>> {
+        project
+            .channels
+            .iter()
+            .map(|channel| channel.enabled)
+            .collect()
+    }
+
+    #[test]
+    fn a_solo_switches_the_others_off_and_a_second_one_all_back_on() {
+        let mut project = project();
+        assert_eq!(enabled(&project), [Some(true), None, Some(false), None]);
+        // Channel 2 is off, so the solo switches it on and the others off.
+        project.solo_channel(2);
+        assert_eq!(
+            enabled(&project),
+            [Some(false), Some(false), Some(true), Some(false)]
+        );
+        let written = to_flp(&project).unwrap();
+        assert_eq!(enabled(&from_flp(&written)), enabled(&project));
+        // A soloed channel that is soloed again puts them all back on.
+        project.solo_channel(2);
+        assert_eq!(enabled(&project), [Some(true); 4]);
+
+        // A channel that is on and stays on keeps its event as it was, and
+        // one that is not there solos nothing.
+        let mut project = self::project();
+        project.solo_channel(9);
+        assert_eq!(to_flp(&project), Ok(file()));
+        project.solo_channel(0);
+        let written = to_flp(&project).unwrap();
+        assert_eq!(written.events[..8], file().events[..8]);
+        let read = from_flp(&written);
+        let off = Some(false);
+        assert_eq!(enabled(&read), [Some(true), off, off, off]);
     }
 
     #[test]

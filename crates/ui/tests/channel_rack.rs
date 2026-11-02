@@ -439,3 +439,14 @@ fn a_double_click_on_a_name_or_f2_renames_the_channel() {
     assert_eq!(harness.state().last(), Some(&named(2, "Bass line")));
     assert!(harness.query_by_role(Role::TextInput).is_none());
 }
+
+#[test]
+fn a_right_click_on_a_switch_solos_its_channel() {
+    let mut harness = harness();
+    for channel in ["Snare on", "Kick on"] {
+        let switch = harness.get_by_label(channel).rect().center();
+        right_click(&mut harness, switch);
+    }
+    let solo = |channel| edit(Edit::SoloChannel { channel });
+    assert_eq!(harness.state(), &[solo(1), solo(0)]);
+}

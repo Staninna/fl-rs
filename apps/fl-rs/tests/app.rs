@@ -583,6 +583,28 @@ fn a_channel_s_name_is_saved_reloaded_and_undone() {
     assert_eq!(name(app.project()).as_deref(), Some("Click"));
 }
 
+#[test]
+fn a_solo_is_one_undo_step() {
+    let dir = Dir::new("solo");
+    let (mut app, _) = open_fixture(&dir);
+    let enabled = |app: &App| app.project().channels[0].enabled;
+    // The one channel is on, so soloing it switches them all on: no change.
+    edit(&mut app, Edit::SoloChannel { channel: 0 }, None);
+    assert!(!app.is_modified());
+    edit(
+        &mut app,
+        Edit::SetChannelEnabled {
+            channel: 0,
+            enabled: false,
+        },
+        None,
+    );
+    edit(&mut app, Edit::SoloChannel { channel: 0 }, None);
+    assert_eq!(enabled(&app), Some(true));
+    app.apply(Command::Undo);
+    assert_eq!(enabled(&app), Some(false));
+}
+
 /// The steps of pattern 1 that are lit for channel 0.
 fn lit(project: &Project) -> Vec<usize> {
     let Some(pattern) = project.pattern(1) else {

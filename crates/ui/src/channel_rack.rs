@@ -13,7 +13,9 @@
 //! click on a name selects its channel, and the up and down arrows move
 //! the selection. A double click on a name, or F2, renames the channel:
 //! Enter and a click elsewhere take the name, and Escape leaves the old
-//! one. Shift+wheel scrolls along the steps.
+//! one. A right click on a channel's switch solos it, as in FL, and one
+//! on the switch of the channel that is soloed switches every channel back
+//! on. Shift+wheel scrolls along the steps.
 //!
 //! A sample dragged out of the browser can be dropped on the row of a
 //! sampler or an audio clip, which then plays it, or on the space under
@@ -441,7 +443,13 @@ impl Rack<'_> {
             fill,
             visuals.widgets.inactive.fg_stroke,
         );
-        if response.on_hover_text("Channel on or off").clicked() {
+        if response.secondary_clicked() {
+            out.push(edit(Edit::SoloChannel { channel: index }, None));
+        }
+        if response
+            .on_hover_text("Channel on or off. Right-click to solo")
+            .clicked()
+        {
             let enabled = !enabled;
             out.push(edit(
                 Edit::SetChannelEnabled {
