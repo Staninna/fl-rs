@@ -1,7 +1,7 @@
 //! The piano roll's tools that make notes of notes: paint, slice, glue,
 //! quantize, chop, arpeggiate, strum, snap to scale, reverse, flip and
-//! legato. Each one is a single change to a pattern, so the app's undo
-//! takes the whole of it back in one step.
+//! legato, and the paste. Each one is a single change to a pattern, so the
+//! app's undo takes the whole of it back in one step.
 //!
 //! A note goes by its place in [`Pattern::notes`], as for the other note
 //! edits, and a place that has no note, or a record FL deleted, is
@@ -321,6 +321,33 @@ impl Pattern {
         }
     }
 
+    /// Add copies of these notes, with every field kept, and make them the
+    /// selection in place of the notes that were selected: what a paste
+    /// and a duplicate do. Each goes behind the notes that start where it
+    /// does, its position and length 0 at least and its key one the piano
+    /// roll has. A deleted record among them is left out.
+    ///
+    /// A pattern whose 224 the model could not read is left as it is, as
+    /// [`Pattern::add_note`] leaves it.
+    pub fn paste_notes(&mut self, notes: &[Note]) {
+        let pasted: Vec<Note> = notes
+            .iter()
+            .filter(|note| !note.is_deleted())
+            .map(|note| Note {
+                position: note.position.max(0),
+                length: note.length.max(0),
+                key: note.key.clamp(0, Self::TOP_KEY),
+                flags: note.flags | Note::SELECTED,
+                ..*note
+            })
+            .collect();
+        if pasted.is_empty() || !self.writes_notes() {
+            return;
+        }
+        self.select_notes(&[], false);
+        self.insert_all(pasted);
+    }
+
     /// The chords among the notes: two or more of one channel that start
     /// together, each from the lowest key up.
     fn chords(&self, notes: &[usize]) -> Vec<Vec<usize>> {
@@ -636,6 +663,28 @@ mod tests {
                 (96, 12, 67)
             ]
         );
+    }
+
+    #[test]
+    fn a_paste_adds_copies_that_become_the_selection() {
+        let mut chosen = note(0, 24, 60);
+        chosen.flags |= Note::SELECTED;
+        let mut notes = pattern(&[chosen, note(96, 24, 62)]);
+        let mut copied = note(96, 48, 64);
+        (copied.velocity, copied.flags) = (30, Note::MUTED);
+        let mut gone = note(0, 1, 1);
+        (gone.tag, gone.channel) = (u16::MAX, u16::MAX);
+        notes.paste_notes(&[copied, note(-5, 12, 200), gone]);
+        assert_eq!(
+            placed(&notes),
+            [(0, 24, 60), (0, 12, 131), (96, 24, 62), (96, 48, 64)]
+        );
+        let flags: Vec<u8> = notes.notes.iter().map(|note| note.flags).collect();
+        let (on, muted) = (Note::SELECTED, Note::MUTED | Note::SELECTED);
+        assert_eq!(flags, [0, on, 0, muted]);
+        assert_eq!(notes.notes[3].velocity, 30);
+        notes.paste_notes(&[]);
+        assert_eq!(placed(&notes).len(), 4);
     }
 
     #[test]

@@ -194,6 +194,13 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
                 pattern.add_notes(channel, length, notes);
             }
         }
+        Edit::PasteNotes { ref notes } => {
+            let has = |note: &&Note| project.channel(note.channel).is_some();
+            let notes: Vec<Note> = notes.iter().filter(has).copied().collect();
+            if !notes.is_empty() {
+                project.pattern_to_edit(pattern).paste_notes(&notes);
+            }
+        }
         Edit::DeleteNotes { .. }
         | Edit::SliceNotes { .. }
         | Edit::SliceNotesAlong { .. }

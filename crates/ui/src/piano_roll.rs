@@ -57,6 +57,14 @@
 //! pointer, the wheel scrolls through the keys and Shift+wheel along the
 //! pattern.
 //!
+//! Ctrl+C copies the selection and Ctrl+X cuts it, in one undo step, and
+//! Ctrl+V pastes what they took and selects it: at the play cursor,
+//! snapped, while the pattern plays in pattern mode, and otherwise right
+//! after the span the notes cover, moved by its length rounded up to a
+//! step of the grid. The next paste goes after that one. The notes are
+//! kept in the piano roll, and the system's clipboard gets a line that
+//! says how many.
+//!
 //! The snap menu has FL's choices, which [`Snap`] explains, and every
 //! drag, click, arrow key and tool goes by it. The scale menu takes a
 //! root and a scale, and darkens the rows of the keys outside it and
@@ -85,8 +93,8 @@ use crate::playlist::{Lane as Timeline, bar_step, rgb, snap, text_on};
 use crate::widgets::next_drag_id;
 use crate::{Command, Edit, Grid, NoteField, NoteId, UiState};
 use egui::{
-    Align2, Color32, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
-    StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, CursorIcon, Event, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
+    Stroke, StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use model::{Channel, Note, Pattern};
 use snap::{Scale, Snap};
@@ -306,6 +314,9 @@ struct Memory {
     heard: bool,
     /// The tick a drag along the ruler began on.
     range: Option<u64>,
+    /// The notes Ctrl+C or Ctrl+X took, where the next paste puts them
+    /// before it moves them.
+    clipboard: Vec<Note>,
 }
 
 impl Default for Memory {
@@ -328,6 +339,7 @@ impl Default for Memory {
             pressed: None,
             heard: false,
             range: None,
+            clipboard: Vec::new(),
         }
     }
 }
@@ -607,7 +619,7 @@ fn targets(own: &[(NoteId, &Note)]) -> Vec<NoteId> {
 /// The keys the piano roll takes when the pointer is over it. This runs
 /// before the windows are drawn, and what it takes no other window sees.
 pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
-    let memory: Memory = ui
+    let mut memory: Memory = ui
         .data(|data| data.get_temp(memory_id()))
         .unwrap_or_default();
     let Some((area, frame)) = memory.area else {
@@ -644,10 +656,49 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
             }
         }
     }
+    let sixteenth = i64::from((project.header.ppq / 4).max(1));
+    if !memory.clipboard.is_empty() && clipboard_key(ui, Key::V) {
+        // While the pattern plays the notes go to the play cursor.
+        let first = memory.clipboard.iter().map(|note| note.position);
+        let first = i64::from(first.min().unwrap_or(0));
+        let shift = if state.playing && !state.song_mode {
+            snap(state.position as f32, step) - first
+        } else {
+            after(&memory.clipboard, step, sixteenth)
+        };
+        let notes = shifted(&memory.clipboard, shift, channel.index);
+        out.push(edit(
+            Edit::PasteNotes {
+                notes: notes.clone(),
+            },
+            None,
+        ));
+        memory.clipboard = notes;
+        ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
+    }
     // Without a selection the other keys are another window's.
     let ids = selected(&own);
     if ids.is_empty() {
         return;
+    }
+    let chosen: Vec<Note> = own
+        .iter()
+        .map(|(_, note)| **note)
+        .filter(Note::selected)
+        .collect();
+    let copy = clipboard_key(ui, Key::C);
+    let cut = clipboard_key(ui, Key::X);
+    if copy || cut {
+        // On the system's clipboard too, so that Ctrl+V comes back as a
+        // paste, which egui's integration sends only when the clipboard
+        // has something.
+        ui.ctx()
+            .copy_text(format!("{} notes of the fl-rs piano roll", chosen.len()));
+        memory.clipboard.clone_from(&chosen);
+        ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
+    }
+    if cut {
+        out.push(edit(Edit::DeleteNotes { ids: ids.clone() }, None));
     }
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();
@@ -681,6 +732,54 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
             out.push(edit(moved, None));
         }
     }
+}
+
+/// Whether Ctrl+C, Ctrl+X or Ctrl+V, by `key`, was pressed: as the copy,
+/// cut or paste that egui's integration makes of it, or as the key itself.
+/// Either is taken.
+fn clipboard_key(ui: &Ui, key: Key) -> bool {
+    ui.input_mut(|input| {
+        let before = input.events.len();
+        input.events.retain(|event| {
+            !matches!(
+                (event, key),
+                (Event::Copy, Key::C) | (Event::Cut, Key::X) | (Event::Paste(_), Key::V)
+            )
+        });
+        let event = input.events.len() < before;
+        input.consume_key(Modifiers::COMMAND, key) | event
+    })
+}
+
+/// How far notes move to go right after the span they cover: its length,
+/// rounded up to a whole `step`. A step without a length counts as the
+/// `sixteenth` it is drawn as.
+fn after(notes: &[Note], step: u64, sixteenth: i64) -> i64 {
+    let starts = notes.iter().map(|note| i64::from(note.position));
+    let ends = notes.iter().map(|note| {
+        let length = if note.length > 0 {
+            i64::from(note.length)
+        } else {
+            sixteenth
+        };
+        i64::from(note.position) + length
+    });
+    let span = ends.max().unwrap_or(0) - starts.min().unwrap_or(0);
+    let step = step.max(1) as i64;
+    (span.max(1) + step - 1) / step * step
+}
+
+/// Copies of the notes `shift` ticks later, for this channel.
+fn shifted(notes: &[Note], shift: i64, channel: u16) -> Vec<Note> {
+    let moved = notes.iter().map(|note| {
+        let position = (i64::from(note.position) + shift).clamp(0, i64::from(i32::MAX));
+        Note {
+            position: position as i32,
+            channel,
+            ..*note
+        }
+    });
+    moved.collect()
 }
 
 /// The row above the notes: the channel, the tools, the Tools menu, what

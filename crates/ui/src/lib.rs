@@ -29,7 +29,7 @@ mod windows;
 pub use model::NoteField;
 pub use windows::Window;
 
-use model::Project;
+use model::{Note, Project};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -306,6 +306,14 @@ pub enum Edit {
     /// End each note where the next of the notes starts that starts later.
     LegatoNotes {
         ids: Vec<NoteId>,
+    },
+    /// Add copies of these notes to the pattern the top bar has selected,
+    /// which is made when the file has none with that index, with every
+    /// field kept. They become the selection, in place of the notes that
+    /// were selected: what a paste and a duplicate do. A note for no
+    /// channel is left out.
+    PasteNotes {
+        notes: Vec<Note>,
     },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for
