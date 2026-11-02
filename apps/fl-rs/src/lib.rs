@@ -225,6 +225,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::AddSamplerChannel { ref path } => {
             project.add_sampler_channel(&stored_path(path, data_root));
         }
+        Edit::SetChannelName { channel, ref name } => project.set_channel_name(channel, name),
         Edit::SetInsertVolume { insert, volume } => project.set_insert_volume_raw(insert, volume),
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),

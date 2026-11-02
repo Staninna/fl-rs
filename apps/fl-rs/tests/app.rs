@@ -561,6 +561,28 @@ fn a_split_is_saved_reloaded_and_undone() {
     assert_eq!(places(app.project()), [(0, 1)]);
 }
 
+#[test]
+fn a_channel_s_name_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("rename");
+    let (mut app, path) = open_fixture(&dir);
+    let name = |project: &Project| project.channels[0].name.clone();
+    let rename = |name: &str| Edit::SetChannelName {
+        channel: 0,
+        name: name.to_owned(),
+    };
+    edit(&mut app, rename("Click"), None);
+    assert_eq!(name(app.project()).as_deref(), Some("Click"));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(name(&fl_rs::read(&path).unwrap()).as_deref(), Some("Click"));
+    app.apply(Command::Undo);
+    assert_eq!(name(app.project()), None);
+    // An empty name is no change.
+    edit(&mut app, rename(""), None);
+    app.apply(Command::Redo);
+    assert_eq!(name(app.project()).as_deref(), Some("Click"));
+}
+
 /// The steps of pattern 1 that are lit for channel 0.
 fn lit(project: &Project) -> Vec<usize> {
     let Some(pattern) = project.pattern(1) else {

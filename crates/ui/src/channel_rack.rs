@@ -11,7 +11,9 @@
 //! The graph button opens a lane under the rows with the velocity of each
 //! step of the selected channel, and a drag in it draws velocities. A
 //! click on a name selects its channel, and the up and down arrows move
-//! the selection. Shift+wheel scrolls along the steps.
+//! the selection. A double click on a name, or F2, renames the channel:
+//! Enter and a click elsewhere take the name, and Escape leaves the old
+//! one. Shift+wheel scrolls along the steps.
 //!
 //! A sample dragged out of the browser can be dropped on the row of a
 //! sampler or an audio clip, which then plays it, or on the space under
@@ -69,6 +71,43 @@ struct Memory {
     /// drawn before the rows.
     steps_x: Option<f32>,
     paint: Option<Paint>,
+    rename: Option<Rename>,
+}
+
+/// A name that is being typed.
+#[derive(Clone)]
+struct Rename {
+    channel: u16,
+    text: String,
+    /// Whether the field has asked for the keyboard, which it does once.
+    focused: bool,
+}
+
+impl Rename {
+    /// A field that starts from the channel's own name, empty when it has
+    /// none.
+    fn of(channel: &Channel) -> Self {
+        Rename {
+            channel: channel.index,
+            text: channel.name.clone().unwrap_or_default(),
+            focused: false,
+        }
+    }
+}
+
+/// Send the name that was typed, unless it is empty or the one the
+/// channel has.
+fn take_name(project: &Project, typed: &Rename, out: &mut Vec<Command>) {
+    let channel = project.channel(typed.channel);
+    let own = channel.and_then(|channel| channel.name.as_deref());
+    let name = typed.text.trim();
+    if !name.is_empty() && name != own.unwrap_or_default() {
+        let named = Edit::SetChannelName {
+            channel: typed.channel,
+            name: name.to_owned(),
+        };
+        out.push(edit(named, None));
+    }
 }
 
 /// A drag across steps, or across the velocity lane.
@@ -259,6 +298,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let is_selected = |channel: &Channel| Some(channel.index) == memory.selected;
     let mut selected = project.channels.iter().position(is_selected).unwrap_or(0);
     let mut moved = false;
+    let mut rename = false;
     if ui.memory(|egui| egui.focused().is_none()) {
         let pressed = |key| ui.input_mut(|input| input.consume_key(Modifiers::NONE, key));
         if pressed(Key::ArrowUp) && selected > 0 {
@@ -267,8 +307,15 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         if pressed(Key::ArrowDown) && selected + 1 < project.channels.len() {
             (selected, moved) = (selected + 1, true);
         }
+        rename = pressed(Key::F2);
     }
     memory.selected = Some(project.channels[selected].index);
+    if rename {
+        memory.rename = Some(Rename::of(&project.channels[selected]));
+    }
+    memory
+        .rename
+        .take_if(|rename| project.channel(rename.channel).is_none());
 
     let whole = ui.available_rect_before_wrap();
     let mut steps = Steps::of(project, pattern);
@@ -305,7 +352,8 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             for (place, channel) in project.channels.iter().enumerate() {
                 let row = ui.horizontal(|ui| {
                     let selected = place == selected;
-                    if rack.controls(ui, channel, selected, moved && selected, out) {
+                    let (scroll_to, rename) = (moved && selected, &mut memory.rename);
+                    if rack.controls(ui, channel, selected, scroll_to, rename, out) {
                         memory.selected = Some(channel.index);
                     }
                     let size = vec2(ui.available_width().max(STEP), ROW);
@@ -371,6 +419,7 @@ impl Rack<'_> {
         channel: &Channel,
         selected: bool,
         scroll_to: bool,
+        rename: &mut Option<Rename>,
         out: &mut Vec<Command>,
     ) -> bool {
         let index = channel.index;
@@ -490,7 +539,24 @@ impl Rack<'_> {
         }
         response.on_hover_text("The mixer insert the channel plays into. Drag to change it");
 
-        let (button, response) = ui.allocate_exact_size(vec2(NAME, ROW - 2.0), Sense::click());
+        let size = vec2(NAME, ROW - 2.0);
+        if let Some(typed) = rename.as_mut().filter(|typed| typed.channel == index) {
+            let field = egui::TextEdit::singleline(&mut typed.text)
+                .font(FontId::proportional(11.0))
+                .margin(vec2(4.0, 1.0));
+            let response = ui.add_sized(size, field);
+            if !std::mem::replace(&mut typed.focused, true) {
+                response.request_focus();
+            }
+            if response.lost_focus() {
+                if !ui.input(|input| input.key_pressed(Key::Escape)) {
+                    take_name(self.project, typed, out);
+                }
+                *rename = None;
+            }
+            return false;
+        }
+        let (button, response) = ui.allocate_exact_size(size, Sense::click());
         response.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, &name));
         let visuals = ui.visuals();
         let plain = visuals.widgets.inactive.bg_fill;
@@ -520,6 +586,14 @@ impl Rack<'_> {
         }
         if scroll_to {
             response.scroll_to_me(None);
+        }
+        if response.double_clicked() {
+            // A field that has not seen the click yet will not be drawn to
+            // see it.
+            if let Some(typed) = rename {
+                take_name(self.project, typed, out);
+            }
+            *rename = Some(Rename::of(channel));
         }
         response.clicked()
     }
