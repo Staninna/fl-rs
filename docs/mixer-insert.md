@@ -182,7 +182,11 @@ So the frequency runs from 10 Hz at 0 to 16 kHz at 65536, through 90 Hz,
 `0x127b4a8` (10.0). The gain's range is that of the mixer form's sliders,
 `Min = -1800, Max = 1800` on `MixEQLevel1Slider`..`3Slider`, whose `Tag`
 is the control number; frequency and width are wheels with `Max = 65536`.
-No clamp on the gain was found in the set path. Read.
+No clamp on the gain was found in the set path. Read. The engine holds
+the three raw values to these ranges all the same, before it works the
+filter out, so that a value from a broken file at the end of an i32
+cannot give an infinite level, or a shelf the square root of a negative
+number. That clamp is fl-rs's, and changes nothing inside the ranges.
 
 `*0x193fab0` is set to `sample_rate / 5` at `0x12c6b98`: a band whose gain
 goes to 0, or whose frequency or width moves while its gain is 0, runs on

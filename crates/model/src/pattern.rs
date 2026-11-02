@@ -132,6 +132,11 @@ fn step_ticks(ppq: u16) -> i64 {
     i64::from((ppq / 4).max(1))
 }
 
+/// The most entries [`Pattern::steps`] gives, 4096 bars of 16 steps. A
+/// note in a file can sit at tick 2^31 - 1, which at a PPQ below 8 would
+/// be 2^31 steps, 2 GB for one call. This bound is fl-rs's, not FL's.
+const MAX_STEPS: usize = 1 << 16;
+
 /// The step sequencer, which is a view of the pattern's notes. This is
 /// what `FUN_012d3e60` and `FUN_012d4140` of `docs/records-224-233.md` do.
 ///
@@ -144,11 +149,12 @@ impl Pattern {
     /// One entry per step, lit or not, up to the step of the pattern's
     /// last note. That note may be another channel's, so every channel of
     /// a pattern gives as many entries. A pattern without notes gives none.
+    /// A note past step 65535 counts as nothing here (see [`MAX_STEPS`]).
     pub fn steps(&self, channel: u16, ppq: u16) -> Vec<bool> {
         let step = step_ticks(ppq);
         let of = |note: &layout::Note| {
             let position = usize::try_from(note.position).ok()?;
-            Some(position / step as usize)
+            Some(position / step as usize).filter(|&s| s < MAX_STEPS)
         };
         let placed = || self.notes.iter().filter(|note| !note.is_deleted());
         let count = placed().filter_map(of).max().map_or(0, |last| last + 1);
@@ -912,6 +918,17 @@ mod tests {
         assert_eq!(lit(&pattern, 1), [4]);
         // A step at PPQ 48 is 12 ticks.
         assert_eq!(pattern.steps(0, 48).len(), 25);
+    }
+
+    #[test]
+    fn a_note_at_the_end_of_time_asks_for_no_2_gb_of_steps() {
+        let mut pattern = Pattern::default();
+        pattern.set_step(0, 2, true, PPQ);
+        pattern.notes.push(note(0, i32::MAX, 0));
+        // At PPQ 1 a step is a tick, so the last note would be step
+        // 2^31 - 1. It is left out, and the step note at tick 48 is last.
+        assert_eq!(pattern.steps(0, 1).len(), 49);
+        assert_eq!(lit(&pattern, 0), [2]);
     }
 
     #[test]

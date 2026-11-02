@@ -216,9 +216,13 @@ impl Engine {
         self.voices.push(voice);
     }
 
-    /// End every voice where it is.
-    pub(crate) fn end_voices(&mut self) {
-        self.voices.clear();
+    /// Let go of every voice: each fades out over `frames` output samples
+    /// ([`Voice::release`]). Like [`Engine::process`], this is for an
+    /// audio callback.
+    pub(crate) fn release_voices(&mut self, frames: usize) {
+        for voice in &mut self.voices {
+            voice.release(frames);
+        }
     }
 
     /// Hand a generator a signal now, outside the song's cues.
