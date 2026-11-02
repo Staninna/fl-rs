@@ -1,0 +1,103 @@
+# The plugin bench's baseline. Written by: cargo run --release -p plugins --example bench -- --write crates/plugins/bench.tsv
+# kind	name	cost in reference units	ns per frame	times realtime	sound
+effect	Control Surface	0.0015	0.1	370919.9	sound
+effect	Edison	0.0015	0.1	373831.8	sound
+effect	Effector	0.1536	6.3	3602.7	sound
+effect	Emphasis	15.0422	616.5	36.8	sound
+effect	Emphasizer	0.0015	0.1	366300.4	sound
+effect	EQUO	3.2472	133.3	170.1	sound
+effect	Frequency Shifter	1.8504	75.8	299.0	sound
+effect	Frequency Splitter	1.3571	55.6	407.8	sound
+effect	Fruity 7 Band EQ	0.0017	0.1	331235.5	sound
+effect	Fruity Balance	0.0018	0.1	308832.6	sound
+effect	Fruity Bass Boost	0.1857	7.6	2979.8	sound
+effect	Fruity Blood Overdrive	0.7489	30.7	739.5	sound
+effect	Fruity Center	0.2023	8.3	2731.7	sound
+effect	Fruity Chorus	0.4662	19.3	1175.4	sound
+effect	Fruity Compressor	0.5885	24.2	938.2	sound
+effect	Fruity Convolver	0.0015	0.1	357909.8	sound
+effect	Fruity dB Meter	0.0015	0.1	368595.7	sound
+effect	Fruity Delay	0.0845	3.5	6541.2	sound
+effect	Fruity Delay 2	0.4082	16.8	1353.0	sound
+effect	Fruity Delay 3	2.5958	106.7	212.5	sound
+effect	Fruity Delay Bank	0.6622	27.2	835.1	sound
+effect	Fruity Fast Dist	0.2482	10.2	2228.0	sound
+effect	Fruity Fast LP	0.0016	0.1	338409.5	sound
+effect	Fruity Filter	0.3685	15.1	1499.7	sound
+effect	Fruity Flanger	0.2035	8.3	2719.8	sound
+effect	Fruity Flangus	1.3077	53.6	423.4	sound
+effect	Fruity Formula Controller	0.0018	0.1	309597.5	sound
+effect	Fruity Free Filter	0.3398	15.7	1447.7	sound
+effect	Fruity HTML NoteBook	0.0015	0.1	366032.2	sound
+effect	Fruity Limiter	0.8227	33.7	672.4	sound
+effect	Fruity Love Philter	1.2876	52.8	429.5	sound
+effect	Fruity Multiband Compressor	2.8324	116.6	194.4	sound
+effect	Fruity Mute 2	0.0018	0.1	311720.7	sound
+effect	Fruity NoteBook	0.0015	0.1	369822.5	sound
+effect	Fruity NoteBook 2	0.0015	0.1	370096.2	sound
+effect	Fruity PanOMatic	0.0020	0.1	275254.6	sound
+effect	Fruity Parametric EQ	0.0017	0.1	324675.3	sound
+effect	Fruity Parametric EQ 2	0.0022	0.1	248942.0	sound
+effect	Fruity Peak Controller	0.0025	0.1	222469.4	sound
+effect	Fruity Phase Inverter	0.0032	0.1	173641.3	sound
+effect	Fruity Phaser	0.7645	31.3	724.2	sound
+effect	Fruity Reeverb	0.8862	36.3	624.4	sound
+effect	Fruity Reeverb 2	1.4799	60.6	374.2	sound
+effect	Fruity Send	0.0016	0.1	348310.7	sound
+effect	Fruity Soft Clipper	0.0528	2.2	10477.1	sound
+effect	Fruity Squeeze	0.1976	8.1	2800.2	sound
+effect	Fruity Stereo Enhancer	0.0017	0.1	297707.7	sound
+effect	Fruity Stereo Shaper	0.0023	0.1	227376.1	sound
+effect	Fruity WaveShaper	0.5609	25.0	907.5	sound
+effect	Fruity Wrapper	0.0015	0.1	369549.2	sound
+effect	Fruity X-Y Controller	0.0044	0.2	126582.3	sound
+effect	Fruity X-Y-Z Controller	0.0035	0.1	158730.2	sound
+effect	Gross Beat	0.5154	21.1	1074.2	sound
+effect	Hyper Chorus	2.2369	91.8	247.0	sound
+effect	Low Lifter	9.2472	379.7	59.7	sound
+effect	Luxeverb	11.9656	491.8	46.1	sound
+effect	Maximus	6.5795	309.6	73.2	sound
+effect	Pitch Shifter	5.0367	206.8	109.6	sound
+effect	Pitcher	10.3138	423.0	53.6	sound
+effect	Razer Chroma	0.0015	0.1	373552.5	sound
+effect	Soundgoodizer	19.7123	807.4	28.1	sound
+effect	Spreader	1.0851	44.5	509.9	sound
+effect	Transient Processor	0.7368	30.2	750.3	sound
+effect	Vintage Chorus	0.8932	36.6	619.2	sound
+effect	Vintage Phaser	15.0739	617.6	36.7	sound
+effect	Vocodex	101.8383	4260.9	5.3	sound
+effect	Wave Candy	0.0015	0.1	370782.4	sound
+effect	ZGameEditor Visualizer	0.0015	0.1	371747.2	sound
+generator	3x Osc	1.6205	66.4	341.3	sound
+generator	Autogun	16.7829	688.7	32.9	sound
+generator	BassDrum	1.5426	63.2	358.8	sound
+generator	BeepMap	0.0020	0.1	276625.2	silent
+generator	BooBass	0.0018	0.1	307125.3	silent
+generator	DirectWave	0.0047	0.2	117757.9	silent
+generator	Drumaxx	5.0992	208.9	108.6	sound
+generator	Drumpad	51.7357	2123.1	10.7	sound
+generator	FL Keys	0.0018	0.1	307503.1	silent
+generator	FL Slayer	4.7208	193.5	117.2	sound
+generator	FPC	0.0018	0.1	306748.5	silent
+generator	Fruit Kick	2.3525	96.4	235.2	sound
+generator	Fruity DrumSynth Live	0.7101	29.1	779.3	sound
+generator	Fruity DX10	0.8110	33.2	682.8	sound
+generator	Fruity Envelope Controller	0.0022	0.1	247831.5	silent
+generator	Fruity Granulizer	0.0036	0.1	155569.4	silent
+generator	Fruity Keyboard Controller	0.0023	0.1	240731.8	silent
+generator	Fruity Slicer	0.0018	0.1	306091.2	silent
+generator	Fruity Slicer 2	0.0018	0.1	309501.7	silent
+generator	GMS	12.3945	508.1	44.6	silent
+generator	Harmless	6.2795	257.4	88.1	sound
+generator	Harmor	7.2166	296.0	76.6	sound
+generator	Kepler	19.5521	801.7	28.3	sound
+generator	Kepler Exo	19.4634	798.1	28.4	sound
+generator	MiniSynth	0.0198	0.8	27905.7	silent
+generator	Morphine	5.8764	241.0	94.1	silent
+generator	Ogun	20.3799	837.5	27.1	sound
+generator	Sakura	4.4736	183.6	123.5	sound
+generator	Slicex	0.0027	0.1	207813.8	silent
+generator	Sytrus	1.5215	62.4	363.5	sound
+generator	Wave Traveller	0.0018	0.1	300842.4	silent
+effect	Patcher	panics
+generator	Patcher	panics

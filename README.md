@@ -137,6 +137,16 @@ The README's screenshots are written by an ignored test, from FL's Future House 
 
     FL_RS_CORPUS="<FL Studio>/Data" cargo test -p ui --test screenshots -- --ignored
 
+The plugin bench times every built effect and generator with no FL files: from its default state, at 44100 Hz in calls of 512 frames, an effect on a fixed signal of noise and sines and a generator on a fixed pattern of notes and chords. It prints a line per plugin, how many times faster than realtime it plays, nanoseconds per frame and its cost against a reference workload it times right before, then the same as tab-separated `bench` lines. It takes about ten seconds in release:
+
+    cargo run --release -p plugins --example bench
+
+CI runs it with `--check crates/plugins/bench.tsv` and fails where a plugin costs more than twice its baseline (plus 0.05 reference units, so the plugins that do next to nothing do not fail on noise), or panics where it did not. A plugin over is timed twice more before it fails. Costs are relative to the reference, so the baseline holds across machines, if roughly. After a change that is meant to make a plugin slower or faster, or adds one, write the baseline again on a quiet machine and commit it:
+
+    cargo run --release -p plugins --example bench -- --write crates/plugins/bench.tsv
+
+Plugins that sound only with a file of FL's play silent here, and the line says so; the time is still that of their silent path. Patcher panics with no state and is listed as skipped.
+
 The corpus render plays every shipped project offline and prints how many have sound, which generators stay silent and which effects are passed through. It takes about three minutes in release:
 
     cargo test --release -p engine --test corpus -- --nocapture

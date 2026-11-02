@@ -2113,6 +2113,7 @@ version = "0.1.0"
 dependencies = [
  "dsp",
  "miniz_oxide 0.9.1",
+ "no_denormals",
  "wavicle",
 ]
 
