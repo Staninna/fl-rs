@@ -34,6 +34,19 @@
 //! name. After them each plugin comes again as tab-separated fields after
 //! `bench`, the baseline's format.
 //!
+//! The first call of a plugin built fresh is timed apart, as the cold
+//! column: the call of the untimed round that comes first, after the
+//! plugin is told the rate, the tempo and the PPQ as the engine tells it
+//! at load. For a generator it is the block of the pattern's first note
+//! and chord, so it holds their note-ons too. It is what pressing play
+//! costs when a plugin leaves setup to its first call: tables, buffers,
+//! filter designs, statics touched for the first time. It is one call and
+//! moves with the machine, so the line gives it in nanoseconds and as a
+//! share of the time a call of 512 frames plays, and the check leaves it
+//! out. Statics are built once a process, so a plugin that shares them
+//! with one timed before it (Harmor's Maximus, a Patcher's insides) finds
+//! them built.
+//!
 //! With `--check`, a plugin whose cost is over TOLERANCE times its
 //! baseline plus SLACK is timed again, up to RETRIES times, and the run
 //! fails when it stays over. A plugin more than TOLERANCE times faster
@@ -272,17 +285,39 @@ impl Subject {
 /// the sum of each call's fastest of `rounds`. A call that the system
 /// stopped to run something else is slow in one round and not in the
 /// others, so a busy machine moves this far less than the fastest round.
-fn time(subject: &mut Subject, input: &(Vec<f32>, Vec<f32>), rounds: usize) -> (Duration, f32) {
+///
+/// The first call of the untimed round is the subject's first call ever,
+/// when it is built fresh: that is the cold time.
+fn time(subject: &mut Subject, input: &(Vec<f32>, Vec<f32>), rounds: usize) -> Times {
     let mut ticks = 0;
     let mut best = vec![Duration::MAX; input.0.len().div_ceil(BLOCK)];
     subject.round(input, &mut ticks, &mut best);
+    let cold = best[0];
     best.fill(Duration::MAX);
     let mut peak = 0.0f32;
     for _ in 0..rounds {
         peak = peak.max(subject.round(input, &mut ticks, &mut best));
     }
-    (best.iter().sum(), peak)
+    Times {
+        warm: best.iter().sum(),
+        cold,
+        peak,
+    }
 }
+
+/// What [`time`] measures.
+struct Times {
+    /// The sum of each call's fastest over the timed rounds.
+    warm: Duration,
+    /// The first call.
+    cold: Duration,
+    /// The loudest sample of the timed rounds.
+    peak: f32,
+}
+
+/// The time a call of `BLOCK` frames plays, in nanoseconds: what a call
+/// must take less than to keep up.
+const BUDGET_NS: f64 = BLOCK as f64 / RATE as f64 * 1e9;
 
 struct Options {
     seconds: usize,
@@ -323,11 +358,18 @@ struct Timed {
     realtime: f64,
     cost: f64,
     silent: bool,
+    /// The first call of the plugin built fresh, in nanoseconds.
+    cold_ns: f64,
 }
 
 impl Timed {
     fn key(&self) -> String {
         format!("{}\t{}", self.kind.word(), self.name)
+    }
+
+    /// The first call as a share of the time it plays, in percent.
+    fn cold_share(&self) -> f64 {
+        self.cold_ns / BUDGET_NS * 100.0
     }
 }
 
@@ -386,18 +428,19 @@ impl Bench {
         let mut reference = Subject::Reference(Reference {
             state: [[0.0; 2]; 8],
         });
-        (self.reference, _) = time(&mut reference, &self.input, self.rounds);
+        self.reference = time(&mut reference, &self.input, self.rounds).warm;
     }
 
     /// Times one plugin; `None` when it panics.
     fn one(&mut self, kind: Kind, name: &'static str) -> Option<Timed> {
         self.reference();
         let (input, rounds) = (&self.input, self.rounds);
-        let (took, peak) = catch_unwind(AssertUnwindSafe(|| {
+        let times = catch_unwind(AssertUnwindSafe(|| {
             let mut subject = make(kind, name);
             time(&mut subject, input, rounds)
         }))
         .ok()?;
+        let (took, peak) = (times.warm, times.peak);
         let frames = self.frames() as f64;
         Some(Timed {
             kind,
@@ -406,16 +449,19 @@ impl Bench {
             realtime: frames / RATE as f64 / took.as_secs_f64(),
             cost: took.as_secs_f64() / self.reference.as_secs_f64(),
             silent: peak == 0.0,
+            cold_ns: times.cold.as_nanos() as f64,
         })
     }
 }
 
 fn line(timed: &Timed) -> String {
     format!(
-        "{:>9.1}x {:>9.1} ns/frame {:>8.3} ref  {:<9} {}{}",
+        "{:>9.1}x {:>9.1} ns/frame {:>8.3} ref {:>10.0} ns {:>6.1}% cold  {:<9} {}{}",
         timed.realtime,
         timed.ns_per_frame,
         timed.cost,
+        timed.cold_ns,
+        timed.cold_share(),
         timed.kind.word(),
         timed.name,
         if timed.silent { "  (silent)" } else { "" },
@@ -464,7 +510,12 @@ fn retry(bench: &mut Bench, timed: &mut [Timed], base: &BTreeMap<String, Option<
             };
             println!("again: {}", line(&again));
             if again.cost < entry.cost {
-                *entry = again;
+                // The first time is the cold one: the plugin's statics
+                // are built by then.
+                *entry = Timed {
+                    cold_ns: entry.cold_ns,
+                    ..again
+                };
             }
         }
     }
@@ -476,12 +527,14 @@ const RETRIES: usize = 2;
 
 fn tsv(timed: &Timed) -> String {
     format!(
-        "{}\t{:.4}\t{:.1}\t{:.1}\t{}",
+        "{}\t{:.4}\t{:.1}\t{:.1}\t{}\t{:.0}\t{:.1}",
         timed.key(),
         timed.cost,
         timed.ns_per_frame,
         timed.realtime,
         if timed.silent { "silent" } else { "sound" },
+        timed.cold_ns,
+        timed.cold_share(),
     )
 }
 
@@ -492,7 +545,8 @@ const WRITE: &str =
     "cargo run --release -p plugins --example bench -- --write crates/plugins/bench.tsv";
 
 /// The baseline's costs by kind and name; `None` for a plugin that
-/// panicked when it was written.
+/// panicked when it was written. Only the cost is read: the columns after
+/// it, the cold ones among them, are there for a reader.
 fn baseline(text: &str) -> BTreeMap<String, Option<f64>> {
     let rows = text.lines().filter(|line| !line.starts_with('#'));
     rows.filter_map(|line| {
@@ -581,6 +635,26 @@ fn check(
     slower.is_empty() && broken.is_empty()
 }
 
+/// The plugins whose first call takes longest, the ones to look at for
+/// setup left to the first call.
+fn coldest(timed: &[Timed]) {
+    let mut by_cold: Vec<&Timed> = timed.iter().collect();
+    by_cold.sort_by(|a, b| b.cold_ns.total_cmp(&a.cold_ns));
+    for timed in by_cold.iter().take(COLDEST) {
+        println!(
+            "cold: {:>6.1}% {} {}, {:.0} ns, warm {:.1}% a call",
+            timed.cold_share(),
+            timed.kind.word(),
+            timed.name,
+            timed.cold_ns,
+            timed.ns_per_frame * BLOCK as f64 / BUDGET_NS * 100.0,
+        );
+    }
+}
+
+/// How many plugins [`coldest`] lists.
+const COLDEST: usize = 15;
+
 fn main() -> ExitCode {
     let options = options();
     // A plugin that panics is listed and skipped; one line says why.
@@ -608,6 +682,7 @@ fn main() -> ExitCode {
     for timed in &timed {
         println!("bench\t{}", tsv(timed));
     }
+    coldest(&timed);
     let silent = timed.iter().filter(|timed| timed.silent).count();
     println!(
         "{} plugins timed at {RATE} Hz in calls of {BLOCK} frames, {silent} of them silent on their default state.",
@@ -622,7 +697,9 @@ fn main() -> ExitCode {
     if let Some(path) = &options.write {
         let mut text = format!(
             "# The plugin bench's baseline. Written by: {WRITE}\n\
-             # kind\tname\tcost in reference units\tns per frame\ttimes realtime\tsound\n",
+             # kind\tname\tcost in reference units\tns per frame\ttimes realtime\tsound\t\
+             first call ns\tfirst call % of a {BLOCK}-frame call's time\n\
+             # Only the cost is checked. The first call is one call, too noisy to check.\n",
         );
         for timed in &timed {
             text.push_str(&tsv(timed));
