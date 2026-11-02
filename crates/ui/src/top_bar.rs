@@ -1,10 +1,32 @@
 //! The bar across the top: the menu, the transport with the pattern that
 //! plays in pattern mode, the tempo and position readouts, the master's
 //! peak meter and the project's title.
+//!
+//! A drag up or down on the tempo changes it, a BPM a point and a tenth of
+//! that with Ctrl held, and a double click on it opens a field to type it
+//! in. Enter and a click elsewhere take what was typed, and Escape leaves
+//! the tempo as it was.
 
-use crate::{Command, Dialog, Grid, UiState};
+use crate::widgets::drag_value;
+use crate::{Command, Dialog, Edit, Grid, UiState};
 use craft_ui::buttons::{ButtonVisuals, IconButton, IconButtonStyle};
-use egui::{Align, Color32, Layout, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{
+    Align, Color32, FontId, Key, Layout, Rect, Response, RichText, Sense, Shape, Stroke, Ui, Vec2,
+    WidgetInfo, pos2, vec2,
+};
+use model::TEMPO_MILLI;
+
+/// How many points of drag take the tempo through FL's whole 10 to 522
+/// BPM: a BPM a point.
+const TEMPO_TRAVEL: f32 = 512.0;
+
+/// A tempo that is being typed.
+#[derive(Clone)]
+struct TypedTempo {
+    text: String,
+    /// Whether the field has asked for the keyboard, which it does once.
+    focused: bool,
+}
 
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     ui.horizontal(|ui| {
@@ -30,11 +52,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         transport(ui, state, out);
         ui.separator();
 
-        let tempo = match state.project.tempo() {
-            Some(bpm) => format!("{bpm:.3}"),
-            None => "---.---".to_owned(),
-        };
-        readout(ui, &tempo, "BPM");
+        tempo(ui, state, out);
         let (bar, beat, tick) = Grid::of(&state.project).bar_beat_tick(state.position);
         readout(ui, &format!("{bar:03}:{beat:02}:{tick:03}"), "B:B:T");
         ui.separator();
@@ -217,8 +235,82 @@ fn icon_style(visuals: &egui::Visuals) -> IconButtonStyle {
     }
 }
 
+/// The tempo's readout, which a drag changes and a double click opens a
+/// field on. A project without a tempo shows dashes and takes no edit.
+fn tempo(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    let id = egui::Id::new("fl-rs tempo");
+    let bpm = state.project.tempo();
+    let milli = bpm.map(|bpm| (bpm * 1000.0).round() as u32);
+    let typed: Option<TypedTempo> = ui.data(|data| data.get_temp(id));
+    let set = |milli: u32, drag_id: Option<u64>| Command::Edit {
+        edit: Edit::SetTempo { milli },
+        drag_id,
+    };
+    if let Some(mut field) = typed {
+        let text = egui::TextEdit::singleline(&mut field.text)
+            .font(FontId::monospace(12.0))
+            .desired_width(56.0);
+        let response = ui.add(text);
+        if !std::mem::replace(&mut field.focused, true) {
+            response.request_focus();
+        }
+        ui.weak("BPM");
+        if response.lost_focus() {
+            let escaped = ui.input(|input| input.key_pressed(Key::Escape));
+            let typed = parse_tempo(&field.text).filter(|_| !escaped);
+            if let Some(typed) = typed.filter(|typed| Some(*typed) != milli) {
+                out.push(set(typed, None));
+            }
+            ui.data_mut(|data| data.remove::<TypedTempo>(id));
+        } else {
+            ui.data_mut(|data| data.insert_temp(id, field));
+        }
+        return;
+    }
+
+    let text = match bpm {
+        Some(bpm) => format!("{bpm:.3}"),
+        None => "---.---".to_owned(),
+    };
+    let plate = readout(ui, &text, "BPM");
+    let (Some(bpm), Some(milli)) = (bpm, milli) else {
+        return;
+    };
+    let response = ui.interact(plate.rect, id.with("drag"), Sense::click_and_drag());
+    response.widget_info(|| WidgetInfo::slider(true, bpm, "Tempo"));
+    let range = *TEMPO_MILLI.start() as i32..=*TEMPO_MILLI.end() as i32;
+    if response.double_clicked() {
+        let field = TypedTempo {
+            text: format!("{bpm:.3}"),
+            focused: false,
+        };
+        ui.data_mut(|data| data.insert_temp(id, field));
+    } else if let Some((milli, drag)) = drag_value(ui, &response, milli as i32, range, TEMPO_TRAVEL)
+    {
+        out.push(set(milli as u32, Some(drag)));
+    }
+    let hint = "Tempo: drag up or down, with Ctrl for fine steps, or double-click to type it";
+    response.on_hover_text(hint);
+}
+
+/// A typed tempo in thousandths of a BPM, held to FL's range. `None` for
+/// what is not a number.
+fn parse_tempo(text: &str) -> Option<u32> {
+    let bpm: f64 = text
+        .trim()
+        .parse()
+        .ok()
+        .filter(|bpm: &f64| bpm.is_finite())?;
+    let (low, high) = (*TEMPO_MILLI.start(), *TEMPO_MILLI.end());
+    Some(
+        (bpm * 1000.0)
+            .round()
+            .clamp(f64::from(low), f64::from(high)) as u32,
+    )
+}
+
 /// A number on a dark plate with its unit beside it.
-fn readout(ui: &mut Ui, value: &str, unit: &str) {
+fn readout(ui: &mut Ui, value: &str, unit: &str) -> Response {
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .inner_margin(vec2(6.0, 2.0))
@@ -231,7 +323,8 @@ fn readout(ui: &mut Ui, value: &str, unit: &str) {
                     .color(crate::theme::READOUT),
             );
             ui.weak(unit);
-        });
+        })
+        .response
 }
 
 /// The bottom of the meter, in dB below full scale.
@@ -291,6 +384,17 @@ fn meter(ui: &mut Ui, (left, right): (f32, f32)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_tempo_is_held_to_fl_s_range() {
+        assert_eq!(parse_tempo(" 128.5 "), Some(128_500));
+        assert_eq!(parse_tempo("90"), Some(90_000));
+        assert_eq!(parse_tempo("1"), Some(10_000));
+        assert_eq!(parse_tempo("1000"), Some(522_000));
+        assert_eq!(parse_tempo("fast"), None);
+        assert_eq!(parse_tempo("NaN"), None);
+        assert_eq!(parse_tempo("inf"), None);
+    }
 
     #[test]
     fn the_meter_runs_from_minus_48_to_plus_6_db() {

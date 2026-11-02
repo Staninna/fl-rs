@@ -208,6 +208,34 @@ fn render_writes_the_song_to_a_wav() {
 }
 
 #[test]
+fn a_tempo_edit_is_saved_undone_and_played() {
+    let dir = Dir::new("tempo");
+    let (mut app, path) = open_fixture(&dir);
+    let rate = app.state().sample_rate.unwrap_or(44_100) as usize;
+    // A drag on the tempo is one step, and the last value counts.
+    for milli in [100_000, 80_000, 60_000] {
+        edit(&mut app, Edit::SetTempo { milli }, Some(1));
+    }
+    assert_eq!(app.project().tempo(), Some(60.0));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(fl_rs::read(&path).unwrap().tempo(), Some(60.0));
+
+    // The bar takes four seconds at 60 BPM, where it took two.
+    let wav = dir.0.join("slow.wav");
+    app.apply(Command::Render(wav.clone()));
+    settle(&mut app);
+    let frames = hound::WavReader::open(&wav).unwrap().duration() as usize;
+    assert!(frames > 2 * rate && frames <= 4 * rate, "{frames} frames");
+
+    app.apply(Command::Undo);
+    assert_eq!(app.project().tempo(), Some(120.0));
+    // FL's range ends at 522 BPM.
+    edit(&mut app, Edit::SetTempo { milli: 900_000 }, None);
+    assert_eq!(app.project().tempo(), Some(522.0));
+}
+
+#[test]
 fn a_render_reports_its_progress_up_to_the_whole() {
     let dir = Dir::new("progress");
     let path = write_fixture(&dir.0);

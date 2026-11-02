@@ -389,7 +389,7 @@ fn set_flag(note: &mut layout::Note, bit: u8, on: bool) {
 /// `opening` event in `order` and at that event's position, which
 /// [`to_flp`](crate::to_flp) keeps in this order. Without an `opening`
 /// event the object was not read from a file and nothing is added.
-fn add_after(order: &mut Vec<Placed>, opening: Id, id: Id) {
+pub(crate) fn add_after(order: &mut Vec<Placed>, opening: Id, id: Id) {
     let opens = |placed: &Placed| placed.item == Item::Field(opening);
     if let Some(at) = order.iter().position(opens) {
         let pos = order[at].pos;
@@ -401,7 +401,7 @@ fn add_after(order: &mut Vec<Placed>, opening: Id, id: Id) {
 /// Make `id` an event the object writes from its field. An event of that
 /// ID which stayed raw becomes the field's, so that the object does not
 /// end up with two. Otherwise see [`add_after`].
-fn write_field(order: &mut Vec<Placed>, opening: Id, id: Id) {
+pub(crate) fn write_field(order: &mut Vec<Placed>, opening: Id, id: Id) {
     if order.iter().any(|placed| placed.item == Item::Field(id)) {
         return;
     }

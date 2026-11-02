@@ -166,6 +166,108 @@ fn the_pattern_selector_lists_the_patterns() {
     assert_eq!(harness.state(), &[Command::SelectPattern(2)]);
 }
 
+/// The shell in frames short enough that two clicks make a double click:
+/// the harness runs a frame for every event, and a click is four events.
+fn quick_harness(state: UiState) -> Harness<'static, Vec<Command>> {
+    Harness::builder()
+        .with_step_dt(0.05)
+        .with_size(egui::vec2(900.0, 360.0))
+        .with_theme(egui::Theme::Dark)
+        .build_ui_state(move |ui, out| ui::shell(ui, &state, out), Vec::new())
+}
+
+fn tempo(milli: u32, drag_id: Option<u64>) -> Command {
+    Command::Edit {
+        edit: Edit::SetTempo { milli },
+        drag_id,
+    }
+}
+
+#[test]
+fn a_drag_on_the_tempo_changes_it_a_bpm_a_point() {
+    let mut harness = harness(state());
+    harness.run();
+    let readout = harness.get_by_label("Tempo");
+    assert_eq!(readout.accesskit_node().role(), Role::Slider);
+    assert_eq!(readout.accesskit_node().numeric_value(), Some(140.0));
+    let from = readout.rect().center();
+    harness.hover_at(from);
+    harness.drag_at(from);
+    harness.step();
+    for up in [8.0, 20.0] {
+        harness.hover_at(from - egui::vec2(0.0, up));
+        harness.step();
+    }
+    harness.drop_at(from - egui::vec2(0.0, 20.0));
+    harness.run();
+    assert_eq!(
+        harness.state(),
+        &[tempo(148_000, Some(1)), tempo(160_000, Some(1))]
+    );
+
+    // With Ctrl, a tenth of a BPM a point, and down is slower.
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    harness.drag_at(from);
+    harness.step();
+    harness.hover_at(from + egui::vec2(0.0, 15.0));
+    harness.step();
+    harness.drop_at(from + egui::vec2(0.0, 15.0));
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    harness.run();
+    assert_eq!(harness.state().last(), Some(&tempo(138_500, Some(2))));
+    assert_eq!(harness.state().len(), 3);
+}
+
+#[test]
+fn a_double_click_on_the_tempo_types_it() {
+    let mut harness = quick_harness(state());
+    harness.run();
+    let open = |harness: &mut Harness<'_, Vec<Command>>| {
+        let at = harness.get_by_label("Tempo").rect().center();
+        for _ in 0..2 {
+            harness.hover_at(at);
+            harness.drag_at(at);
+            harness.drop_at(at);
+        }
+        harness.run();
+    };
+    open(&mut harness);
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("140.000"));
+    // Space is the field's while it is typed in, and plays nothing.
+    harness.key_press(egui::Key::Space);
+    harness.run();
+    for _ in 0.."140.000 ".len() {
+        harness.key_press(egui::Key::Backspace);
+        harness.run();
+    }
+    harness.get_by_role(Role::TextInput).type_text("97.5");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state(), &[tempo(97_500, None)]);
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+
+    // Escape leaves the tempo, and so does what is not a number. Past
+    // FL's range is its end.
+    for (text, key) in [("60", egui::Key::Escape), ("x", egui::Key::Enter)] {
+        open(&mut harness);
+        harness.get_by_role(Role::TextInput).type_text(text);
+        harness.run();
+        harness.key_press(key);
+        harness.run();
+    }
+    assert_eq!(harness.state().len(), 1);
+    open(&mut harness);
+    harness.key_press(egui::Key::Home);
+    harness.run();
+    harness.get_by_role(Role::TextInput).type_text("9");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state().last(), Some(&tempo(522_000, None)));
+}
+
 #[test]
 fn a_render_shows_how_far_it_is() {
     let mut harness = harness(UiState {

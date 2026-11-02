@@ -369,6 +369,11 @@ pub enum Edit {
         slot: u8,
         mix: i32,
     },
+    /// The song's tempo in thousandths of a BPM, held to FL's 10 to 522
+    /// BPM.
+    SetTempo {
+        milli: u32,
+    },
 }
 
 impl Edit {
