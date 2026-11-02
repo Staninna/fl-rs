@@ -278,6 +278,9 @@ Inferred or left out:
   the arpeggios are worked out before the song plays.
 - The piano roll's live preview (`crates/engine/src/live.rs`) plays notes
   without the arpeggiator.
+- A pattern is built with at most 65,536 entries: a range and a repeat at
+  the ends of an i32 ask for 2^63, which FL would try to build. The
+  corpus's longest pattern has 12.
 
 ## 9. Corpus
 

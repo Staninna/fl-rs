@@ -49,6 +49,10 @@ const NEVER: i64 = i64::MAX;
 /// one to come, start: `0x4f000000`, 2^31 as an f32.
 const UNSET: f32 = 2_147_483_648.0;
 
+/// The most entries a pattern is built with: 65,536, where the corpus's
+/// longest is 12. See `Run::build`.
+const MAX_PATTERN: i64 = 1 << 16;
+
 /// The arpeggiator's time knob at its top: no steps, one note.
 pub(crate) const TIME_HOLD: i32 = 1447;
 
@@ -878,14 +882,20 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             c if c < 0 => (1, 1),
             c => (c, 1),
         };
-        let per = notes * settings.repeat;
-        let up = settings.range.max(1) * per;
+        // In i64, as a range and a repeat from a file can be anything.
+        let notes = i64::from(notes);
+        let per = notes * i64::from(settings.repeat);
+        let up = i64::from(settings.range.max(1)) * per;
         let len = match settings.direction {
             3 if up > 1 => 2 * up - 2,
             4 if up > 1 => 2 * up,
             _ => up,
         };
-        let mut pattern = Vec::with_capacity(len.max(0) as usize);
+        // A range and a repeat at the ends of an i32 ask for 2^63 entries,
+        // which FL would try to build. Past this bound the first entries
+        // are built and the rest left out, which is fl-rs's choice.
+        let len = len.clamp(0, MAX_PATTERN);
+        let mut pattern = Vec::with_capacity(len as usize);
         for i in 0..len {
             let j = match settings.direction {
                 _ if up <= 1 => i,
@@ -909,7 +919,8 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             };
             pattern.push(Entry {
                 pitch: pitch + (octave * 1200) as f32,
-                key: key + octave * 12,
+                // A key from octaves past an i32 is held at its end.
+                key: (i64::from(key) + octave * 12).clamp(i32::MIN.into(), i32::MAX.into()) as i32,
                 source,
             });
         }
