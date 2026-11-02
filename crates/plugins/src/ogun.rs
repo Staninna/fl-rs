@@ -56,6 +56,10 @@ impl Generator for Ogun {
         self.0.note_off(voice);
     }
 
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        self.0.set_note_pitch(voice, pitch);
+    }
+
     fn all_notes_off(&mut self) {
         self.0.all_notes_off();
     }
@@ -146,6 +150,30 @@ mod tests {
             assert!((x - 4.0 * y).abs() <= 1e-5 * x.abs().max(1e-3), "{x} {y}");
         }
         assert!(rms(&o[4800..]) > 0.01);
+    }
+
+    #[test]
+    fn a_note_s_pitch_moves_on_the_next_block_and_a_stranger_s_does_nothing() {
+        let mut ogun = Ogun::default();
+        ogun.set_param(11, 77.0);
+        ogun.set_sample_rate(48_000.0);
+        ogun.note_on(note(62));
+        render(&mut ogun, 4800);
+        let (cents, step) = ogun.0.voice_pitch(1).unwrap();
+        ogun.set_note_pitch(9, -500.0);
+        render(&mut ogun, 4800);
+        assert_eq!(ogun.0.voice_pitch(1), Some((cents, step)));
+        // Down a fifth from D5.
+        ogun.set_note_pitch(1, -500.0);
+        let (l, r) = render(&mut ogun, 4800);
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+        let (bent, bent_step) = ogun.0.voice_pitch(1).unwrap();
+        assert!((cents - bent - 700.0).abs() < 1e-3, "{cents} {bent}");
+        let fifth = (-700.0f64 / 1200.0).exp2();
+        assert!(
+            (bent_step / step - fifth).abs() < 1e-6,
+            "{step} {bent_step}"
+        );
     }
 
     #[test]
