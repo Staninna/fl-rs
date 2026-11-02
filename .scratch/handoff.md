@@ -1,3 +1,20 @@
+# Handoff, 2026-11-02, note pitch and the plugin bench
+
+Branch `claude/fervent-cori-pkwjx7`, off `main` at `f40ac7a`. Worked in a cloud container with no FL Studio install: no DLLs, no corpus, no Ghidra. Nothing here was checked against FL's code or rendered from the corpus. fmt, clippy, the plugins tests, the engine lib and fixtures tests (no corpus), `progress.py --check`, `bench.py --check` and the new plugin bench check pass at the head.
+
+- The eight generators the last handoff listed now follow `set_note_pitch`, so slide notes and pitch clips bend them: GMS, MiniSynth, Kepler, Kepler Exo, Autogun, Ogun, Morphine and FL Slayer. Each is built from what its doc already mapped. *When* FL re-reads `FinalLevels.Pitch` for each of them is inferred, and each plugin doc and `docs/plugins.md` row says so:
+  - GMS and MiniSynth: the wrapper's per-key pitch offset (`Pitch/100 - key + 60`), applied from the next block; the last note on a key steers it.
+  - Kepler and Kepler Exo: the voice keeps its starting key, and the rest of the pitch goes into the fine-pitch expression (`FUN_1800184f0`). Arpeggiator voices are not retuned.
+  - Autogun and Ogun: the new pitch takes the place of `FinalLevels.Pitch` in art3's sum. Keyboard maps and the key seed keep their note-on values.
+  - Morphine: the change in semitones goes on top of the glide, at the next spectrum.
+  - FL Slayer: wholly inferred, because the bridge was never read. The pitch becomes the plucked strings' detune, held to ±127 cents. MIDI pitch bend is still left out.
+- `crates/plugins/examples/bench.rs`, item 4 of `todo.md`: every built plugin on its default state, run on generated input, timed against a reference workload measured in the same run. CI's `bench` job checks it against `crates/plugins/bench.tsv`. A plugin fails when it costs more than twice its baseline plus 0.05 units, or newly panics. It has not run on a GitHub runner yet: if the first runs flap, widen the tolerance. To refresh the baseline, run `--write crates/plugins/bench.tsv`; with a filter argument (`bench patcher`) only the matching plugins run.
+- Patcher with no state used to panic, because its derived `Default` left the graph with no buffer. A new one now holds an empty graph and plays silence.
+
+## Next
+
+Still true from the 2026-10-22 list: FLEX, Emphasis's block boundaries, LimiterLite and TransientLooper, Distructor, and the channel parts that are left out. The pitch work above should be checked against the DLLs (and the corpus render rerun, since slide projects may change) on a machine with FL's install. `todo.md` has the bigger steps.
+
 # Handoff, 2026-10-23, perf
 
 Branch `claude/perf`. Two speedups that keep every one of the profile harness's 165 hashes, and a benchmark block in the README.
