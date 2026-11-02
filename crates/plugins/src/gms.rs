@@ -30,7 +30,9 @@
 //!   host here sends them.
 //! - An LFO synced to the song reads the song's position from the frames
 //!   played since the plugin was made or reset.
-//! - Slide notes sound nothing.
+//! - Slide notes start nothing; the host bends the notes they slide with
+//!   [`Generator::set_note_pitch`], which moves the key's pitch offset as
+//!   FL's slot fill does with `FinalLevels.Pitch`.
 //! - The effects say in [`Generator::fidelity`] which of them are not built.
 
 // Limits are `max` then `min` in the binary's order, which turns a NaN into
@@ -525,6 +527,10 @@ pub struct Gms {
     /// last note, and the host's number for the note held on it.
     keys: [(f32, f32, f32); KEYS],
     held: [Option<u32>; KEYS],
+    /// The host's number for the last note on each key, kept past its note
+    /// off while its release sounds: the note whose `FinalLevels.Pitch`
+    /// the key's slot follows.
+    last_note: [Option<u32>; KEYS],
     velocity: f32,
     counter: u32,
     last_pitch: f32,
@@ -576,6 +582,7 @@ impl Default for Gms {
             voices,
             keys: [(0.0, 0.0, 0.0); KEYS],
             held: [None; KEYS],
+            last_note: [None; KEYS],
             velocity: 0.0,
             counter: 1,
             last_pitch: -1.0,
@@ -1354,6 +1361,7 @@ impl Generator for Gms {
         let key = note.key.clamp(0, KEYS as i16 - 1) as usize;
         let (left, right) = circular(note.pan, note.velocity);
         self.keys[key] = (left, right, (f64::from(note.fine_pitch) * 0.01) as f32);
+        self.last_note[key] = Some(note.voice);
         let velocity = velocity_level(note.velocity);
         if velocity == 0.0 {
             self.held[key] = None;
@@ -1377,6 +1385,17 @@ impl Generator for Gms {
                 self.release(key);
             }
         }
+    }
+
+    /// The wrapper's slot fill (`FUN_1800c91b0`) keeps `FinalLevels.Pitch /
+    /// 100 - key + 60` as the key's pitch offset, and every block
+    /// (`FUN_1800f68f0`) adds it to the pitch of the voices on the key, so
+    /// the note moves from the next block on, with no glide of its own.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        let Some(key) = self.last_note.iter().position(|n| *n == Some(voice)) else {
+            return;
+        };
+        self.keys[key].2 = (f64::from(pitch) * 0.01 - key as f64 + 60.0) as f32;
     }
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -1413,6 +1432,7 @@ impl Generator for Gms {
 
     fn reset(&mut self) {
         self.held = [None; KEYS];
+        self.last_note = [None; KEYS];
         self.pos = 0.0;
         self.restart();
     }
@@ -1659,6 +1679,44 @@ mod tests {
         gms.note_on(note(1, 60));
         gms.note_on(note(2, 64));
         assert!(gms.voices[VOICES - 1].active && gms.voices[VOICES - 2].active);
+    }
+
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        let dir = install();
+        let params: [f32; PARAMS] = std::array::from_fn(default_param);
+        let saw = state(["Saw.wav", "", ""], &params);
+        let make = || {
+            let mut gms = Gms::default();
+            gms.set_resource_dir(&dir);
+            gms.set_state(&saw).unwrap();
+            gms
+        };
+        testing::follows_note_pitch(|| Box::new(make()), 44_100.0);
+
+        // An octave up doubles oscillator 1's step from the next block,
+        // and a number no note has moves nothing.
+        let mut gms = make();
+        gms.note_on(note(1, 57));
+        play(&mut gms, 512);
+        let voice = gms.voices.iter().position(|v| v.active).unwrap();
+        let step = gms.voices[voice].step[0][0];
+        gms.set_note_pitch(9, 1200.0);
+        play(&mut gms, 512);
+        assert_eq!(gms.voices[voice].step[0][0], step);
+        gms.set_note_pitch(1, -300.0 + 1200.0);
+        assert_eq!(gms.voices[voice].step[0][0], step, "not before the block");
+        play(&mut gms, 512);
+        let up = f64::from(gms.voices[voice].step[0][0]) / f64::from(step);
+        assert!((up - 2.0).abs() < 1e-3, "{up}");
+        // A note let go of follows on through its release.
+        gms.note_off(1);
+        gms.set_note_pitch(1, -300.0);
+        play(&mut gms, 512);
+        assert!(gms.voices[voice].active);
+        let back = f64::from(gms.voices[voice].step[0][0]) / f64::from(step);
+        assert!((back - 1.0).abs() < 1e-3, "{back}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
