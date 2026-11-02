@@ -243,6 +243,22 @@ impl Generator for FlSlayer {
         });
     }
 
+    /// The note keeps its key and the cents its pitch now lies from it
+    /// become its strings' detune, as [`Generator::note_on`] makes it, up
+    /// to 127 cents either way, from the engine's next control tick. That
+    /// FL's bridge retunes a sounding note so is inferred: VST 2 has no
+    /// message for it. A note let go of keeps its pitch.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        if voice == u32::MAX {
+            return;
+        }
+        if let Some(&(_, key)) = self.keys.iter().find(|(v, _)| *v == voice) {
+            let cents = pitch - ((key - 60) * 100) as f32;
+            let detune = cents.round().clamp(-127.0, 127.0) as i8;
+            self.engine.push(Event::Pitch { key, detune });
+        }
+    }
+
     fn note_off(&mut self, voice: u32) {
         if let Some(slot) = self.keys.iter_mut().find(|(v, _)| *v == voice) {
             let key = slot.1;
@@ -401,6 +417,42 @@ mod tests {
                 assert_eq!((x * (count as f32 - 0.01)) as i32, value, "{index}");
             }
         }
+    }
+
+    #[test]
+    fn a_note_s_new_pitch_detunes_its_string_from_the_next_control_tick() {
+        let run = |bend: Option<(u32, f32)>| {
+            let mut slayer = FlSlayer::default();
+            for (index, value) in [(0, 0.0), (12, 0.0), (19, 0.0), (20, 0.0), (7, 0.0)] {
+                slayer.set_param(index, value);
+            }
+            slayer.set_sample_rate(44_100.0);
+            slayer.note_on(note(57));
+            play(&mut slayer, 512);
+            if let Some((voice, pitch)) = bend {
+                slayer.set_note_pitch(voice, pitch);
+            }
+            let (left, _) = play(&mut slayer, 44_100);
+            let string = slayer.engine.voices.iter().find(|v| v.note == 57.0);
+            let crossings = left[4410..]
+                .windows(2)
+                .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+                .count();
+            (string.map(|v| v.detune), crossings)
+        };
+        let (plain, plain_crossings) = run(None);
+        assert_eq!(plain, Some(0));
+        // 57 is -300 cents from key 60: a whole semitone up, then past
+        // the 127 cents a detune reaches.
+        let (up, up_crossings) = run(Some((57, -200.0)));
+        assert_eq!(up, Some(100));
+        assert!(
+            up_crossings > plain_crossings,
+            "{plain_crossings} {up_crossings}"
+        );
+        assert_eq!(run(Some((57, 0.0))).0, Some(127));
+        assert_eq!(run(Some((57, -350.0))).0, Some(-50));
+        assert_eq!(run(Some((58, -200.0))), (plain, plain_crossings));
     }
 
     #[test]
