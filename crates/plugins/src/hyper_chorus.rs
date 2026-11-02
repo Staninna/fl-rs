@@ -40,6 +40,7 @@
 //! defaults, as in FL.
 
 use crate::{Effect, StateError, knob_value, state_version};
+use dsp::rand::msvc as rand;
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Hyper Chorus";
@@ -101,12 +102,6 @@ const HIGH: f32 = f32::from_bits(0x40d0_2a30);
 
 /// A gliding value nearer its target than this is put there.
 const NEAR: f32 = 1e-4;
-
-/// The MSVC runtime's `rand()`.
-fn rand(seed: &mut u32) -> u32 {
-    *seed = seed.wrapping_mul(214_013).wrapping_add(2_531_011);
-    (*seed >> 16) & 0x7fff
-}
 
 /// Four numbers from 0 to 1 from `rand()`, as the engine starts its LFOs.
 fn phases(seed: &mut u32) -> [f32; 4] {
