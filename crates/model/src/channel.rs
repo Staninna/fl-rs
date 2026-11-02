@@ -393,6 +393,60 @@ impl Channel {
         Some(self.levels?.pan)
     }
 
+    /// Whether one of the channel's five instrument envelopes or LFOs (218,
+    /// controls 0x1000..) moves what it sounds like: its envelope is
+    /// switched on with an amount off 0, or, for the volume envelope, which
+    /// a new sampler keeps at amount 0, switched on at all; or its LFO has
+    /// an amount off 0. The records are pan, volume, mod X, mod Y and
+    /// pitch, in that order (`docs/rec-channel.md`).
+    pub fn envelope_on(&self) -> bool {
+        self.envelopes.iter().enumerate().any(|(at, e)| {
+            let envelope = e.enabled != 0 && (e.amount != 0 || at == ENVELOPE_VOLUME);
+            envelope || e.lfo_amount != 0
+        })
+    }
+
+    /// Whether the channel's time stretch or formant shift (215 @96..@111
+    /// and @160, controls 14 and 15) moves its sample: a stretch time, a
+    /// stretch pitch or a multiplier off 0, or a formant off its middle.
+    /// Only a sampler or an audio clip channel plays a sample.
+    pub fn time_stretch_on(&self) -> bool {
+        if !matches!(
+            self.kind,
+            Some(ChannelKind::Sampler | ChannelKind::AudioClip)
+        ) {
+            return false;
+        }
+        let Some(p) = self.parameters else {
+            return false;
+        };
+        // An f32 or an integer: either is 0 in all its bits but the sign.
+        let time = u32::from_le_bytes(p.stretch_time) & 0x7fff_ffff != 0;
+        let formant = p.len >= 168 && f64::from_le_bytes(p.formant) != 0.5;
+        time || p.stretch_pitch != 0 || p.stretch_multiplier != 0 || formant
+    }
+
+    /// Whether the channel's velocity or key tracking (228, controls
+    /// 0x500..) moves its mod X or mod Y: a knob off 0. The pan knobs are
+    /// left out, as the engine plays them.
+    pub fn tracks_mods(&self) -> bool {
+        self.tracking.iter().any(|t| t.mod_x != 0 || t.mod_y != 0)
+    }
+
+    /// Whether the channel's echo delay (209, controls 0x200..) makes an
+    /// echo: a feedback above 0 and at least one echo. A new sampler has
+    /// feedback 0 and 4 echoes.
+    pub fn echo_delay_on(&self) -> bool {
+        self.delay.is_some_and(|d| d.feedback > 0 && d.echoes > 0)
+    }
+
+    /// Whether the channel is a TS404, FL 3's built-in bass synth: type 1
+    /// of 21, whose controls 0x103..0x125 live in the object at
+    /// `chan+0x358` (inferred: no corpus project has type 1).
+    pub fn is_ts404(&self) -> bool {
+        self.kind == Some(ChannelKind::Other(1))
+    }
+
     /// The insert the channel plays into, from 104 or 22. This is the
     /// loader's insert number, where the last insert of the file is 501, and
     /// not a position in [`Project::inserts`](crate::Project::inserts).
@@ -401,5 +455,137 @@ impl Channel {
             Some(target) => Some(i32::from(target)),
             None => self.routed_to.map(i32::from),
         }
+    }
+}
+
+/// Where the volume envelope sits among a channel's five 218 records: the
+/// second, after the pan's. A new sampler's is the one record with other
+/// flags and tensions than the rest (inferred, with PyFLP's order).
+const ENVELOPE_VOLUME: usize = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A new sampler with the events of [`NEW_SAMPLER`], decoded as a file's.
+    fn sampler() -> Channel {
+        Channel::new_sampler(0, "Sampler", "kick.wav", true, 0)
+    }
+
+    /// The channel with one of its events read again from `data`.
+    fn give(channel: &mut Channel, id: Id, data: Vec<u8>) {
+        codec::give(channel, 0, &RawEvent { id: id.0, data }, &Cx::default());
+    }
+
+    #[test]
+    fn a_new_sampler_has_none_of_its_parts_on() {
+        let channel = sampler();
+        assert_eq!((channel.envelopes.len(), channel.tracking.len()), (5, 2));
+        assert!(!channel.envelope_on());
+        assert!(!channel.time_stretch_on());
+        assert!(!channel.tracks_mods());
+        assert!(!channel.echo_delay_on());
+        assert!(!channel.is_ts404());
+    }
+
+    #[test]
+    fn an_envelope_is_on_with_its_switch_and_an_amount_or_on_the_volume() {
+        let mut channel = sampler();
+        // Mod X's envelope switched on at amount 0 moves nothing.
+        channel.envelopes[2].enabled = 1;
+        assert!(!channel.envelope_on());
+        channel.envelopes[2].amount = -64;
+        assert!(channel.envelope_on());
+        // An amount alone, with the switch off, moves nothing.
+        channel.envelopes[2].enabled = 0;
+        assert!(!channel.envelope_on());
+        // The volume envelope needs its switch alone.
+        channel.envelopes[ENVELOPE_VOLUME].enabled = 1;
+        assert!(channel.envelope_on());
+        channel.envelopes[ENVELOPE_VOLUME].enabled = 0;
+        // An LFO with an amount, whatever the envelope's switch.
+        channel.envelopes[4].lfo_amount = 32;
+        assert!(channel.envelope_on());
+    }
+
+    #[test]
+    fn an_envelope_from_its_event_is_read_by_its_fields() {
+        let mut channel = Channel::default();
+        for _ in 0..5 {
+            give(&mut channel, Id::EnvelopeLFO, vec![0; 68]);
+        }
+        assert!(!channel.envelope_on());
+        // A sixth, switched on at amount 128.
+        let mut data = vec![0; 68];
+        data[4..8].copy_from_slice(&1i32.to_le_bytes());
+        data[32..36].copy_from_slice(&128i32.to_le_bytes());
+        give(&mut channel, Id::EnvelopeLFO, data);
+        assert!(channel.envelope_on());
+    }
+
+    #[test]
+    fn time_stretch_is_on_with_a_time_a_pitch_a_multiplier_or_a_formant() {
+        let on = |change: fn(&mut layout::Parameters)| {
+            let mut channel = sampler();
+            change(channel.parameters.as_mut().unwrap());
+            channel.time_stretch_on()
+        };
+        assert!(on(|p| p.stretch_time = 4.0f32.to_le_bytes()));
+        assert!(on(|p| p.stretch_time = 16i32.to_le_bytes()));
+        assert!(!on(|p| p.stretch_time = (-0.0f32).to_le_bytes()));
+        assert!(on(|p| p.stretch_pitch = -1200));
+        assert!(on(|p| p.stretch_multiplier = 10_000));
+        assert!(on(|p| p.formant = 0.75f64.to_le_bytes()));
+        // A mode alone stretches nothing.
+        assert!(!on(|p| p.stretch_mode = 1));
+        // A 215 too short to hold the formant reads it as 0, not a shift.
+        assert!(!on(|p| {
+            p.len = 160;
+            p.formant = [0; 8];
+        }));
+        // A plugin channel plays no sample.
+        let mut plugin = sampler();
+        plugin.kind = Some(ChannelKind::Plugin);
+        plugin.parameters.as_mut().unwrap().stretch_pitch = 100;
+        assert!(!plugin.time_stretch_on());
+    }
+
+    #[test]
+    fn tracking_is_on_with_a_mod_knob_off_0() {
+        let mut channel = sampler();
+        channel.tracking[0].pan = 256;
+        assert!(!channel.tracks_mods());
+        channel.tracking[1].mod_y = -10;
+        assert!(channel.tracks_mods());
+        channel.tracking[1].mod_y = 0;
+        channel.tracking[0].mod_x = 64;
+        assert!(channel.tracks_mods());
+    }
+
+    #[test]
+    fn an_echo_delay_is_on_with_feedback_and_echoes() {
+        let mut channel = sampler();
+        // 209 as a file holds it: feedback, pan, pitch, echoes, time.
+        let delay = |feedback: i32, echoes: i32| -> Vec<u8> {
+            [feedback, 0, 0, echoes, 144]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect()
+        };
+        give(&mut channel, Id::Delay, delay(6400, 4));
+        assert!(channel.echo_delay_on());
+        give(&mut channel, Id::Delay, delay(6400, 0));
+        assert!(!channel.echo_delay_on());
+        give(&mut channel, Id::Delay, delay(0, 4));
+        assert!(!channel.echo_delay_on());
+    }
+
+    #[test]
+    fn a_ts404_is_a_channel_of_type_1() {
+        let mut channel = Channel::default();
+        give(&mut channel, Id::ChannelType, vec![1]);
+        assert!(channel.is_ts404());
+        give(&mut channel, Id::ChannelType, vec![0]);
+        assert!(!channel.is_ts404());
     }
 }
