@@ -155,6 +155,14 @@ pub enum Edit {
         ids: Vec<ItemId>,
         add: bool,
     },
+    /// Cut each item that tick `at` falls inside of in two at `at`. The
+    /// first part keeps the item's ID, and the second parts go to the end
+    /// of the list in the order of `ids`, each showing its source from
+    /// where its first part stops.
+    SplitItems {
+        ids: Vec<ItemId>,
+        at: Ticks,
+    },
     /// Light or clear a step of the pattern the top bar has selected, for
     /// the channel with this index. Step 0 is the pattern's first
     /// sixteenth note.
@@ -200,6 +208,43 @@ pub enum Edit {
         channel: u16,
         step: u32,
         velocity: u8,
+    },
+    /// Name the channel. An empty name is not set.
+    SetChannelName {
+        channel: u16,
+        name: String,
+    },
+    /// Switch the channel on and every other off, or, when it is the one
+    /// channel on already, every channel back on.
+    SoloChannel {
+        channel: u16,
+    },
+    /// Move the channel's notes in the pattern the top bar has selected
+    /// `by` steps along, later when it is positive, round the pattern's
+    /// first `count` steps: what goes off one end comes in at the other.
+    ShiftSteps {
+        channel: u16,
+        by: i32,
+        count: u32,
+    },
+    /// Light every `every`th step of the channel among the pattern's first
+    /// `count`, from the first, and clear the others. The pattern the top
+    /// bar has selected is made when the file has none with that index.
+    FillSteps {
+        channel: u16,
+        every: u32,
+        count: u32,
+    },
+    /// Remove every note of the channel from the pattern the top bar has
+    /// selected.
+    ClearSteps {
+        channel: u16,
+    },
+    /// Copy the channel, its plugin and its settings, to the end of the
+    /// rack, named with " #2" behind its name. An automation clip is not
+    /// copied.
+    CloneChannel {
+        channel: u16,
     },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key

@@ -10,7 +10,7 @@ use flp::event::Id;
 use flp::event::layout::{InsertFlags, Levels};
 use model::{
     Arrangement, Channel, ChannelKind, Insert, Item, ItemSource, Note, Pattern, Placed,
-    PlaylistItem, Project, RecTarget,
+    PlaylistItem, Project, RecTarget, Trim,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -609,6 +609,109 @@ fn a_selection_is_no_change_to_save_or_undo() {
     assert_eq!(places(app.project()), [(0, 1)]);
 }
 
+#[test]
+fn a_split_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("split");
+    let (mut app, path) = open_fixture(&dir);
+    let split = Edit::SplitItems {
+        ids: vec![0],
+        at: 96,
+    };
+    edit(&mut app, split, None);
+    assert_eq!(places(app.project()), [(0, 1), (96, 1)]);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+
+    // The second part shows the pattern from its second beat on.
+    let saved = fl_rs::read(&path).unwrap();
+    let items = &saved.current_arrangement().unwrap().items;
+    let parts: Vec<_> = items
+        .iter()
+        .map(|item| (item.position, item.length, item.trim()))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (0, 96, Some(Trim::Ticks { start: 0, end: 96 })),
+            (
+                96,
+                288,
+                Some(Trim::Ticks {
+                    start: 96,
+                    end: 384
+                })
+            ),
+        ]
+    );
+    app.apply(Command::Undo);
+    assert_eq!(places(app.project()), [(0, 1)]);
+}
+
+#[test]
+fn a_channel_s_name_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("rename");
+    let (mut app, path) = open_fixture(&dir);
+    let name = |project: &Project| project.channels[0].name.clone();
+    let rename = |name: &str| Edit::SetChannelName {
+        channel: 0,
+        name: name.to_owned(),
+    };
+    edit(&mut app, rename("Click"), None);
+    assert_eq!(name(app.project()).as_deref(), Some("Click"));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(name(&fl_rs::read(&path).unwrap()).as_deref(), Some("Click"));
+    app.apply(Command::Undo);
+    assert_eq!(name(app.project()), None);
+    // An empty name is no change.
+    edit(&mut app, rename(""), None);
+    app.apply(Command::Redo);
+    assert_eq!(name(app.project()).as_deref(), Some("Click"));
+}
+
+#[test]
+fn a_solo_is_one_undo_step() {
+    let dir = Dir::new("solo");
+    let (mut app, _) = open_fixture(&dir);
+    let enabled = |app: &App| app.project().channels[0].enabled;
+    // The one channel is on, so soloing it switches them all on: no change.
+    edit(&mut app, Edit::SoloChannel { channel: 0 }, None);
+    assert!(!app.is_modified());
+    edit(
+        &mut app,
+        Edit::SetChannelEnabled {
+            channel: 0,
+            enabled: false,
+        },
+        None,
+    );
+    edit(&mut app, Edit::SoloChannel { channel: 0 }, None);
+    assert_eq!(enabled(&app), Some(true));
+    app.apply(Command::Undo);
+    assert_eq!(enabled(&app), Some(false));
+}
+
+#[test]
+fn a_clone_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("clone");
+    let (mut app, path) = open_fixture(&dir);
+    edit(&mut app, Edit::CloneChannel { channel: 0 }, None);
+    assert_eq!(app.project().channels.len(), 2);
+    if app.has_audio() {
+        assert_eq!(app.error(), None);
+    }
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    let copy = &saved.channels[1];
+    assert_eq!(copy.index, 1);
+    assert_eq!(copy.sample_path.as_deref(), Some("click.wav"));
+    assert_eq!(copy.levels, saved.channels[0].levels);
+    assert_eq!(saved.header.channel_count, 2);
+    app.apply(Command::Undo);
+    assert_eq!(app.project().channels.len(), 1);
+}
+
 /// The steps of pattern 1 that are lit for channel 0.
 fn lit(project: &Project) -> Vec<usize> {
     let Some(pattern) = project.pattern(1) else {
@@ -677,6 +780,44 @@ fn a_step_is_saved_reloaded_and_undone() {
     let project = app.project();
     assert_eq!(project.pattern(5).unwrap().steps(0, 96)[3..], [true]);
     assert_eq!(lit(project), [0, 4, 8, 12]);
+}
+
+#[test]
+fn a_shift_of_the_steps_is_saved_and_undone() {
+    let dir = Dir::new("shift");
+    let (mut app, path) = open_fixture(&dir);
+    let shift = Edit::ShiftSteps {
+        channel: 0,
+        by: -1,
+        count: 16,
+    };
+    edit(&mut app, shift, None);
+    assert_eq!(lit(app.project()), [3, 7, 11, 15]);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(lit(&fl_rs::read(&path).unwrap()), [3, 7, 11, 15]);
+    app.apply(Command::Undo);
+    assert_eq!(lit(app.project()), [0, 4, 8, 12]);
+}
+
+#[test]
+fn a_fill_and_a_clear_are_one_undo_step_each() {
+    let dir = Dir::new("fill");
+    let (mut app, _) = open_fixture(&dir);
+    let fill = Edit::FillSteps {
+        channel: 0,
+        every: 2,
+        count: 16,
+    };
+    edit(&mut app, fill, None);
+    assert_eq!(lit(app.project()), [0, 2, 4, 6, 8, 10, 12, 14]);
+    edit(&mut app, Edit::ClearSteps { channel: 0 }, None);
+    assert!(lit(app.project()).is_empty());
+    app.apply(Command::Undo);
+    assert_eq!(lit(app.project()).len(), 8);
+    app.apply(Command::Undo);
+    assert_eq!(lit(app.project()), [0, 4, 8, 12]);
+    assert!(!app.is_modified());
 }
 
 #[test]
@@ -1340,7 +1481,7 @@ fn the_mixer_s_edits_are_saved_reloaded_and_undone() {
 
 #[test]
 fn a_solo_is_one_undo_step_and_is_saved() {
-    let dir = Dir::new("solo");
+    let dir = Dir::new("insert-solo");
     let (mut app, path) = open_mixer_fixture(&dir);
     let on = |project: &Project| [0, 1, 2, 3].map(|i| project.insert_mix(i).enabled());
     edit(&mut app, Edit::SoloInsert { insert: 1 }, None);

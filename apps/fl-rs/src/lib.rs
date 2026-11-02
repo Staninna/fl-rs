@@ -235,6 +235,33 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::AddSamplerChannel { ref path } => {
             project.add_sampler_channel(&stored_path(path, data_root));
         }
+        Edit::SetChannelName { channel, ref name } => project.set_channel_name(channel, name),
+        Edit::SoloChannel { channel } => project.solo_channel(channel),
+        Edit::CloneChannel { channel } => {
+            project.clone_channel(channel);
+        }
+        Edit::FillSteps {
+            channel,
+            every,
+            count,
+        } => {
+            if project.channel(channel).is_some() && every > 0 {
+                let pattern = project.pattern_to_edit(pattern);
+                pattern.fill_steps(channel, every, count, ppq);
+            }
+        }
+        Edit::ClearSteps { channel } => {
+            let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
+            if let Some(pattern) = pattern {
+                pattern.clear_steps(channel);
+            }
+        }
+        Edit::ShiftSteps { channel, by, count } => {
+            let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
+            if let Some(pattern) = pattern {
+                pattern.shift_steps(channel, by, count, ppq);
+            }
+        }
         Edit::SetInsertVolume { insert, volume } => project.set_insert_volume_raw(insert, volume),
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),
@@ -259,6 +286,11 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::AddPattern { index } => project.add_pattern(index),
         Edit::ClonePattern { from, to } => project.clone_pattern(from, to),
         Edit::SetPatternName { pattern, ref name } => project.set_pattern_name(pattern, name),
+        Edit::SplitItems { ref ids, at } => {
+            if let Ok(at) = i32::try_from(at) {
+                project.split_items(ids, at);
+            }
+        }
         Edit::MoveItems { .. }
         | Edit::ResizeItems { .. }
         | Edit::SetMuted { .. }

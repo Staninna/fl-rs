@@ -78,6 +78,7 @@
 mod arrangement;
 mod automation;
 mod channel;
+mod channel_edit;
 mod codec;
 mod mixer;
 mod mixer_edit;

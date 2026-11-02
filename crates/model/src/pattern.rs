@@ -202,6 +202,56 @@ impl Pattern {
         self.notes.insert(at, note);
     }
 
+    /// Move every note of the channel `by` steps along, later when it is
+    /// positive, round the pattern's first `count` steps: a note pushed
+    /// past the last of them comes back in at the start, and one pushed
+    /// before the first at the end. A note keeps where in its step it
+    /// starts. The list stays in the order of the notes' positions, so the
+    /// notes behind a moved one can get other places.
+    pub fn shift_steps(&mut self, channel: u16, by: i32, count: u32, ppq: u16) {
+        let span = i64::from(count) * step_ticks(ppq);
+        if span == 0 || span > i64::from(i32::MAX) || by == 0 {
+            return;
+        }
+        let shift = i64::from(by) * step_ticks(ppq);
+        let own = self.notes.iter_mut();
+        let mut own = own.filter(|note| note.channel == channel && !note.is_deleted());
+        let mut moved = false;
+        for note in &mut own {
+            note.position = (i64::from(note.position) + shift).rem_euclid(span) as i32;
+            moved = true;
+        }
+        if moved {
+            // The sort keeps notes that start together in the order they
+            // had.
+            self.notes.sort_by_key(|note| note.position);
+        }
+    }
+
+    /// Light every `every`th step of the channel among the pattern's first
+    /// `count`, from the first step on, and clear every other step of it,
+    /// as FL's "Fill each 2 steps" and its kin do (inferred: that they
+    /// replace the channel's steps, and do not add to them, is not taken
+    /// from FL's code). An `every` of 0 changes nothing.
+    ///
+    /// A pattern whose 224 the model could not read is left as it is.
+    pub fn fill_steps(&mut self, channel: u16, every: u32, count: u32, ppq: u16) {
+        if every == 0 || !self.writes_notes() {
+            return;
+        }
+        self.clear_steps(channel);
+        for step in (0..count).step_by(every as usize) {
+            self.set_step(channel, step, true, ppq);
+        }
+    }
+
+    /// Clear every step of the channel: remove all its notes, the muted
+    /// and the long ones too, as clearing one step does.
+    pub fn clear_steps(&mut self, channel: u16) {
+        self.notes
+            .retain(|note| note.channel != channel || note.is_deleted());
+    }
+
     /// Light the step when it is not lit, and clear it when it is.
     pub fn toggle_step(&mut self, channel: u16, step: u32, ppq: u16) {
         let lit = self.step_note(channel, step, ppq).is_some();
@@ -910,6 +960,81 @@ mod tests {
         let note = pattern.notes[1];
         assert_eq!((note.velocity, note.pan), (128, 0));
         assert_eq!(pattern.notes[2].velocity, 100);
+    }
+
+    #[test]
+    fn a_shift_moves_a_channel_s_steps_round_the_pattern() {
+        let mut pattern = Pattern::default();
+        for step in [0, 4, 8, 15] {
+            pattern.set_step(0, step, true, PPQ);
+        }
+        pattern.set_step(1, 4, true, PPQ);
+        // A note a quarter into step 1.
+        pattern.add_note(note(0, 30, 0));
+        pattern.shift_steps(0, 1, 16, PPQ);
+        assert_eq!(lit(&pattern, 0), [0, 1, 2, 5, 9]);
+        assert_eq!(lit(&pattern, 1), [4]);
+        // The last step came round to the first, the note off the grid
+        // kept its place in its step, and the list is in order again.
+        let positions: Vec<i32> = pattern.notes.iter().map(|n| n.position).collect();
+        assert_eq!(positions, [0, 24, 54, 96, 120, 216]);
+
+        pattern.shift_steps(0, -3, 16, PPQ);
+        assert_eq!(lit(&pattern, 0), [2, 6, 13, 14, 15]);
+        // Round no steps, or by none, nothing moves.
+        let before = pattern.clone();
+        pattern.shift_steps(0, 5, 0, PPQ);
+        pattern.shift_steps(0, 0, 16, PPQ);
+        assert_eq!(pattern, before);
+    }
+
+    #[test]
+    fn a_fill_lights_each_nth_step_in_place_of_the_others() {
+        let mut project = project();
+        let pattern = project.pattern_to_edit(1);
+        pattern.fill_steps(0, 2, 16, PPQ);
+        assert_eq!(lit(pattern, 0), [0, 2, 4, 6, 8, 10, 12, 14]);
+        // The clap of the other channel stays.
+        assert_eq!(lit(pattern, 1), [4]);
+        pattern.fill_steps(0, 8, 32, PPQ);
+        assert_eq!(lit(pattern, 0), [0, 8, 16, 24]);
+        pattern.fill_steps(0, 0, 32, PPQ);
+        assert_eq!(lit(pattern, 0), [0, 8, 16, 24]);
+        // Filled each 4 of 16, the kicks are as they were, so the file is.
+        pattern.fill_steps(0, 4, 16, PPQ);
+        assert_eq!(to_flp(&project), Ok(file()));
+
+        // Clearing takes every note of the channel.
+        let pattern = project.pattern_to_edit(1);
+        pattern.add_note(note(0, 50, 96));
+        pattern.clear_steps(0);
+        assert!(lit(pattern, 0).is_empty());
+        assert_eq!(pattern.notes, [note(1, 96, 0)]);
+
+        // A pattern without notes gets a 224, and one whose 224 the model
+        // could not read is left as it is.
+        project.pattern_to_edit(2).fill_steps(1, 4, 16, PPQ);
+        assert_eq!(lit(project.pattern(2).unwrap(), 1), [0, 4, 8, 12]);
+        let mut file = file();
+        file.events[2].data.truncate(36);
+        let mut project = from_flp(&file);
+        project.pattern_to_edit(1).fill_steps(0, 2, 16, PPQ);
+        assert_eq!(to_flp(&project), Ok(file));
+    }
+
+    #[test]
+    fn a_shift_changes_the_224_and_nothing_else() {
+        let mut project = project();
+        // The kicks on every beat of a bar, one step later.
+        project.pattern_to_edit(1).shift_steps(0, 1, 16, PPQ);
+        let (new, gone) = changes(&project);
+        let [(2, new)] = &new[..] else {
+            panic!("{new:?}");
+        };
+        assert_eq!(gone.len(), 1);
+        let now = layout::Note::list_from_bytes(&new.data).unwrap();
+        let places: Vec<(i32, u16)> = now.iter().map(|n| (n.position, n.channel)).collect();
+        assert_eq!(places, [(24, 0), (96, 1), (120, 0), (216, 0), (312, 0)]);
     }
 
     #[test]

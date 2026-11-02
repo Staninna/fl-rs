@@ -1,7 +1,7 @@
 //! Arrangements, their playlist tracks, and time markers.
 
-use crate::Placed;
 use crate::codec::object;
+use crate::{ChannelKind, Placed, Project};
 use flp::event::layout;
 
 /// One arrangement. 99 `ArrangementID.New` selects it by index.
@@ -128,6 +128,61 @@ impl Arrangement {
         self.items.extend(copies);
     }
 
+    /// Cut each item that tick `at` falls inside of in two at `at`. The
+    /// first part keeps the item's place in the list and ends at `at`. The
+    /// second is a copy that goes to the end of the list, in the order of
+    /// `ids`, starts at `at` and shows its source from where the first part
+    /// stops, so that the two play what the item did. Both keep the
+    /// item's selection.
+    ///
+    /// A pattern item's trim is in ticks of the pattern, and one without a
+    /// trim shows the pattern from tick 0, so the second part's trim starts
+    /// as many ticks in as the first part is long. A clip item's trim is
+    /// in the clip's own unit ([`Trim::Clip`](layout::Trim::Clip)), and one
+    /// with a trim is cut where its share of the length is, as
+    /// [`Arrangement::resize_items`] keeps it. A clip item without a trim
+    /// starts at 0 of the clip, and `clip_rate` says how many of the clip's
+    /// units a tick is for it; `None` leaves the item whole.
+    pub fn split_items(
+        &mut self,
+        ids: &[usize],
+        at: i32,
+        clip_rate: impl Fn(&layout::PlaylistItem) -> Option<f32>,
+    ) {
+        let mut seen = Vec::new();
+        let mut pieces = Vec::new();
+        for &id in ids {
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let item = self.items.get_mut(id);
+            let Some(item) = item.filter(|item| item.source().is_some()) else {
+                continue;
+            };
+            let cut = i64::from(at) - i64::from(item.position);
+            if cut <= 0 || cut >= i64::from(item.length) {
+                continue;
+            }
+            let cut = cut as i32;
+            let Some((first, second)) = split_trim(item, cut, &clip_rate) else {
+                continue;
+            };
+            let mut piece = *item;
+            piece.position = at;
+            piece.length = item.length - cut;
+            piece.set_trim(Some(second));
+            // FL numbers an item when it is inserted, see duplicate_items.
+            if piece.len > 32 {
+                piece.id = -1;
+            }
+            item.length = cut;
+            item.set_trim(Some(first));
+            pieces.push(piece);
+        }
+        self.items.extend(pieces);
+    }
+
     /// Select the items, on top of the selection when `add` is set and in
     /// its place when not.
     pub fn select_items(&mut self, ids: &[usize], add: bool) {
@@ -149,6 +204,80 @@ impl Arrangement {
             if let Some(item) = item.filter(|item| item.source().is_some()) {
                 change(item);
             }
+        }
+    }
+}
+
+/// The trims of the two parts [`Arrangement::split_items`] cuts an item
+/// into, `cut` ticks from its start, which is inside it.
+fn split_trim(
+    item: &layout::PlaylistItem,
+    cut: i32,
+    clip_rate: impl Fn(&layout::PlaylistItem) -> Option<f32>,
+) -> Option<(layout::Trim, layout::Trim)> {
+    use layout::{ItemSource, Trim};
+    let ticks = |start: i32, end: i32| {
+        let middle = start.saturating_add(cut);
+        Some((
+            Trim::Ticks { start, end: middle },
+            Trim::Ticks { start: middle, end },
+        ))
+    };
+    let clip = |start: f32, middle: f32, end: f32| {
+        Some((
+            Trim::Clip { start, end: middle },
+            Trim::Clip { start: middle, end },
+        ))
+    };
+    match item.trim() {
+        Some(Trim::Ticks { start, end }) => ticks(start, end),
+        None if matches!(item.source(), Some(ItemSource::Pattern(_))) => ticks(0, item.length),
+        Some(Trim::Clip { start, end }) => {
+            let share = cut as f32 / item.length as f32;
+            clip(start, start + (end - start) * share, end)
+        }
+        None => {
+            let rate = clip_rate(item)?;
+            clip(0.0, cut as f32 * rate, item.length as f32 * rate)
+        }
+    }
+}
+
+impl Project {
+    /// [`Arrangement::split_items`] on the arrangement FL shows.
+    ///
+    /// A clip item without a trim counts beats when its channel is an
+    /// automation clip, and milliseconds of the sample at the project's
+    /// tempo when it is an audio clip that is not stretched or pitched,
+    /// which is what `end - start` of most corpus audio items with a trim
+    /// comes to ([`Trim::Clip`](layout::Trim::Clip)). Any other such item,
+    /// and an audio item in a project without a tempo, is left whole.
+    pub fn split_items(&mut self, ids: &[usize], at: i32) {
+        let ppq = f32::from(self.header.ppq.max(1));
+        let tempo = self.tempo().filter(|tempo| *tempo > 0.0);
+        let kinds: Vec<(u16, Option<ChannelKind>)> = self
+            .channels
+            .iter()
+            .map(|channel| (channel.index, channel.kind))
+            .collect();
+        let clip_rate = |item: &layout::PlaylistItem| {
+            let Some(layout::ItemSource::Channel(index)) = item.source() else {
+                return None;
+            };
+            let (_, kind) = kinds.iter().find(|(at, _)| *at == index)?;
+            let settings = item.clip();
+            match kind {
+                Some(ChannelKind::Automation) => Some(1.0 / ppq),
+                Some(ChannelKind::AudioClip)
+                    if settings.stretch == 1.0 && settings.pitch == 0.0 =>
+                {
+                    Some((60_000.0 / tempo?) as f32 / ppq)
+                }
+                _ => None,
+            }
+        };
+        if let Some(arrangement) = self.current_arrangement_mut() {
+            arrangement.split_items(ids, at, clip_rate);
         }
     }
 }
@@ -361,6 +490,188 @@ mod tests {
         arrangement.move_items(&[1, 7], 96, 1, VERSION);
         arrangement.mute_items(&[1, 7], true);
         assert_eq!(arrangement, before);
+    }
+
+    #[test]
+    fn a_split_leaves_two_items_that_show_what_the_one_did() {
+        let mut trimmed = item(2, 384);
+        trimmed.set_trim(Some(Trim::Ticks {
+            start: 96,
+            end: 480,
+        }));
+        trimmed.id = 7;
+        let mut clip = PlaylistItem::new(ItemSource::Channel(3), 0, 384);
+        clip.set_trim(Some(Trim::Clip {
+            start: 1.0,
+            end: 5.0,
+        }));
+        clip.flags |= PlaylistItem::SELECTED;
+        let untrimmed_clip = PlaylistItem::new(ItemSource::Channel(4), 0, 384);
+        let mut deleted = item(4, 0);
+        deleted.source_id = u32::MAX;
+        let mut arrangement = arrangement(vec![item(1, 0), trimmed, clip, untrimmed_clip, deleted]);
+        // Channel 4's clip counts a unit a tick, and the deleted record and
+        // an ID given twice are skipped.
+        let rate =
+            |item: &PlaylistItem| (item.source() == Some(ItemSource::Channel(4))).then_some(1.0);
+        arrangement.split_items(&[2, 1, 0, 4, 0, 3, 9], 480, rate);
+
+        let items = &arrangement.items;
+        let parts: Vec<_> = items
+            .iter()
+            .map(|item| (item.position, item.length))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                // Each first part ends at the cut.
+                (0, 384),
+                (384, 96),
+                (0, 384),
+                (0, 384),
+                (0, 384),
+                // The second parts follow in the order of the IDs. Item 0
+                // ends where the cut is, so it stays whole, and so do the
+                // clips, which end before it.
+                (480, 288),
+            ]
+        );
+        assert_eq!(
+            items[1].trim(),
+            Some(Trim::Ticks {
+                start: 96,
+                end: 192
+            })
+        );
+        assert_eq!(
+            items[5].trim(),
+            Some(Trim::Ticks {
+                start: 192,
+                end: 480
+            })
+        );
+        assert_eq!(items[5].track(VERSION), 2);
+        // The copy gets FL's "no number yet".
+        assert_eq!((items[1].id, items[5].id), (7, -1));
+
+        // Cut inside every item: a pattern without a trim starts its second
+        // part as far into the pattern as the cut, a trimmed clip is cut at
+        // its share, and an untrimmed one at its rate.
+        let mut arrangement = arrangement.clone();
+        arrangement.items.truncate(5);
+        arrangement.split_items(&[0, 2, 3], 96, rate);
+        let trims: Vec<_> = arrangement.items[5..]
+            .iter()
+            .map(|item| (item.position, item.length, item.trim()))
+            .collect();
+        assert_eq!(
+            trims,
+            [
+                (
+                    96,
+                    288,
+                    Some(Trim::Ticks {
+                        start: 96,
+                        end: 384
+                    })
+                ),
+                (
+                    96,
+                    288,
+                    Some(Trim::Clip {
+                        start: 2.0,
+                        end: 5.0
+                    })
+                ),
+                (
+                    96,
+                    288,
+                    Some(Trim::Clip {
+                        start: 96.0,
+                        end: 384.0
+                    })
+                ),
+            ]
+        );
+        let items = &arrangement.items;
+        assert_eq!(items[0].trim(), Some(Trim::Ticks { start: 0, end: 96 }));
+        assert_eq!(
+            items[2].trim(),
+            Some(Trim::Clip {
+                start: 1.0,
+                end: 2.0
+            })
+        );
+        assert_eq!(
+            items[3].trim(),
+            Some(Trim::Clip {
+                start: 0.0,
+                end: 96.0
+            })
+        );
+        // The pieces keep the selection the item had.
+        assert!(items[2].selected() && items[6].selected());
+        assert!(!items[0].selected() && !items[5].selected());
+
+        // A clip the rate says nothing about stays whole.
+        let mut whole = arrangement.clone();
+        whole.split_items(&[3], 200, |_| None);
+        assert_eq!(whole, arrangement);
+    }
+
+    #[test]
+    fn an_untrimmed_clip_is_split_in_beats_or_milliseconds_at_the_tempo() {
+        use crate::Channel;
+        let mut project = Project::new(flp::Header {
+            format: 0,
+            channel_count: 3,
+            ppq: 96,
+        });
+        project.tempo_milli = Some(120_000);
+        let channel = |index, kind| Channel {
+            index,
+            kind: Some(kind),
+            ..Channel::default()
+        };
+        project.channels = vec![
+            channel(0, ChannelKind::Automation),
+            channel(1, ChannelKind::AudioClip),
+            channel(2, ChannelKind::Sampler),
+        ];
+        let clip = |index| PlaylistItem::new(ItemSource::Channel(index), 0, 384);
+        let mut stretched = clip(1);
+        stretched.stretch = 2.0;
+        project
+            .arrangements
+            .push(arrangement(vec![clip(0), clip(1), clip(2), stretched]));
+
+        project.split_items(&[0, 1, 2, 3], 192);
+        let items = &project.arrangements[0].items;
+        assert_eq!(items.len(), 6);
+        // Two beats of the automation clip, and at 120 BPM two beats are a
+        // second of the sample.
+        assert_eq!(
+            items[4].trim(),
+            Some(Trim::Clip {
+                start: 2.0,
+                end: 4.0
+            })
+        );
+        assert_eq!(
+            items[5].trim(),
+            Some(Trim::Clip {
+                start: 1000.0,
+                end: 2000.0
+            })
+        );
+        // A sampler places no clip, and a stretched one has no rate here.
+        assert_eq!((items[2].length, items[3].length), (384, 384));
+
+        // Without a tempo the audio clip stays whole.
+        project.tempo_milli = None;
+        project.arrangements[0].items = vec![clip(1)];
+        project.split_items(&[0], 192);
+        assert_eq!(project.arrangements[0].items.len(), 1);
     }
 
     #[test]

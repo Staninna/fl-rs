@@ -374,3 +374,150 @@ fn the_graph_shows_the_selected_channel_and_sets_velocities() {
     click(&mut harness, pos + egui::vec2(14.0, 0.0));
     assert_eq!(harness.state().len(), 1);
 }
+
+fn double_click(harness: &mut Harness<'_, Vec<Command>>, pos: egui::Pos2) {
+    for _ in 0..2 {
+        harness.hover_at(pos);
+        harness.drag_at(pos);
+        harness.drop_at(pos);
+    }
+    harness.run();
+}
+
+fn named(channel: u16, name: &str) -> Command {
+    let name = name.to_owned();
+    edit(Edit::SetChannelName { channel, name })
+}
+
+#[test]
+fn a_double_click_on_a_name_or_f2_renames_the_channel() {
+    let mut harness = harness();
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+    let snare = harness.get_by_label("Snare").rect().center();
+    double_click(&mut harness, snare);
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Snare"));
+    field.type_text(" 2");
+    harness.run();
+    // The arrows are the field's while a name is typed.
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state(), &[named(1, "Snare 2")]);
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+
+    // F2 renames the selected channel, which the double click made the
+    // snare. Escape leaves the name, and so does an empty one.
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    harness.get_by_role(Role::TextInput).type_text("s");
+    harness.run();
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    harness.key_press(egui::Key::ArrowUp);
+    harness.run();
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Kick"));
+    for _ in 0..4 {
+        harness.key_press(egui::Key::Backspace);
+    }
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state().len(), 1);
+
+    // A click elsewhere takes the name.
+    let bass = harness.get_by_label("Bass").rect().center();
+    double_click(&mut harness, bass);
+    harness.get_by_role(Role::TextInput).type_text(" line");
+    harness.run();
+    let elsewhere = step(&harness, "Vocal", 3);
+    click(&mut harness, elsewhere);
+    assert_eq!(harness.state().last(), Some(&named(2, "Bass line")));
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+}
+
+#[test]
+fn a_right_click_on_a_switch_solos_its_channel() {
+    let mut harness = harness();
+    for channel in ["Snare on", "Kick on"] {
+        let switch = harness.get_by_label(channel).rect().center();
+        right_click(&mut harness, switch);
+    }
+    let solo = |channel| edit(Edit::SoloChannel { channel });
+    assert_eq!(harness.state(), &[solo(1), solo(0)]);
+}
+
+/// Open a channel's menu and pick an entry of it.
+fn pick(harness: &mut Harness<'_, Vec<Command>>, channel: &str, entry: &str) {
+    let name = harness.get_by_label(channel).rect().center();
+    right_click(harness, name);
+    harness.get_by_label(entry).click();
+    harness.run();
+}
+
+#[test]
+fn the_menu_of_a_name_shifts_its_steps_round_the_pattern() {
+    let mut harness = harness();
+    pick(&mut harness, "Snare", "Shift steps right");
+    pick(&mut harness, "Kick", "Shift steps left");
+    let shift = |channel, by| {
+        edit(Edit::ShiftSteps {
+            channel,
+            by,
+            count: 16,
+        })
+    };
+    assert_eq!(harness.state(), &[shift(1, 1), shift(0, -1)]);
+    // The menu has closed, and nothing else came of the right clicks.
+    assert!(harness.query_by_label("Shift steps left").is_none());
+
+    // The bass has notes from the piano roll, so its entries are off.
+    let bass = harness.get_by_label("Bass").rect().center();
+    right_click(&mut harness, bass);
+    harness.get_by_label("Shift steps right").click();
+    harness.run();
+    assert_eq!(harness.state().len(), 2);
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    // The menu renames too.
+    pick(&mut harness, "Vocal", "Rename");
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Vocal"));
+}
+
+#[test]
+fn the_menu_of_a_name_fills_and_clears_the_steps() {
+    let mut harness = harness();
+    for every in [2, 4, 8] {
+        pick(&mut harness, "Snare", &format!("Fill each {every} steps"));
+    }
+    pick(&mut harness, "Kick", "Clear steps");
+    let fill = |every| {
+        edit(Edit::FillSteps {
+            channel: 1,
+            every,
+            count: 16,
+        })
+    };
+    assert_eq!(
+        harness.state(),
+        &[
+            fill(2),
+            fill(4),
+            fill(8),
+            edit(Edit::ClearSteps { channel: 0 })
+        ]
+    );
+}
+
+#[test]
+fn the_menu_of_a_name_clones_the_channel() {
+    let mut harness = harness();
+    pick(&mut harness, "Bass", "Clone");
+    assert_eq!(harness.state(), &[edit(Edit::CloneChannel { channel: 2 })]);
+}

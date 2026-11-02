@@ -249,7 +249,10 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let keys = !ui.ctx().egui_wants_keyboard_input();
     let pressed = |ui: &mut Ui, key| keys && ui.input_mut(|i| i.consume_key(Modifiers::NONE, key));
     let mut add = pressed(ui, Key::F4);
-    let mut rename = pressed(ui, Key::F2);
+    // F2 is the channel rack's, for its selected channel, while the rack
+    // is shown.
+    let rack = crate::windows::shown(ui.ctx(), crate::windows::Window::ChannelRack);
+    let mut rename = !rack && pressed(ui, Key::F2);
     let mut clone = false;
     let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")

@@ -112,10 +112,13 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
 
     // The piano roll takes its keys before any window is drawn, so that
     // Delete with the pointer over it removes notes and no playlist items.
-    // The browser does the same for the arrows, which the channel rack
-    // would take.
+    // The browser and the playlist do the same for the arrows, which the
+    // channel rack would take.
     if in_view(&layout, Window::PianoRoll) {
         piano_roll::keys(ui, state, out);
+    }
+    if in_view(&layout, Window::Playlist) {
+        playlist::keys(ui, state, out);
     }
     if in_view(&layout, Window::Browser) {
         browser::keys(ui, out);
