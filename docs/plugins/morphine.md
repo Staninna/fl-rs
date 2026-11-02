@@ -93,7 +93,7 @@ shows 141.
 | note on | `FUN_1800fffa0` | envelopes restart with gain from velocity (`FUN_1800fbed0`, `FUN_1800f7880`); each generator picks its zone by the transposed key |
 | note off | `FUN_180100620` | |
 | glide | `FUN_1800e9d90` | from the key last played (`this+0x3990`); nearest held key `FUN_1800e8b70` |
-| pitch | `FUN_1800e9e90`, `FUN_1800e9e50` | |
+| pitch | `FUN_1800e9e90`, `FUN_1800e9e50` | `220 * 2^((transpose + fine + glide - 57) / 12)` Hz, at every spectrum; the port adds a host's pitch change there (see Fidelity) |
 | rates | `FUN_18012cd10`, `FUN_1800fb9d0`, `FUN_180105df0` | `2^(8 (rate + (vel - 0.5)(2 vt - 1)) - 4 + (key - 48)/12 (2 kt - 1))` |
 | time units | `DAT_1801772a0`, `DAT_180177128` | hundredths of a second, or `tempo * 0.41667` a second when synced |
 | loops | `FUN_1800eb970`, `FUN_180101e20` | modes forward, backward, back and forth; loop end `FUN_1800ebc50` |
@@ -151,4 +151,16 @@ oscillator bank and level curve, and the effects, which match the listings
 above term for term and constant for constant. Approximated by the port's own
 account and not rechecked against the binary: the noise layer and the jump an
 envelope or generator makes when released inside its release loop. Left out:
-unison and the per-note tuning a host can send. No null test against FL.
+unison. No null test against FL.
+
+Inferred: how a host's pitch moves a sounding note (`set_note_pitch`, FL's
+`FinalLevels.Pitch`). The engine plays keys: the port starts a note on the
+key its pitch falls in, and nothing above says whether the `CFLWrapper`
+reads the pitch again after that. The port takes the change from the pitch
+the note started at, in semitones, onto the glide in the pitch functions,
+so it reaches the oscillators with the next spectrum (every third control
+block), as the glide does, and the noise layer's tracking with the next
+block. The note's key still picks the zones and drives the key tracking
+and the matrix's key source. A voice keeps the host's number of the note it
+plays, also after its release, and a mono legato hand-over gives it the new
+note's number and pitch.

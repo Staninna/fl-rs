@@ -26,6 +26,13 @@
 //! give what their generic paths give; the qualities above the default keep its interpolator and leave
 //! out the oversampled output filter; portamento and
 //! the velocity-to-envelope mode 2 are left out.
+//!
+//! A sounding note's pitch moves with [`Generator::set_note_pitch`]: the
+//! voice keeps it in place of `FinalLevels.Pitch` and retunes on its next
+//! chunk, where it adds the pitch articulator as every tick does. The doc
+//! gives the sum; that FL reads `FinalLevels.Pitch` again with the
+//! articulator, and not only at the note, is inferred. The keyboard maps
+//! and the pitch articulator's keyboard tracking stay as the note set them.
 
 // The voice and effect kernels index their channels and stages on purpose,
 // as FL's do.
@@ -245,7 +252,11 @@ impl State {
             return Err(StateError::Version { found: raw });
         }
         let version = if raw > 0xffff { raw >> 16 } else { raw };
-        debug_assert!(version <= NEWEST);
+        // A bare version over the newest, which FL never writes, is
+        // turned down as one in the high word is.
+        if version > NEWEST {
+            return Err(StateError::Version { found: raw });
+        }
         let body = miniz_oxide::inflate::decompress_to_vec_zlib(&bytes[4..]).map_err(|_| {
             StateError::Length {
                 expected: bytes.len() + 1,
@@ -1071,6 +1082,15 @@ impl Autogun {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// A sounding voice's pitch in cents and its timbre's step.
+    #[cfg(test)]
+    pub(crate) fn voice_pitch(&self, id: u32) -> Option<(f32, f64)> {
+        self.voices
+            .iter()
+            .find(|v| v.active && v.id == id)
+            .map(|v| (v.cents, v.timbre.step()))
     }
 
     /// Everything that follows from a new state or rate: the engine and its
@@ -2095,6 +2115,14 @@ impl Generator for Autogun {
         self.start(note);
     }
 
+    /// The voice's next chunk adds the pitch articulator to it, as it does
+    /// to the note's pitch.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for sounding in self.voices.iter_mut().filter(|v| v.active && v.id == voice) {
+            sounding.pitch = pitch;
+        }
+    }
+
     fn note_off(&mut self, voice: u32) {
         for slot in 0..self.voices.len() {
             let v = &self.voices[slot];
@@ -2275,6 +2303,25 @@ mod tests {
         let (l, _) = render(&mut plugin, tail);
         assert!(rms(&l[l.len() - 4800..]) < 1e-4);
         assert!(plugin.voices.iter().all(|v| !v.active));
+    }
+
+    #[test]
+    fn a_note_s_pitch_moves_on_the_next_block_and_a_stranger_s_does_nothing() {
+        let mut plugin = small();
+        plugin.note_on(note(60));
+        render(&mut plugin, 4800);
+        let (cents, step) = plugin.voice_pitch(1).unwrap();
+        plugin.set_note_pitch(2, 700.0);
+        render(&mut plugin, 4800);
+        assert_eq!(plugin.voice_pitch(1), Some((cents, step)));
+        plugin.set_note_pitch(1, 1200.0);
+        // Nothing moves before the next block.
+        assert_eq!(plugin.voice_pitch(1), Some((cents, step)));
+        let (l, r) = render(&mut plugin, 4800);
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+        let (bent, bent_step) = plugin.voice_pitch(1).unwrap();
+        assert!((bent - cents - 1200.0).abs() < 1e-3, "{cents} {bent}");
+        assert!((bent_step / step - 2.0).abs() < 1e-6, "{step} {bent_step}");
     }
 
     #[test]

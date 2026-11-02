@@ -25,6 +25,16 @@ Confidence tags: `dec` (decompile), `asm` (listing), `corpus`, `inferred`.
   and `sqrt(p) * 1.4144272` at `+0x1268`/`+0x126c`). Gen_Render
   `FUN_180009740` runs the process and adds the stereo result to FL's
   buffer with no gain. `dec`
+- A note's pitch that moves after its start (a slide note, a pitch clip:
+  FL's host works `FinalLevels.Pitch` out again every tick): the port
+  keeps the MIDI key the note went down on and makes the cents the pitch
+  now lies from it the voice's fine pitch (`+0x1264`, `cents / 1200`
+  octaves), which the voice reads every frame, so the DCO moves from the
+  next block and the cutoff's key follow does not. That the wrapper sends
+  the fine pitch expression again when `FinalLevels.Pitch` moves, with no
+  clamp and with no new key, is `inferred`: its expression path
+  `FUN_1800184f0` is read, the caller that would send it on a change is
+  not. A voice the arpeggiator started keeps its pitch.
 - Process `FUN_180019210`: per frame `FUN_18001b940(this, outL, outR, ppq,
   flag)`; MIDI 0x90/0x80/0xb0/0xe0 at their frame; the arpeggiator's clock.
   `dec`

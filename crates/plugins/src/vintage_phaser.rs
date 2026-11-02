@@ -1238,7 +1238,7 @@ impl VintagePhaser {
     /// range, 0 to 1.
     fn value(index: usize, value: i32) -> f32 {
         let (min, max) = RANGES[index];
-        let v = f64::from(value - min) * (1.0 / f64::from(max - min));
+        let v = (f64::from(value) - f64::from(min)) * (1.0 / f64::from(max - min));
         v.clamp(0.0, 1.0) as f32
     }
 

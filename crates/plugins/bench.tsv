@@ -1,0 +1,104 @@
+# The plugin bench's baseline. Written by: cargo run --release -p plugins --example bench -- --write crates/plugins/bench.tsv
+# kind	name	cost in reference units	ns per frame	times realtime	sound	first call ns	first call % of a 512-frame call's time
+# Only the cost is checked. The first call is one call, too noisy to check.
+effect	Control Surface	0.0015	0.1	373971.6	sound	91	0.0
+effect	Edison	0.0015	0.1	375516.3	sound	80	0.0
+effect	Effector	0.1531	6.3	3602.7	sound	4867	0.0
+effect	Emphasis	15.1354	622.2	36.4	sound	324853	2.8
+effect	Emphasizer	0.0015	0.1	374812.6	sound	180	0.0
+effect	EQUO	3.2416	133.0	170.6	sound	69660	0.6
+effect	Frequency Shifter	1.8235	74.7	303.4	sound	43457	0.4
+effect	Frequency Splitter	1.3538	55.6	407.8	sound	30808	0.3
+effect	Fruity 7 Band EQ	0.0017	0.1	332336.3	sound	43229	0.4
+effect	Fruity Balance	0.0018	0.1	311915.2	sound	858	0.0
+effect	Fruity Bass Boost	0.1854	7.6	2981.0	sound	4045	0.0
+effect	Fruity Blood Overdrive	0.7484	30.7	738.4	sound	41131	0.4
+effect	Fruity Center	0.2029	8.3	2725.7	sound	5272	0.0
+effect	Fruity Chorus	0.4699	19.3	1176.5	sound	10735	0.1
+effect	Fruity Compressor	0.5899	24.2	937.5	sound	14437	0.1
+effect	Fruity Convolver	0.0015	0.1	360880.5	sound	659	0.0
+effect	Fruity dB Meter	0.0015	0.1	377643.5	sound	177	0.0
+effect	Fruity Delay	0.0831	3.4	6649.7	sound	1961	0.0
+effect	Fruity Delay 2	0.4079	16.8	1353.0	sound	8795	0.1
+effect	Fruity Delay 3	2.5433	104.5	217.1	sound	64180	0.6
+effect	Fruity Delay Bank	0.5302	21.8	1042.6	sound	14971	0.1
+effect	Fruity Fast Dist	0.2457	10.1	2250.8	sound	6500	0.1
+effect	Fruity Fast LP	0.0016	0.1	341413.5	sound	731	0.0
+effect	Fruity Filter	0.3692	15.1	1497.5	sound	8182	0.1
+effect	Fruity Flanger	0.2030	8.3	2722.1	sound	4459	0.0
+effect	Fruity Flangus	1.3012	53.4	424.4	sound	28045	0.2
+effect	Fruity Formula Controller	0.0018	0.1	312989.0	sound	870	0.0
+effect	Fruity Free Filter	0.3808	15.6	1450.1	sound	8983	0.1
+effect	Fruity HTML NoteBook	0.0015	0.1	375657.4	sound	193	0.0
+effect	Fruity Limiter	0.8122	33.3	680.9	sound	4064897	35.0
+effect	Fruity Love Philter	1.2901	52.9	428.8	sound	35457	0.3
+effect	Fruity Multiband Compressor	2.8141	115.4	196.4	sound	60655	0.5
+effect	Fruity Mute 2	0.0018	0.1	311720.7	sound	513	0.0
+effect	Fruity NoteBook	0.0015	0.1	372856.1	sound	166	0.0
+effect	Fruity NoteBook 2	0.0015	0.1	374812.6	sound	117	0.0
+effect	Fruity PanOMatic	0.0020	0.1	277469.5	sound	649	0.0
+effect	Fruity Parametric EQ	0.0017	0.1	325203.3	sound	25369	0.2
+effect	Fruity Parametric EQ 2	0.0022	0.1	248139.0	sound	17916	0.2
+effect	Fruity Peak Controller	0.0025	0.1	222074.2	sound	728	0.0
+effect	Fruity Phase Inverter	0.0035	0.1	156225.6	sound	628	0.0
+effect	Fruity Phaser	0.7644	31.4	723.1	sound	19509	0.2
+effect	Fruity Reeverb	0.8797	36.1	628.4	sound	19717	0.2
+effect	Fruity Reeverb 2	1.4000	57.5	394.6	sound	29693	0.3
+effect	Fruity Send	0.0016	0.1	350385.4	sound	717	0.0
+effect	Fruity Soft Clipper	0.0513	2.1	10785.0	sound	1880	0.0
+effect	Fruity Squeeze	0.1980	8.1	2790.5	sound	5713	0.0
+effect	Fruity Stereo Enhancer	0.0018	0.1	301932.4	sound	692	0.0
+effect	Fruity Stereo Shaper	0.0019	0.1	290782.2	sound	867	0.0
+effect	Fruity WaveShaper	0.4213	17.3	1312.7	sound	10194	0.1
+effect	Fruity Wrapper	0.0015	0.1	369549.2	sound	99	0.0
+effect	Fruity X-Y Controller	0.0044	0.2	125675.5	sound	954	0.0
+effect	Fruity X-Y-Z Controller	0.0035	0.1	158277.9	sound	533	0.0
+effect	Gross Beat	0.5155	21.2	1071.8	sound	16355	0.1
+effect	Hyper Chorus	2.2576	92.8	244.4	sound	59189	0.5
+effect	Low Lifter	9.0844	373.0	60.8	sound	269096	2.3
+effect	Luxeverb	8.2137	337.0	67.3	sound	190485	1.6
+effect	Maximus	7.4062	303.7	74.7	sound	176967	1.5
+effect	Patcher	0.0059	0.2	92988.7	silent	1298	0.0
+effect	Pitch Shifter	4.7861	196.2	115.6	sound	27369	0.2
+effect	Pitcher	10.1186	414.9	54.6	sound	242539	2.1
+effect	Razer Chroma	0.0015	0.1	371885.5	sound	172	0.0
+effect	Soundgoodizer	19.4415	796.9	28.5	sound	395569	3.4
+effect	Spreader	1.0818	44.4	510.4	sound	23599	0.2
+effect	Transient Processor	0.7420	30.4	745.1	sound	20924	0.2
+effect	Vintage Chorus	0.8956	36.8	617.0	sound	20744	0.2
+effect	Vintage Phaser	15.2377	624.2	36.3	sound	350144	3.0
+effect	Vocodex	104.1384	4271.4	5.3	sound	2199822	18.9
+effect	Wave Candy	0.0018	0.1	268889.5	sound	118	0.0
+effect	ZGameEditor Visualizer	0.0019	0.1	249812.6	sound	136	0.0
+generator	3x Osc	1.8418	89.3	254.0	sound	87900	0.8
+generator	Autogun	17.1321	703.3	32.2	sound	2941937	25.3
+generator	BassDrum	1.5494	63.6	356.4	sound	138918	1.2
+generator	BeepMap	0.0028	0.1	201005.0	silent	1810	0.0
+generator	BooBass	0.0019	0.1	292825.8	silent	8784	0.1
+generator	DirectWave	0.0048	0.2	115247.2	silent	4861	0.0
+generator	Drumaxx	5.2014	213.3	106.3	sound	113194	1.0
+generator	Drumpad	50.5043	2075.0	10.9	sound	462742	4.0
+generator	FL Keys	0.0018	0.1	308928.0	silent	1747	0.0
+generator	FL Slayer	4.7123	193.3	117.3	sound	164187	1.4
+generator	FPC	0.0018	0.1	306842.6	silent	5691	0.0
+generator	Fruit Kick	2.3614	97.0	233.8	sound	42769	0.4
+generator	Fruity DrumSynth Live	0.7071	29.0	780.7	sound	49802	0.4
+generator	Fruity DX10	0.8133	33.4	679.1	sound	31617	0.3
+generator	Fruity Envelope Controller	0.0022	0.1	248570.7	silent	2428	0.0
+generator	Fruity Granulizer	0.0035	0.1	155739.0	silent	2009	0.0
+generator	Fruity Keyboard Controller	0.0023	0.1	239865.7	silent	2009	0.0
+generator	Fruity Slicer	0.0018	0.1	305530.1	silent	1342	0.0
+generator	Fruity Slicer 2	0.0018	0.1	308451.6	silent	1861	0.0
+generator	GMS	12.3882	508.3	44.6	silent	254850	2.2
+generator	Harmless	6.3092	258.8	87.6	sound	206925	1.8
+generator	Harmor	7.2914	299.3	75.8	sound	282389	2.4
+generator	Kepler	19.4970	800.1	28.3	sound	411059	3.5
+generator	Kepler Exo	19.9723	820.4	27.6	sound	424557	3.7
+generator	MiniSynth	0.0194	0.8	28496.5	silent	6117	0.1
+generator	Morphine	5.7093	234.2	96.8	silent	203125	1.7
+generator	Ogun	19.0905	784.9	28.9	sound	4154361	35.8
+generator	Patcher	0.0075	0.3	74030.2	silent	1362	0.0
+generator	Sakura	4.5189	185.4	122.3	sound	124523	1.1
+generator	Slicex	0.0027	0.1	203169.4	silent	1881	0.0
+generator	Sytrus	1.3578	55.7	407.2	sound	67814	0.6
+generator	Wave Traveller	0.0020	0.1	283045.6	silent	1851	0.0

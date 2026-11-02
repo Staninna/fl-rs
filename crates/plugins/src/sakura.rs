@@ -1233,9 +1233,21 @@ impl Generator for Sakura {
         self.params.get(index).copied().unwrap_or(0.0)
     }
 
-    /// As the state holds it, and not rounded. A NaN is not taken.
+    /// As the state holds it, and not rounded, but kept inside its
+    /// control: a knob 0..1, and the matrix's sources 0..8 and targets
+    /// 0..14, the ratio 0..6 and the delay sync 0..9 whole numbers. A NaN
+    /// is not taken.
     fn set_param(&mut self, index: usize, value: f32) {
         if index < PARAMS && value.is_finite() {
+            let whole = |max: f32| value.round().clamp(0.0, max);
+            let slot = index.checked_sub(MATRIX).filter(|n| *n < 32).map(|n| n % 4);
+            let value = match (index, slot) {
+                (_, Some(0)) => whole(8.0),
+                (_, Some(3)) => whole(14.0),
+                (111, _) => whole(6.0),
+                (112, _) => whole(9.0),
+                _ => value.clamp(0.0, 1.0),
+            };
             self.apply(index, value);
         }
     }

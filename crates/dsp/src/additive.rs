@@ -453,7 +453,7 @@ impl ShapeTable {
     /// side, and the first or the last point outside it.
     pub fn clamped(&self, x: f32, scale: f32, offset: f32) -> f32 {
         let at = x * scale + offset;
-        let i = (at - 0.5).round();
+        let i = crate::round::half_away(at - 0.5);
         if i < 0.0 {
             return self.points[0];
         }
@@ -470,7 +470,7 @@ impl ShapeTable {
     /// the two points either side. The length must be a power of two.
     pub fn wrapped(&self, x: f32, scale: f32, offset: f32) -> f32 {
         let at = x * scale + offset;
-        let floor = (at - 0.5).round();
+        let floor = crate::round::half_away(at - 0.5);
         let frac = at - floor;
         let i = (floor as i64 as usize) & (self.len() - 1);
         self.points[i] * (1.0 - frac) + self.points[i + 1] * frac

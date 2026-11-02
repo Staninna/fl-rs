@@ -195,7 +195,7 @@ impl Derived {
             spacing: (grain * spacing(params[2]) as f32 * (1.0 / 256.0)).max(5.0),
             advance: (ws * ratio * f64::from(1.0f32 / 256.0)) as f32,
             depth: params[4] as f32 * (1.0 / 256.0),
-            speed: (PI / f64::from((204 - params[5]).max(1))) as f32,
+            speed: (PI / f64::from(204i32.saturating_sub(params[5]).max(1))) as f32,
             pan: params[7] as f32 * (1.0 / 64.0),
             start: (i128::from(params[10]) * i128::from(last) / 4096) as i64,
         }
@@ -599,7 +599,7 @@ impl Generator for Granulizer {
     fn set_tempo(&mut self, bpm: f64) {
         if bpm.is_finite() && bpm > 0.0 {
             self.tempo = bpm;
-            self.retab();
+            self.played.set_tempo(&self.tab, bpm);
         }
     }
 

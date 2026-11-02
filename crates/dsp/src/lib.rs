@@ -8,14 +8,20 @@
 //! envelope curve that both the engine and the plugins draw; [`interpolator`],
 //! the sample interpolator FL's plugins share; [`halfband`], the 2x
 //! resampler FL's plugins share; and [`additive`], the sine bank
-//! Image-Line's additive synths build their voices on.
+//! Image-Line's additive synths build their voices on. Two small ones are
+//! shared by several plugins: [`lagrange`], the four-point read FL's grain
+//! shifters use, and [`rand`], the MSVC runtime's `rand()`. [`round`]
+//! rounds as `std` does without a call into the maths library.
 
 pub mod additive;
 pub mod biquad;
 pub mod curve;
 pub mod halfband;
 pub mod interpolator;
+pub mod lagrange;
+pub mod rand;
 pub mod resample;
+pub mod round;
 
 /// Decibels to linear gain. `-inf` and below -200 dB give 0.
 pub fn db_to_gain(db: f32) -> f32 {

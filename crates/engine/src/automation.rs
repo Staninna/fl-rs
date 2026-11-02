@@ -1283,6 +1283,13 @@ impl Automation {
         })
     }
 
+    /// Whether the voices of this sampler or audio clip channel run its
+    /// filter: a clip or a link drives its mod X, mod Y or an offset of
+    /// them.
+    pub fn runs_filter(&self, channel: u16) -> bool {
+        (self.levels.iter()).any(|l| l.channel == channel && l.filter.is_some())
+    }
+
     /// Whether a clip drives the pitch knob of this channel.
     pub fn drives_pitch(&self, channel: u16) -> bool {
         self.pitch_lane(channel).is_some()

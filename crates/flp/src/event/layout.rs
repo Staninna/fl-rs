@@ -172,16 +172,25 @@ macro_rules! records {
 }
 
 layout! {
-    /// 209 `ChannelID.Delay`: 20-byte struct.
+    /// 209 `ChannelID.Delay`: 20-byte struct, the channel's echo delay.
+    /// The loader copies it to `chan+0x200`, where controls 0x200..0x204
+    /// address its fields in order (`docs/rec-channel.md`). A new sampler
+    /// has feedback 0, echoes 4 and time 144.
     Delay[20] {
-        /// The loader multiplies it by 100 for writers below 5.3.7.
-        unknown_0: [u8; 4],
-        /// -6400..6400 in the file; the loader stores it centred at 6400.
-        /// Multiplied by 100 for writers below 5.3.7.
+        /// Control 0x200: how loud each echo is of the one before. 0 makes
+        /// no echo. The loader multiplies it by 100 for writers below 5.3.7.
+        feedback: i32,
+        /// Control 0x201. -6400..6400 in the file; the loader stores it
+        /// centred at 6400. Multiplied by 100 for writers below 5.3.7.
         pan: i32,
-        /// Rewritten as `(v - 120) * 10` for writers below 3.3.1.
-        unknown_8: [u8; 4],
-        unknown_12: [u8; 8],
+        /// Control 0x202, the pitch each echo moves by, in cents (inferred
+        /// from the rewrite). Rewritten as `(v - 120) * 10` for writers
+        /// below 3.3.1.
+        pitch: i32,
+        /// Control 0x203, how many echoes. The legacy 130 writes it too.
+        echoes: i32,
+        /// Control 0x204, the time between echoes.
+        time: i32,
     }
 }
 
@@ -246,13 +255,25 @@ layout! {
         /// How many times the arpeggiator plays each round of the notes,
         /// control 0x305.
         arp_repeat: i32,
+        /// The time stretch's time, control 14 (`chan+0x2e4`), 0 when off.
         /// An f32 when 169 bit 0 is set, otherwise an integer the loader
-        /// converts to one.
-        unknown_96: [u8; 4],
-        unknown_100: [u8; 8],
-        /// Remapped by the loader for writers below 6.1.5 and below 11.5.13.
+        /// converts to one, so it stays bytes here.
+        stretch_time: [u8; 4],
+        /// The time stretch's pitch in cents, `chan+0x2e8`, 0 when off
+        /// (PyFLP's `stretching.pitch`).
+        stretch_pitch: i32,
+        /// The time stretch's multiplier, `chan+0x2ec`, 0 for 1x (PyFLP's
+        /// `stretching.multiplier`, a log 2 scale; inferred).
+        stretch_multiplier: i32,
+        /// The time stretch's mode, `chan+0x2f0`. Remapped by the loader for
+        /// writers below 6.1.5 and below 11.5.13.
         stretch_mode: i32,
-        unknown_112: [u8; 56],
+        unknown_112: [u8; 48],
+        /// The formant shift, control 15, an f64 at `chan+0x324`: 0.5, the
+        /// knob's 1200 of 2400, moves nothing (a new sampler's value; the
+        /// scale is inferred). Bytes, as a float would not compare equal
+        /// to itself when it is NaN.
+        formant: [u8; 8],
     }
 }
 
@@ -276,11 +297,42 @@ layout! {
     /// 218 `ChannelID.EnvelopeLFO`: 68-byte struct, one per envelope in
     /// channel order. The loader also takes a shorter payload and fills in
     /// the missing tail.
+    ///
+    /// The loader copies it to `+0x198 + 0xa0 e` of the channel's sample
+    /// object, where control `0x1000 + 0x100 e + f` addresses the i32 at
+    /// `4 f` (`docs/rec-channel.md`), which names fields 2 to 9. The
+    /// others follow PyFLP's `_EnvelopeLFOStruct`.
     EnvelopeLfo[68, len 0..=68] {
         /// In a payload under 68 bytes, bit 3 makes the loader set offset 56
         /// to -101 and bit 6 offset 60.
         flags: u8,
-        unknown_1: [u8; 55],
+        unknown_1: [u8; 3],
+        /// The envelope's switch: 0 off.
+        enabled: i32,
+        /// Field 2.
+        predelay: i32,
+        /// Field 3.
+        attack: i32,
+        /// Field 4.
+        hold: i32,
+        /// Field 5.
+        decay: i32,
+        /// Field 6.
+        sustain: i32,
+        /// Field 7.
+        release: i32,
+        /// Field 8, the envelope's amount: 0 moves nothing.
+        amount: i32,
+        /// Field 9.
+        lfo_predelay: i32,
+        /// Field 10.
+        lfo_attack: i32,
+        /// Field 11, the LFO's amount: 0 moves nothing.
+        lfo_amount: i32,
+        /// Field 12.
+        lfo_speed: i32,
+        /// Field 13.
+        lfo_shape: i32,
         unknown_56: [u8; 4],
         unknown_60: [u8; 4],
         unknown_64: [u8; 4],
@@ -399,9 +451,19 @@ layout! {
 }
 
 layout! {
-    /// 228 `ChannelID.Tracking`: 16-byte struct, two per channel in order.
+    /// 228 `ChannelID.Tracking`: 16-byte struct, two per channel in order:
+    /// the velocity's, then the key's. The loader copies record `r` to
+    /// `chan+0x1ac + 0x20 r`, and control `0x500 + 0x10 r + f` addresses
+    /// the knob at `chan+0x1b0 + 0x20 r + 4 f` (`docs/rec-channel.md`).
     Tracking[16] {
-        unknown_0: [u8; 16],
+        /// The velocity or the key that tracking moves nothing at.
+        middle: i32,
+        /// Control `0x500 + 0x10 r`, -256..256: 0 tracks nothing.
+        pan: i32,
+        /// Control `0x501 + 0x10 r`.
+        mod_x: i32,
+        /// Control `0x502 + 0x10 r`.
+        mod_y: i32,
     }
 }
 
@@ -1100,10 +1162,10 @@ mod tests {
     #[test]
     fn delay() {
         let d = exact(20, Delay::from_bytes, Delay::to_bytes);
-        assert_eq!(d.unknown_0, [0, 1, 2, 3]);
+        assert_eq!(d.feedback, at(0) as i32);
         assert_eq!(d.pan, at(4) as i32);
-        assert_eq!(d.unknown_8, [8, 9, 10, 11]);
-        assert_eq!(d.unknown_12, [12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(d.pitch, at(8) as i32);
+        assert_eq!((d.echoes, d.time), (at(12) as i32, at(16) as i32));
         let mut bytes = ramp(20);
         bytes[4..8].copy_from_slice(&(-6400i32).to_le_bytes());
         assert_eq!(Delay::from_bytes(&bytes).unwrap().pan, -6400);
@@ -1138,9 +1200,11 @@ mod tests {
         assert_eq!((p.arp_slide, p.unknown_61), (60, [61, 62, 63]));
         assert_eq!(p.gate_time, at(64));
         assert_eq!(p.arp_repeat, at(92) as i32);
-        assert_eq!(p.unknown_96, [96, 97, 98, 99]);
+        assert_eq!(p.stretch_time, [96, 97, 98, 99]);
+        assert_eq!(p.stretch_pitch, at(100) as i32);
+        assert_eq!(p.stretch_multiplier, at(104) as i32);
         assert_eq!(p.stretch_mode, at(108) as i32);
-        assert_eq!(p.unknown_112[55], 167);
+        assert_eq!(p.formant[7], 167);
         // A size that ends inside the last field.
         let short = prefix(125, Parameters::from_bytes, Parameters::to_bytes);
         assert_eq!(short.len, 125);
@@ -1173,6 +1237,9 @@ mod tests {
         let e = prefix(68, EnvelopeLfo::from_bytes, EnvelopeLfo::to_bytes);
         assert_eq!(e.len, 68);
         assert_eq!(e.unknown_1[0], 1);
+        assert_eq!(e.enabled, at(4) as i32);
+        assert_eq!(e.amount, at(32) as i32);
+        assert_eq!(e.lfo_amount, at(44) as i32);
         assert_eq!(e.unknown_56, [56, 57, 58, 59]);
         assert_eq!(e.unknown_60, [60, 61, 62, 63]);
         assert_eq!(e.unknown_64, [64, 65, 66, 67]);
@@ -1441,7 +1508,8 @@ mod tests {
     #[test]
     fn tracking() {
         let t = exact(16, Tracking::from_bytes, Tracking::to_bytes);
-        assert_eq!(t.unknown_0[..], ramp(16));
+        assert_eq!((t.middle, t.pan), (at(0) as i32, at(4) as i32));
+        assert_eq!((t.mod_x, t.mod_y), (at(8) as i32, at(12) as i32));
     }
 
     #[test]

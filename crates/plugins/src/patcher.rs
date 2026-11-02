@@ -895,11 +895,22 @@ fn two(buffers: &mut [Stereo], read: usize, write: usize) -> (&Stereo, &mut Ster
 
 /// The Patcher in an effect slot, with the graph its state holds. A new
 /// one holds nothing and plays silence, as FL's does before its state.
-#[derive(Default)]
 pub struct Patcher {
     graph: Graph,
     told: Told,
     patch: Patch,
+}
+
+impl Default for Patcher {
+    /// The graph of an empty state: a "To FL" sum nothing is wired into.
+    fn default() -> Self {
+        let (told, patch) = (Told::default(), Patch::default());
+        Patcher {
+            graph: Graph::build(&patch, &told),
+            told,
+            patch,
+        }
+    }
 }
 
 impl Patcher {
@@ -1024,11 +1035,22 @@ impl Effect for Patcher {
 
 /// The Patcher on a channel. FL's notes go to the generators its "Notes"
 /// port is wired to.
-#[derive(Default)]
 pub struct PatcherGenerator {
     graph: Graph,
     told: Told,
     patch: Patch,
+}
+
+impl Default for PatcherGenerator {
+    /// The graph of an empty state: a "To FL" sum nothing is wired into.
+    fn default() -> Self {
+        let (told, patch) = (Told::default(), Patch::default());
+        PatcherGenerator {
+            graph: Graph::build(&patch, &told),
+            told,
+            patch,
+        }
+    }
 }
 
 impl PatcherGenerator {
@@ -1192,6 +1214,25 @@ impl Generator for PatcherGenerator {
 mod tests {
     use super::*;
     use crate::testing::{self, bits, sine};
+
+    #[test]
+    fn a_patcher_with_no_state_plays_silence() {
+        let mut effect = Patcher::default();
+        effect.set_sample_rate(44_100.0);
+        let (mut left, mut right) = (vec![0.5; 1000], vec![0.5; 1000]);
+        effect.process(&mut left, &mut right);
+        assert!(left.iter().chain(&right).all(|&v| v == 0.0));
+        let mut generator = PatcherGenerator::default();
+        generator.set_sample_rate(44_100.0);
+        generator.note_on(NoteOn {
+            voice: 1,
+            key: 60,
+            ..NoteOn::default()
+        });
+        let (mut left, mut right) = (vec![0.0; 1000], vec![0.0; 1000]);
+        generator.process(&mut left, &mut right);
+        assert!(left.iter().chain(&right).all(|&v| v == 0.0));
+    }
 
     /// A Patcher state, chunk by chunk.
     struct State(Vec<u8>);

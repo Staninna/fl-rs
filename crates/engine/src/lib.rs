@@ -83,7 +83,10 @@
 //! the envelope is played, and its LFO is not. An audio clip is not
 //! time-stretched: its item's stretch is counted in
 //! [`Rendered::unsupported_stretch`] and the channel's own stretch settings
-//! are not read.
+//! are not played. Nor are a channel's instrument envelopes and LFOs, its
+//! time stretch and formant, its tracking of mod X and Y on a sampler whose
+//! filter does not run, its echo delay, or a TS404 channel:
+//! [`Rendered::unplayed_parts`] counts the channels that turn each on.
 //!
 //! An effect slot plays its plugin when the [`plugins`] crate has it, which
 //! [`Rendered::hosted_slots`] counts. Any other slot passes its input
@@ -127,6 +130,7 @@ mod graph;
 mod levels;
 mod live;
 mod mix;
+mod parts;
 mod pool;
 mod sample;
 mod sequence;
@@ -137,6 +141,7 @@ mod voice;
 pub use curves::{Approximate, Curves, FlExact};
 pub use engine::Engine;
 pub use mix::Part;
+pub use parts::UnplayedParts;
 pub use sample::{PreparedSamples, prepare};
 pub use transport::Transport;
 
@@ -250,6 +255,11 @@ pub struct Rendered {
     /// part, and how many channels ask for each. Their notes play as they
     /// are, not arpeggiated.
     pub unplayed_arpeggiators: BTreeMap<&'static str, usize>,
+    /// The channels with a note or a clip inside the render that sounds,
+    /// and the TS404 channels with a note there, that turn on a part of
+    /// FL's channel the engine does not play, by that part
+    /// (`docs/rec-channel.md`, "Left out").
+    pub unplayed_parts: UnplayedParts,
     /// How many frames late the output is when the render starts: what the
     /// plugins on the latest way to the master add up to. Every other way
     /// there is held back to come out with it.
@@ -369,6 +379,7 @@ pub fn render_with_progress(
     let unhosted_generators = graph.unhosted_generators.clone();
     let approximated_generators = graph.approximated_generators.clone();
     let unplayed_arpeggiators = graph.unplayed_arpeggiators.clone();
+    let unplayed_parts = graph.unplayed_parts;
     let (latency, delayed_inserts) = (graph.mixer.latency(), graph.mixer.delayed());
 
     // A voice for every note and clip, so that none is ever stolen.
@@ -417,6 +428,7 @@ pub fn render_with_progress(
         unhosted_generators,
         approximated_generators,
         unplayed_arpeggiators,
+        unplayed_parts,
         latency,
         delayed_inserts,
         unresolved: samples.unresolved(),

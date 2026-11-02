@@ -20,10 +20,12 @@
 //! would give a note, along the drag, each on the key the pointer was on
 //! when it got there: one undo step for the whole drag, as FL's paint does.
 //! On a note it moves and resizes as the draw tool does. The slice tool
-//! cuts the notes in two where it is pressed, snapped to the grid, on
-//! every key from the one it is pressed on to the one it is let go on: FL
-//! cuts along the line a drag draws, and this keeps that line upright. A
-//! click with it cuts the note under the pointer.
+//! cuts the notes along the line it is dragged, as FL's does: each note on
+//! a key from the one it is pressed on to the one it is let go on is cut
+//! in two where the line crosses the note's row, snapped to the grid. A
+//! drag that ends at the step it began on, or on its key, cuts upright
+//! at the step it began on. A click with it cuts the note under the
+//! pointer.
 //!
 //! The Tools menu does what FL's Tools menu does at its default settings,
 //! to the selected notes, or to all of the channel's notes when none is
@@ -64,7 +66,8 @@
 //! pattern plays in pattern mode the play cursor runs across the notes,
 //! and the view turns a page when the cursor leaves it. A drag along the
 //! ruler sets the ticks the pattern plays round, snapped, and a click on
-//! the ruler plays the whole pattern again.
+//! the ruler plays the whole pattern again and, in pattern mode, moves the
+//! clock to where it is, snapped, as FL's does.
 //!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
@@ -373,7 +376,8 @@ enum Gesture {
         origin: u64,
         notes: Vec<(u64, u8)>,
     },
-    /// Cut the notes at `at`, on the keys from `key` to the pointer's.
+    /// Cut the notes along the line from `at` on `key` to the pointer,
+    /// or at `at` on the keys from `key` to the pointer's.
     Slice { at: u64, key: i32 },
     /// Select the notes in the rectangle from where the pointer went down:
     /// that tick, and that many points under the top of the highest key.
@@ -1110,7 +1114,8 @@ impl Roll<'_> {
     }
 
     /// The ruler's range: drawn over the ruler and the notes, and set by a
-    /// drag along the ruler.
+    /// drag along the ruler. A click on the ruler lets go of the range and,
+    /// in pattern mode, moves the clock to the step it is nearest.
     fn ruler(
         &self,
         ui: &Ui,
@@ -1141,8 +1146,18 @@ impl Roll<'_> {
                 out.push(Command::SetLoopRange(Some((from, to))));
             }
         }
-        if response.clicked() && range.is_some() {
-            out.push(Command::SetLoopRange(None));
+        if response.clicked() {
+            if range.is_some() {
+                out.push(Command::SetLoopRange(None));
+            }
+            // In pattern mode the clock is the pattern's, and a click puts
+            // it there, snapped. In song mode it is the song's, which the
+            // pattern's ticks say nothing about.
+            if self.playhead.is_some()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                out.push(Command::Seek(tick(pos.x)));
+            }
         }
         let shown = if memory.range.is_some() {
             dragged
@@ -1360,21 +1375,54 @@ impl Roll<'_> {
                     }
                 }
                 Gesture::Slice { at, key } => {
-                    let (at, under) = (*at, view.key(pos.y));
-                    let (low, high) = ((*key).min(under), (*key).max(under));
-                    let rows = egui::Rangef::new(view.y(high), view.y(low) + KEY);
-                    painter.vline(time.x(at as f32), rows, Stroke::new(1.5, strong));
+                    let (at, key, under) = (*at, *key, view.key(pos.y));
+                    let to = snap(time.tick(pos.x), step).max(0) as u64;
+                    let (from, to) = ((at, key), (to, under));
+                    // A drag that ends on another key and at another tick
+                    // draws a slanted line, which cuts each key where it
+                    // crosses the key's row. Otherwise the line is upright
+                    // at the tick the drag began on.
+                    let slanted = to.0 != at && under != key;
+                    let line = Stroke::new(1.5, strong);
+                    if slanted {
+                        let centre = |(tick, key): (u64, i32)| {
+                            pos2(time.x(tick as f32), view.y(key) + KEY / 2.0)
+                        };
+                        painter.line_segment([centre(from), centre(to)], line);
+                    } else {
+                        let (low, high) = (key.min(under), key.max(under));
+                        let rows = egui::Rangef::new(view.y(high), view.y(low) + KEY);
+                        painter.vline(time.x(at as f32), rows, line);
+                    }
                     if dropped {
                         let cut = |(_, note): &&(NoteId, &Note)| {
-                            let at = at as i64;
-                            (low..=high).contains(&i32::from(note.key))
-                                && note.length > 0
-                                && i64::from(note.position) < at
-                                && at < view.end(note)
+                            let on = i32::from(note.key);
+                            let crossed = if slanted {
+                                model::slice_line_at(from, to, on, step)
+                            } else {
+                                let keys = key.min(under)..=key.max(under);
+                                keys.contains(&on).then_some(at)
+                            };
+                            crossed.is_some_and(|at| {
+                                let at = at as i64;
+                                note.length > 0
+                                    && i64::from(note.position) < at
+                                    && at < view.end(note)
+                            })
                         };
                         let ids: Vec<NoteId> = own.iter().filter(cut).map(|(id, _)| *id).collect();
                         if !ids.is_empty() {
-                            out.push(edit(Edit::SliceNotes { ids, at }, None));
+                            let cut = if slanted {
+                                Edit::SliceNotesAlong {
+                                    ids,
+                                    from,
+                                    to,
+                                    step,
+                                }
+                            } else {
+                                Edit::SliceNotes { ids, at }
+                            };
+                            out.push(edit(cut, None));
                         }
                     }
                 }

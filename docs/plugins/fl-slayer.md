@@ -285,6 +285,22 @@ The left is copied to the right, then the MST effects:
 | 14 Dub Delay | `trunc(0.0929 par1 rate) + 1` samples on the left, dry on the right |
 | 15 Multitap | taps of `rate 60 / tempo beats[trunc(4 par1)]`, half that and 1.45 ms, feedback `par2` through one-poles |
 
+## A note's moved pitch
+
+A slide note or a pitch clip moves a note's pitch after it starts (FL's
+host works `FinalLevels.Pitch` out again every tick). VST 2 has no message
+that retunes one note, and the bridge is not read, so how FL hands the
+move to the engine is `inferred`: the port keeps the key the note went
+down on and gives the strings that note plucked the detune its note-on
+would have had, the cents the pitch now lies from the key, rounded and
+held to -127..127 (the cents table at 0x520a68), at the next control tick
+as a MIDI event would be. By Aid: one string a key in None, Strumming and
+the solo modes (in a solo mode the string the first key plucked, whose
+pitch the glide moves on top); the three of PwrChords with their own
+cents on top; AutoChords pluck with no detune and keep it. A move of more
+than 127 cents from the key stops there, and a note let go of keeps its
+pitch.
+
 ## What is left out
 
 - Pitch bend, the mod wheel and the glissando: the host sends neither, so

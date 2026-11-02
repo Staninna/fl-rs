@@ -257,6 +257,7 @@ impl Default for Pitcher {
             pitcher.apply(index, value);
         }
         pitcher.find_allowed();
+        pitcher.restart_now();
         pitcher
     }
 }
@@ -313,6 +314,16 @@ impl Pitcher {
         }
         self.count = 0;
         self.restart_shifters();
+    }
+
+    /// The restart a parameter asked for, done now rather than by the next
+    /// block, so that a plugin just made or loaded does not clear its
+    /// buffers in its first block. Nothing plays in between, so the next
+    /// block starts from the same place either way.
+    fn restart_now(&mut self) {
+        if self.restart {
+            self.restart_shifters();
+        }
     }
 
     /// Start both shifters over (`FUN_18001d290`).
@@ -925,6 +936,7 @@ impl Effect for Pitcher {
             }
         }
         self.find_allowed();
+        self.restart_now();
         Ok(())
     }
 
@@ -1101,6 +1113,20 @@ mod tests {
     // The detector measures a period in whole samples, so near 440 Hz at
     // 44 kHz it can be 0.5 % out, 8 cents. The corrected pitch is as far
     // from the note.
+
+    #[test]
+    fn a_restart_is_done_at_load_and_the_first_block_plays_the_same() {
+        let scale = [true; 12];
+        assert!(!Pitcher::default().restart);
+        let mut loaded = with(&[(FORMANT, 1.0)], scale);
+        assert!(!loaded.restart);
+        // As it was: the restart left to the first block.
+        let mut late = with(&[(FORMANT, 1.0)], scale);
+        late.restart = true;
+        let input = tone(220.0);
+        let (a, b) = (run(&mut loaded, &input), run(&mut late, &input));
+        assert!(a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
 
     #[test]
     fn a_sine_30_cents_sharp_comes_out_on_the_a() {

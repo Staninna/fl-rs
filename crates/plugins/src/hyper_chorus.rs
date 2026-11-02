@@ -40,6 +40,7 @@
 //! defaults, as in FL.
 
 use crate::{Effect, StateError, knob_value, state_version};
+use dsp::rand::msvc as rand;
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Hyper Chorus";
@@ -101,12 +102,6 @@ const HIGH: f32 = f32::from_bits(0x40d0_2a30);
 
 /// A gliding value nearer its target than this is put there.
 const NEAR: f32 = 1e-4;
-
-/// The MSVC runtime's `rand()`.
-fn rand(seed: &mut u32) -> u32 {
-    *seed = seed.wrapping_mul(214_013).wrapping_add(2_531_011);
-    (*seed >> 16) & 0x7fff
-}
 
 /// Four numbers from 0 to 1 from `rand()`, as the engine starts its LFOs.
 fn phases(seed: &mut u32) -> [f32; 4] {
@@ -268,7 +263,10 @@ impl Biquad {
     /// `FUN_180003030` for type 1, low-pass, or type 2, high-pass: the
     /// cookbook's with `alpha = sin w`, a Q of 0.5.
     fn new(high: bool, hz: f64, rate: f64) -> Self {
-        let w = hz * std::f64::consts::TAU * (1.0 / rate);
+        // Past Nyquist `sin w` turns negative and the filter runs away,
+        // as FL's does with its 22 kHz low-pass under 44 kHz. The corner
+        // stays under it there; up to 0.4995 of the rate it is FL's.
+        let w = (hz * std::f64::consts::TAU * (1.0 / rate)).min(std::f64::consts::PI * 0.999);
         let (sin, cos) = w.sin_cos();
         let norm = 1.0 / (sin + 1.0);
         let (b0, b1) = if high {

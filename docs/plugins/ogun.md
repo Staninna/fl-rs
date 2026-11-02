@@ -177,9 +177,12 @@ forwards every `Generator` method. All the work is in the shared files:
   and `Timbre::render` then reads with the linear interpolator.
 - `fidelity()` reports Ogun's own messages. Of the qualities it flags
   only 2 to 4; quality 0 is not flagged.
+- `set_note_pitch` goes to Autogun's, which retunes the voice that plays
+  the note.
 
 The `ogun.rs` tests check that Ogun's output is 4 times Autogun's at the
-same settings, that Ogun reports no latency and needs no `SG.dat`, that
+same settings, that a host's pitch moves the voice's timbre step a fifth
+down on the next block and a number no note has moves nothing, that Ogun reports no latency and needs no `SG.dat`, that
 every corpus state parses to the last byte with seed 0 and versions
 spanning 0 to 19, that every project state plays a finite note at a sane
 level, and that every preset plays with no NaN.
@@ -200,6 +203,10 @@ the plugin is made, so its own notes differ from run to run. Qualities 2 to
 4 keep the 6-point interpolator, so quality 4 lacks its longer one, and
 they leave out the output oversampling filter. Portamento and
 velocity-to-envelope mode 2 are left out. 16 voices.
+
+Inferred, as for Autogun (autogun.md section 6): a host's pitch change
+(`set_note_pitch`, which `ogun.rs` forwards) retunes a sounding voice on its
+next chunk, read again with the pitch articulator.
 
 Guessed: a reset articulator equals Autogun's `blank_state` one. Leaving
 out `FUN_00784a40` keeps the curve's shape. The resampler's CPU-specific

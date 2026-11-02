@@ -194,7 +194,8 @@ PROJECT = re.compile(
     r"^.+: notes \d+ voices \d+ clips \d+ stretched (\d+) unresolved (\d+) unsupported (\d+) "
     r"skipped \d+ automation \d+ unsupported targets (\d+) hosted slots \d+ unhosted (\d+) "
     r"generators \d+ unhosted (\d+) approximated generators (\d+) approximated (\d+) "
-    r"unplayed arpeggiators (\d+) .* peak ([\d.]+) "
+    r"unplayed arpeggiators (\d+) unplayed envelopes (\d+) unplayed time stretch (\d+) "
+    r"unplayed tracking (\d+) unplayed echo delays (\d+) TS404 (\d+) .* peak ([\d.]+) "
 )
 
 

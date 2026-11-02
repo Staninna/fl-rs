@@ -261,5 +261,9 @@ samples at 44.1 kHz and not 140; at 2500 it is 69, at 10000 it is 279.
 
 - A block of any length is processed whole; the library's wrapper stops at
   0x4000 frames.
+- Below 30 kHz the 15 kHz corner of `c` is past Nyquist, where `c` is
+  negative and the split is unstable, so FL's output runs to infinity. The
+  angle `47123.89 / SR` is held to at most `0.45 pi` there, so the split
+  stays stable; at 33.3 kHz and up nothing changes.
 - States that have gone subnormal are zeroed after each block; FL runs with
   flush-to-zero set.

@@ -142,14 +142,41 @@ Left out, and why:
   engine plays none of the four on a plugin channel: `Square a Saw -
   Oxygen` channel 51 (3x Osc) keeps its two clips on mod X unsupported.
 - Time stretch and formant (14, 15), the instrument envelopes
-  (0x1000..), tracking, delay, TS404: the engine plays none of these parts
-  of a channel. Nor the arpeggiator's direction, range, chord and repeat
+  (0x1000..), the tracking of mod X and Y on a sampler whose filter does
+  not run, the echo delay (0x200..), TS404 (0x103..): the engine plays
+  none of these parts of a channel, and counts the channels that turn
+  each on (below, "Channel parts the engine counts"). Nor the arpeggiator's direction, range, chord and repeat
   (0x300..0x302, 0x305) from a clip, which no corpus clip drives, nor its
   time and gate from a controller link: the arpeggios are worked out from
   the song before it plays.
 - An automation clip's LFO (0x600, 0x604) when that clip's LFO is on. The
   engine plays a clip's envelope alone. A clip whose LFO is off, which
   every clip these drive in the corpus is, is played: see below.
+
+## Channel parts the engine counts (crates/engine/src/parts.rs)
+
+A render counts, in `Rendered::unplayed_parts`, the channels that turn on
+a part the engine leaves out, as it counts the arpeggiators it does not
+build (`docs/arpeggiator.md`). The corpus test prints the counts on each
+project's line (`unplayed envelopes`, `unplayed time stretch`, `unplayed
+tracking`, `unplayed echo delays`, `TS404`) and adds them up on its
+`corpus channel parts` line, and `tools/progress.py --render` counts a
+project with any of them as not played in full. A channel counts when it
+has a note that sounds in the render (a sampler voice with its sample, or
+a note for a hosted generator), and for the envelopes and the time
+stretch also an audio clip that sounds; a TS404 counts with a note, as
+nothing of it sounds. A channel counts once for each part it turns on.
+
+What turns each part on is a reading of what moves the sound, in
+`model::Channel`:
+
+| part | events and layout | on when | confidence |
+|---|---|---|---|
+| instrument envelopes and LFOs (`envelope_on`) | five 218 `EnvelopeLFO`, 68 bytes each, one per target in order pan, volume, mod X, mod Y, pitch. i32s: @0 flags (a byte), @4 the envelope's switch, @8 predelay, @12 attack, @16 hold, @20 decay, @24 sustain, @28 release, @32 amount, @36 LFO predelay, @40 LFO attack, @44 LFO amount, @48 LFO speed, @52 LFO shape, @56..@67 tensions. The loader copies each to `smp+0x198 + 0xa0 e`, and control `0x1000 + 0x100 e + f` is the i32 at `4 f` | an envelope's switch is on and its amount is off 0, or its switch is on and it is the volume's; or an LFO's amount is off 0 | fields 2 to 9 loader and dfm (the map above); the switch @4, the LFO fields and the order of the targets PyFLP and inferred. A new sampler (`model`'s `NEW_SAMPLER`, from FL's `Empty.flp`) has every switch off and every amount 0, and its second record alone has other flags and a tension, which fits the volume being second. That the volume envelope works at amount 0 is inferred |
+| time stretch and formant (`time_stretch_on`), sampler and audio clip channels only | 215 `Parameters`: @96 the stretch time (control 14, `chan+0x2e4`; an f32 with 169 bit 0, an integer otherwise), @100 i32 the stretch pitch in cents (`chan+0x2e8`), @104 i32 the multiplier (`chan+0x2ec`), @108 i32 the mode (`chan+0x2f0`), @160 f64 the formant (control 15, `chan+0x324`) | the time, the pitch or the multiplier is off 0, or the formant is in the payload and off 0.5. The mode alone moves nothing | offsets loader (the 215 base `chan+0x284` and the struct offsets above); pitch and multiplier names PyFLP; the multiplier's 0 for 1x and the formant's 0.5 for its centre inferred from a new sampler, which has 0, 0, 0, 0 and 0.5. An audio clip stretched to its own length at the project's tempo counts, though it may sound the same |
+| tracking of mod X and Y (`tracks_mods`), sampler channels whose filter does not run | two 228 `Tracking`, 16 bytes each, the velocity's then the key's: i32 @0 the middle, @4 pan, @8 mod X, @12 mod Y. The loader copies record `r` to `chan+0x1ac + 0x20 r`, so control `0x500 + 0x10 r + f` is the knob at @`4 + 4 f` | a mod X or mod Y knob of either record is off 0, on a sampler whose voices do not run the filter (no clip or link drives its mod X, mod Y or their offsets). Pan tracking is played on every channel, and a plugin is handed its tracked mods (`crates/engine/src/levels.rs`) | loader and dfm for the knobs; the middle and the velocity-then-key order as `levels.rs` reads them. A new sampler has middles 100 and 60 and every knob 0 |
+| echo delay (`echo_delay_on`) | 209 `Delay`, 20 bytes, five i32: @0 feedback, @4 pan, @8 pitch, @12 echoes, @16 time, copied to `chan+0x200`, controls 0x200..0x204 in that order | feedback above 0 and at least one echo | loader and dfm for the order; the legacy 130 writes echoes to `chan+0x20c` (@12) and a feedback that grows with them to `chan+0x200` (@0). That feedback 0 makes no echo is inferred: a new sampler has feedback 0, 4 echoes and time 144 |
+| TS404 (`is_ts404`) | 21 `ChannelID.Type` 1, whose controls 0x103..0x125 address the object at `chan+0x358` (210 `LegacySampleState` fills it) | the channel is of type 1 | inferred: FL 3's TS404 was a channel type, and no corpus project has type 1 or a 210. No filter type is a TS404: 219 @20 has the eight kinds of the table at 0x1510e40 |
 
 ## Corpus
 

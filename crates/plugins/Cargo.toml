@@ -13,6 +13,10 @@ miniz_oxide = "0.9"
 # Convolver's impulses are WavPack files.
 wavicle = "0.1"
 
+[dev-dependencies]
+# The plugin bench flushes denormals to zero, as the engine does.
+no_denormals = "0.3"
+
 [features]
 # TestSine, a generator FL does not have. The engine's tests play it.
 test-generators = []

@@ -473,10 +473,7 @@ mod tests {
             tempo: 120.0,
         };
         let mut seed = 1u32;
-        let mut rand = || {
-            seed = seed.wrapping_mul(214_013).wrapping_add(2_531_011);
-            ((seed >> 16) & 0x7fff) as i32
-        };
+        let mut rand = || dsp::rand::msvc(&mut seed) as i32;
         let (mut delay, mut chorus, mut reverb) =
             (Delay::default(), Chorus::default(), Reverb::default());
         reverb.prepare(44_100.0);

@@ -38,7 +38,7 @@ The user is working at this machine. Open no windows and play no sound: no `carg
 - Its doc in `docs/plugins/<name>.md` maps the state and the signal chain with function addresses.
 - Its `docs/plugins.md` row says what is exact and what is approximated, and its line in `crates/plugins/src/port.rs` gives the level that row bears out: `Exact` when nothing is approximated or left out, `Gaps` when the row names parts that are, `Approximate` when the sound itself is. `Identical` waits for a null test against FL. `python3 -I tools/progress.py --check` passes.
 - Read the DSP from the binary rather than guessing. Where you approximate, say so in the row and in the plugin's `fidelity()`.
-- The audio path allocates nothing. Size buffers in `set_state` and `set_sample_rate`. `process`, `tick`, `set_tempo` and `set_param` run on the audio thread (tempo automation calls `set_tempo` mid-song), so they must not allocate.
+- The audio path allocates nothing. Size buffers in `set_state` and `set_sample_rate`. `process`, `tick`, `set_tempo` and `set_param` run on the audio thread (tempo automation calls `set_tempo` mid-song), so they must not allocate. `crates/plugins/tests/no_alloc.rs` checks every plugin in `port.rs` from its defaults (set `NO_ALLOC_TRACE=1` for where an allocation comes from), and `crates/engine/tests/no_alloc.rs` checks `Engine::process`.
 
 - If your change shows in the app (a window, a widget, the colours), draw the README's screenshots again and commit them with it: `FL_RS_CORPUS="<FL Studio>/Data" cargo test -p ui --test screenshots -- --ignored`. Look at them first. `CLAUDE.md` has the rest.
 

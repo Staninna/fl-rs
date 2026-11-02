@@ -255,7 +255,10 @@ impl Tune {
             };
             self.slope * (bent - 1.0) - over
         };
-        (db * std::f64::consts::LN_10 / 20.0).exp() as f32
+        // A full negative knee asks for thousands of dB, which is infinite
+        // and, times an input gain of 0, NaN in FL too. It stays the
+        // largest float, so a gain of 0 stays silent.
+        ((db * std::f64::consts::LN_10 / 20.0).exp() as f32).min(f32::MAX)
     }
 
     /// The output stage for one sample: the soft knee when it is on, and

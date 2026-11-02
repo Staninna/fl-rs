@@ -133,7 +133,10 @@ impl Consts {
         let rate = (hz as f32).clamp(1.0, 192_000.0);
         let over = 1.0 / rate;
         let keep = (over * -500.0).exp();
-        let c = 1.0 / (over * 47_123.89).tan();
+        // Under 30 kHz the 15 kHz corner is past Nyquist, where `c` turns
+        // negative and FL's split runs away to infinity. It stays at 0.45
+        // of the rate there instead; at 44.1 kHz and up this is FL's.
+        let c = 1.0 / (over * 47_123.89).min(0.45 * std::f32::consts::PI).tan();
         Consts {
             keep,
             take: 1.0 - keep,

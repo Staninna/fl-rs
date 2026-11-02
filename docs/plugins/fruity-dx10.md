@@ -335,6 +335,9 @@ Approximated:
   is 64 voices, and a note past it steals by FL's rule.
 - A slide note sounds nothing. A voice's pitch stays where it started, where
   FL moves it with the host's pitch (`FUN_00736800`).
+- A carrier more than 64 from 0 is taken modulo 2 before the wrap, and
+  one that is not finite is set to 0. Values far out of their ranges, which
+  a state may hold, throw the carrier so far that FL's wrap never ends.
 - Each voice adds straight into the output block. FL sums the voices in a
   buffer of its own first.
 - A sample-rate change leaves the sounding voices as they started. A

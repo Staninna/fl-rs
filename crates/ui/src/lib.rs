@@ -251,6 +251,15 @@ pub enum Edit {
         ids: Vec<NoteId>,
         at: Ticks,
     },
+    /// Cut each note along the line from `from` to `to`, each a tick and
+    /// a key, where the line crosses the note's key, snapped to `step`:
+    /// what a slanted drag of the slice tool does.
+    SliceNotesAlong {
+        ids: Vec<NoteId>,
+        from: (Ticks, i32),
+        to: (Ticks, i32),
+        step: Ticks,
+    },
     /// Join the notes on one key that touch or overlap into one.
     GlueNotes {
         ids: Vec<NoteId>,

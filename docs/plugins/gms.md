@@ -174,6 +174,13 @@ takes the byte as Drumpad does (`bassdrum::velocity_level`), and the key's
 left and right gains as the host's circular pan law of the note's pan and
 velocity and its pitch offset as the note's fine pitch / 100
 (`FUN_1800c91b0` keeps them per key; a voice reads its own key's).
+When the host moves a note's `FinalLevels.Pitch` (a slide note or a pitch
+clip, `Generator::set_note_pitch`), the Rust sets the key's offset to
+`Pitch / 100 - key + 60` for the last note on the key, held or in its
+release, and the voice's next block (section 6, `key offset`) plays it; the
+glide of parameter 11 still heads for the key's target. That the slot fill
+runs again before every render with the pitch FL holds then is inferred:
+its caller was not traced.
 
 Note on (`FUN_1800f5250`): with 40 at 0 the voice is the last inactive one
 of the 99 (`rposition`), else the one with the smallest note counter; with
@@ -375,8 +382,9 @@ twice the dB its knob says. `w` is clamped to 3.
 - Flanger, Panner and Trancer are not built: on, they pass the sound and
   `fidelity()` says so. No corpus state switches one on.
 - The early reflections of the reverb are not built; GMS mutes them.
-- The pitch wheel and the matrix's sources 2 and 3 are 0. Slide notes sound
-  nothing.
+- The pitch wheel and the matrix's sources 2 and 3 are 0. Slide notes start
+  nothing; the notes they slide are bent through the key offset, from the
+  next block, taken as the slot fill running before each render.
 - The song position an LFO syncs to is counted from the plugin's start or
   reset, as if the song played from the top.
 - 16-bit waves are read as `/ 32768`; FL's WAV loader was not read for its

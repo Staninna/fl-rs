@@ -548,6 +548,11 @@ pub struct GrossBeat {
     // The ring of past input, where the next frame goes into it, and the
     // frame the reader is at for the first frame of the next block.
     ring: Vec<[f32; 2]>,
+    /// The ring holds only zeros: it is new or flushed and nothing has
+    /// gone into it since. A flush then leaves it be. A new ring of 25 MB
+    /// is memory the system hands out untouched, and clearing it on the
+    /// first play would take milliseconds of the first block.
+    ring_silent: bool,
     write: usize,
     base: usize,
     delay: [[f32; 2]; LATENCY],
@@ -605,6 +610,7 @@ impl Default for GrossBeat {
             tick: None,
             elapsed: 0,
             ring: Vec::new(),
+            ring_silent: true,
             write: 0,
             base: 0,
             delay: [[0.0; 2]; LATENCY],
@@ -705,6 +711,7 @@ impl GrossBeat {
         let room = self.room();
         if self.ring.len() != room {
             self.ring = vec![[0.0; 2]; room];
+            self.ring_silent = true;
             self.write = 0;
             self.base = 0;
             self.fade_base = 0;
@@ -852,7 +859,10 @@ impl GrossBeat {
     /// Forget the past (`FUN_00843450`).
     fn flush(&mut self) {
         self.dc_state = [0.0; 4];
-        self.ring.fill([0.0; 2]);
+        if !self.ring_silent {
+            self.ring.fill([0.0; 2]);
+            self.ring_silent = true;
+        }
         self.delay = [[0.0; 2]; LATENCY];
         self.first = true;
         self.last_place = 0.0;
@@ -957,6 +967,7 @@ impl GrossBeat {
         }
         // The input goes into the ring, and is held back 15 frames.
         if !self.holding {
+            self.ring_silent &= n == 0;
             for i in 0..n {
                 self.ring[self.write] = [left[i], right[i]];
                 self.write = (self.write + 1) % len;
@@ -1672,6 +1683,21 @@ mod tests {
         plugin.process(&mut left, &mut right);
         assert_eq!((left, right), (vec![0.5; 64], vec![-0.5; 64]));
         assert!(plugin.follows_song());
+    }
+
+    #[test]
+    fn a_flush_clears_a_ring_that_was_played_into_and_leaves_a_silent_one() {
+        let mut plugin = GrossBeat::default();
+        assert!(plugin.ring_silent);
+        plugin.tick(0, 120.0);
+        assert!(plugin.ring_silent);
+        let (mut left, mut right) = (vec![0.5; CHUNK], vec![-0.5; CHUNK]);
+        plugin.process(&mut left, &mut right);
+        assert!(!plugin.ring_silent);
+        assert!(plugin.ring.iter().any(|frame| *frame != [0.0; 2]));
+        plugin.reset();
+        assert!(plugin.ring_silent);
+        assert!(plugin.ring.iter().all(|frame| *frame == [0.0; 2]));
     }
 
     #[test]

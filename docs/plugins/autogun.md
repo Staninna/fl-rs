@@ -312,3 +312,13 @@ sound for such a state to match. Quality 0 reads with FL's linear interpolator
 interpolator and leave out the output oversampling filter. Portamento (colour 14 notes),
 velocity-to-envelope mode 2 and the host's polyphony limit are left out;
 16 voices, the oldest taken first.
+
+Inferred: a sounding note's pitch moves with the host's
+(`Generator::set_note_pitch`, FL's `FinalLevels.Pitch` worked out again
+every tick). The voice keeps the new pitch in place of the note's and adds
+`+0x5d0` and `1200 art3` to it on its next chunk, where it adds art3 every
+tick. Section 4 gives only the sum; that the render reads
+`FinalLevels.Pitch` again with art3, rather than once at the note, is the
+port's reading. The keyboard maps, the key that seeds the timbre and art3's
+keyboard tracking (which takes the note's pitch off at the note) stay as
+the note set them. A slide note sounds no voice.
