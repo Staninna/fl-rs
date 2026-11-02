@@ -196,6 +196,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         }
         Edit::DeleteNotes { .. }
         | Edit::SliceNotes { .. }
+        | Edit::SliceNotesAlong { .. }
         | Edit::GlueNotes { .. }
         | Edit::QuantizeNotes { .. }
         | Edit::ChopNotes { .. }
@@ -283,6 +284,12 @@ fn edit_notes(pattern: &mut Pattern, edit: &Edit) {
         Edit::SetNoteField { id, field, value } => pattern.set_note_field(*id, *field, *value),
         Edit::SelectNotes { ids, add } => pattern.select_notes(ids, *add),
         Edit::SliceNotes { ids, at } => pattern.slice_notes(ids, *at),
+        Edit::SliceNotesAlong {
+            ids,
+            from,
+            to,
+            step,
+        } => pattern.slice_notes_along(ids, *from, *to, *step),
         Edit::GlueNotes { ids } => pattern.glue_notes(ids),
         Edit::QuantizeNotes { ids, step, lengths } => pattern.quantize_notes(ids, *step, *lengths),
         Edit::ChopNotes { ids, step } => pattern.chop_notes(ids, *step),

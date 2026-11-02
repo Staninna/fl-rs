@@ -667,6 +667,31 @@ fn the_slice_tool_cuts_the_notes_on_the_keys_it_crosses() {
     let pos = at(&harness, 250.0, 51);
     click(&mut harness, pos);
     assert_eq!(edits(&harness)[1..], [slice(&[BASS[2]], 240)]);
+
+    // A slanted drag cuts each key where the line crosses its row: from
+    // tick 120 on the G4 to tick 288 on the C4 crosses the D#4 four
+    // sevenths of the way, at 216. The C4 ends before 288.
+    let from = at(&harness, 120.0, 55);
+    let to = at(&harness, 288.0, 48);
+    drag(&mut harness, from, &[to]);
+    harness.drop_at(to);
+    harness.run();
+    let along = Edit::SliceNotesAlong {
+        ids: vec![BASS[1], BASS[2]],
+        from: (120, 55),
+        to: (288, 48),
+        step: 24,
+    };
+    assert_eq!(edits(&harness)[2..], [edit(along)]);
+
+    // A drag that ends at the step it began on cuts upright there, on
+    // every key it passes, wherever on the step the pointer lets go.
+    let from = at(&harness, 125.0, 56);
+    let to = at(&harness, 118.0, 47);
+    drag(&mut harness, from, &[to]);
+    harness.drop_at(to);
+    harness.run();
+    assert_eq!(edits(&harness)[3..], [slice(&[BASS[1]], 120)]);
 }
 
 #[test]

@@ -61,6 +61,37 @@ impl Pattern {
         self.insert_all(pieces);
     }
 
+    /// Cut the notes along the line from `from` to `to`, each a tick and a
+    /// key: a note on a key the line crosses is cut where the line crosses
+    /// that key's row, at [`slice_line_at`], as FL's slice tool cuts along
+    /// the line a drag draws. Each cut is as [`Pattern::slice_notes`] makes
+    /// it, and a note on a key outside the line's is left as it is.
+    pub fn slice_notes_along(
+        &mut self,
+        notes: &[usize],
+        from: (u64, i32),
+        to: (u64, i32),
+        step: u64,
+    ) {
+        let mut pieces = Vec::new();
+        self.each_live(notes, |note| {
+            let at = slice_line_at(from, to, i32::from(note.key), step);
+            let Some(at) = at.and_then(|at| i32::try_from(at).ok()) else {
+                return;
+            };
+            let end = note.position.saturating_add(note.length);
+            if note.length > 0 && note.position < at && at < end {
+                note.length = at - note.position;
+                pieces.push(Note {
+                    position: at,
+                    length: end - at,
+                    ..*note
+                });
+            }
+        });
+        self.insert_all(pieces);
+    }
+
     /// Join the notes that are on one key of one channel and touch or
     /// overlap: the first of each run takes the run's whole length and the
     /// others are deleted. FL's Glue does this to the notes it is given.
@@ -271,6 +302,26 @@ impl Pattern {
     }
 }
 
+/// The tick where the line from `from` to `to`, each a tick and a key,
+/// crosses the row of `key`, snapped to the nearest multiple of `step`
+/// ticks, or `None` when `key` is not between the line's keys. A line on
+/// one key crosses its row where it starts, and an upright one crosses
+/// every row at its tick.
+pub fn slice_line_at(from: (u64, i32), to: (u64, i32), key: i32, step: u64) -> Option<u64> {
+    let ((t0, k0), (t1, k1)) = (from, to);
+    if key < k0.min(k1) || key > k0.max(k1) {
+        return None;
+    }
+    let tick = if k0 == k1 {
+        t0 as f64
+    } else {
+        let along = f64::from(key - k0) / f64::from(k1 - k0);
+        t0 as f64 + (t1 as f64 - t0 as f64) * along
+    };
+    let step = step.max(1) as f64;
+    Some(((tick / step).round() * step).max(0.0) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +373,60 @@ mod tests {
         // A note that ends where the line is stays whole.
         notes.slice_notes(&[0], 60);
         assert_eq!(placed(&notes).len(), 6);
+    }
+
+    #[test]
+    fn a_slanted_slice_cuts_each_key_where_the_line_crosses_it() {
+        // From tick 24 on key 60 to tick 72 on key 64: key 62 is crossed
+        // halfway, at 48, and key 61 at 36, which a step of 24 snaps to
+        // 48.
+        assert_eq!(slice_line_at((24, 60), (72, 64), 62, 12), Some(48));
+        assert_eq!(slice_line_at((24, 60), (72, 64), 61, 12), Some(36));
+        assert_eq!(slice_line_at((24, 60), (72, 64), 61, 24), Some(48));
+        // Backwards gives the same line.
+        assert_eq!(slice_line_at((72, 64), (24, 60), 61, 12), Some(36));
+        assert_eq!(slice_line_at((24, 60), (72, 64), 65, 12), None);
+        assert_eq!(slice_line_at((24, 60), (72, 64), 59, 12), None);
+        // An upright line crosses every row at its tick, and a level one
+        // its own row where it starts.
+        assert_eq!(slice_line_at((30, 60), (30, 50), 55, 1), Some(30));
+        assert_eq!(slice_line_at((30, 60), (90, 60), 60, 1), Some(30));
+
+        let mut notes = pattern(&[
+            note(0, 96, 60),
+            note(0, 96, 62),
+            note(0, 96, 64),
+            note(0, 96, 66),
+            note(40, 8, 61),
+        ]);
+        notes.slice_notes_along(&[0, 1, 2, 3, 4], (24, 60), (72, 64), 12);
+        assert_eq!(
+            placed(&notes),
+            [
+                (0, 24, 60),
+                (0, 48, 62),
+                (0, 72, 64),
+                (0, 96, 66),
+                (24, 72, 60),
+                (40, 8, 61),
+                (48, 48, 62),
+                (72, 24, 64)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_upright_slanted_slice_is_a_slice() {
+        let notes = [
+            note(0, 96, 60),
+            note(48, 24, 62),
+            note(48, 0, 64),
+            note(96, 48, 60),
+        ];
+        let (mut along, mut upright) = (pattern(&notes), pattern(&notes));
+        along.slice_notes_along(&[0, 1, 2, 3], (60, 64), (60, 60), 12);
+        upright.slice_notes(&[0, 1, 2, 3], 60);
+        assert_eq!(placed(&along), placed(&upright));
     }
 
     #[test]
