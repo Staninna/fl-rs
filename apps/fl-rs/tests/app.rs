@@ -694,6 +694,26 @@ fn a_shift_of_the_steps_is_saved_and_undone() {
 }
 
 #[test]
+fn a_fill_and_a_clear_are_one_undo_step_each() {
+    let dir = Dir::new("fill");
+    let (mut app, _) = open_fixture(&dir);
+    let fill = Edit::FillSteps {
+        channel: 0,
+        every: 2,
+        count: 16,
+    };
+    edit(&mut app, fill, None);
+    assert_eq!(lit(app.project()), [0, 2, 4, 6, 8, 10, 12, 14]);
+    edit(&mut app, Edit::ClearSteps { channel: 0 }, None);
+    assert!(lit(app.project()).is_empty());
+    app.apply(Command::Undo);
+    assert_eq!(lit(app.project()).len(), 8);
+    app.apply(Command::Undo);
+    assert_eq!(lit(app.project()), [0, 4, 8, 12]);
+    assert!(!app.is_modified());
+}
+
+#[test]
 fn a_drag_across_steps_or_on_a_knob_is_one_undo_step() {
     let dir = Dir::new("paint");
     let (mut app, _) = open_fixture(&dir);

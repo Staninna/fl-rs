@@ -227,6 +227,19 @@ pub enum Edit {
         by: i32,
         count: u32,
     },
+    /// Light every `every`th step of the channel among the pattern's first
+    /// `count`, from the first, and clear the others. The pattern the top
+    /// bar has selected is made when the file has none with that index.
+    FillSteps {
+        channel: u16,
+        every: u32,
+        count: u32,
+    },
+    /// Remove every note of the channel from the pattern the top bar has
+    /// selected.
+    ClearSteps {
+        channel: u16,
+    },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
     /// 60 is C5, and 131 is the highest. A `length` of 0 is a step, which

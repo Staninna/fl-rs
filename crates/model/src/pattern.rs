@@ -224,6 +224,30 @@ impl Pattern {
         }
     }
 
+    /// Light every `every`th step of the channel among the pattern's first
+    /// `count`, from the first step on, and clear every other step of it,
+    /// as FL's "Fill each 2 steps" and its kin do (inferred: that they
+    /// replace the channel's steps, and do not add to them, is not taken
+    /// from FL's code). An `every` of 0 changes nothing.
+    ///
+    /// A pattern whose 224 the model could not read is left as it is.
+    pub fn fill_steps(&mut self, channel: u16, every: u32, count: u32, ppq: u16) {
+        if every == 0 || !self.writes_notes() {
+            return;
+        }
+        self.clear_steps(channel);
+        for step in (0..count).step_by(every as usize) {
+            self.set_step(channel, step, true, ppq);
+        }
+    }
+
+    /// Clear every step of the channel: remove all its notes, the muted
+    /// and the long ones too, as clearing one step does.
+    pub fn clear_steps(&mut self, channel: u16) {
+        self.notes
+            .retain(|note| note.channel != channel || note.is_deleted());
+    }
+
     /// Light the step when it is not lit, and clear it when it is.
     pub fn toggle_step(&mut self, channel: u16, step: u32, ppq: u16) {
         let lit = self.step_note(channel, step, ppq).is_some();
@@ -841,6 +865,40 @@ mod tests {
         pattern.shift_steps(0, 5, 0, PPQ);
         pattern.shift_steps(0, 0, 16, PPQ);
         assert_eq!(pattern, before);
+    }
+
+    #[test]
+    fn a_fill_lights_each_nth_step_in_place_of_the_others() {
+        let mut project = project();
+        let pattern = project.pattern_to_edit(1);
+        pattern.fill_steps(0, 2, 16, PPQ);
+        assert_eq!(lit(pattern, 0), [0, 2, 4, 6, 8, 10, 12, 14]);
+        // The clap of the other channel stays.
+        assert_eq!(lit(pattern, 1), [4]);
+        pattern.fill_steps(0, 8, 32, PPQ);
+        assert_eq!(lit(pattern, 0), [0, 8, 16, 24]);
+        pattern.fill_steps(0, 0, 32, PPQ);
+        assert_eq!(lit(pattern, 0), [0, 8, 16, 24]);
+        // Filled each 4 of 16, the kicks are as they were, so the file is.
+        pattern.fill_steps(0, 4, 16, PPQ);
+        assert_eq!(to_flp(&project), Ok(file()));
+
+        // Clearing takes every note of the channel.
+        let pattern = project.pattern_to_edit(1);
+        pattern.add_note(note(0, 50, 96));
+        pattern.clear_steps(0);
+        assert!(lit(pattern, 0).is_empty());
+        assert_eq!(pattern.notes, [note(1, 96, 0)]);
+
+        // A pattern without notes gets a 224, and one whose 224 the model
+        // could not read is left as it is.
+        project.pattern_to_edit(2).fill_steps(1, 4, 16, PPQ);
+        assert_eq!(lit(project.pattern(2).unwrap(), 1), [0, 4, 8, 12]);
+        let mut file = file();
+        file.events[2].data.truncate(36);
+        let mut project = from_flp(&file);
+        project.pattern_to_edit(1).fill_steps(0, 2, 16, PPQ);
+        assert_eq!(to_flp(&project), Ok(file));
     }
 
     #[test]

@@ -227,6 +227,22 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         }
         Edit::SetChannelName { channel, ref name } => project.set_channel_name(channel, name),
         Edit::SoloChannel { channel } => project.solo_channel(channel),
+        Edit::FillSteps {
+            channel,
+            every,
+            count,
+        } => {
+            if project.channel(channel).is_some() && every > 0 {
+                let pattern = project.pattern_to_edit(pattern);
+                pattern.fill_steps(channel, every, count, ppq);
+            }
+        }
+        Edit::ClearSteps { channel } => {
+            let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
+            if let Some(pattern) = pattern {
+                pattern.clear_steps(channel);
+            }
+        }
         Edit::ShiftSteps { channel, by, count } => {
             let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
             if let Some(pattern) = pattern {

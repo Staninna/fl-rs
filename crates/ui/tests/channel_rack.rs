@@ -489,3 +489,28 @@ fn the_menu_of_a_name_shifts_its_steps_round_the_pattern() {
     let field = harness.get_by_role(Role::TextInput);
     assert_eq!(field.value().as_deref(), Some("Vocal"));
 }
+
+#[test]
+fn the_menu_of_a_name_fills_and_clears_the_steps() {
+    let mut harness = harness();
+    for every in [2, 4, 8] {
+        pick(&mut harness, "Snare", &format!("Fill each {every} steps"));
+    }
+    pick(&mut harness, "Kick", "Clear steps");
+    let fill = |every| {
+        edit(Edit::FillSteps {
+            channel: 1,
+            every,
+            count: 16,
+        })
+    };
+    assert_eq!(
+        harness.state(),
+        &[
+            fill(2),
+            fill(4),
+            fill(8),
+            edit(Edit::ClearSteps { channel: 0 })
+        ]
+    );
+}

@@ -15,9 +15,10 @@
 //! Enter and a click elsewhere take the name, and Escape leaves the old
 //! one. A right click on a channel's switch solos it, as in FL, and one
 //! on the switch of the channel that is soloed switches every channel back
-//! on. A right click on a name opens the channel's menu: rename it, and
-//! shift its steps one step left or right round the pattern. Shift+wheel
-//! scrolls along the steps.
+//! on. A right click on a name opens the channel's menu: rename it, shift
+//! its steps one step left or right round the pattern, light each second,
+//! fourth or eighth step in place of the ones that are lit, or clear them.
+//! Shift+wheel scrolls along the steps.
 //!
 //! A sample dragged out of the browser can be dropped on the row of a
 //! sampler or an audio clip, which then plays it, or on the space under
@@ -639,6 +640,27 @@ impl Rack<'_> {
                 out.push(edit(shift, None));
                 ui.close();
             }
+        }
+        ui.separator();
+        for every in [2, 4, 8] {
+            let label = format!("Fill each {every} steps");
+            if ui.add_enabled(steps, egui::Button::new(label)).clicked() {
+                let count = self.count;
+                let fill = Edit::FillSteps {
+                    channel: index,
+                    every,
+                    count,
+                };
+                out.push(edit(fill, None));
+                ui.close();
+            }
+        }
+        if ui
+            .add_enabled(steps, egui::Button::new("Clear steps"))
+            .clicked()
+        {
+            out.push(edit(Edit::ClearSteps { channel: index }, None));
+            ui.close();
         }
     }
 
