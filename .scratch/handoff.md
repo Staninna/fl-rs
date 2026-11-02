@@ -1,3 +1,21 @@
+# Handoff, 2026-11-02, editing and robustness batch
+
+Branch `claude/determined-wozniak-du1sx5`, off `main` at `eba6a78`. Cloud container with no FL Studio install: no DLLs, no corpus, so nothing here was checked against FL's code, and no README screenshot was redrawn (nothing changed at rest; no `ui` snapshot changed). Four agents each did a batch in their own worktree, one commit per task, merged here. fmt, workspace clippy, `cargo test --workspace` (no corpus), `progress.py --check` and `bench.py --check` pass at the head. FL behaviour picked from what is known of FL rather than its binary (shortcuts, menus, solo rules) says so as inferred in each doc comment.
+
+- Piano roll: Tools menu Reverse, Flip (Alt+Y), Legato (Ctrl+L); copy, cut, paste (Ctrl+C/X/V, which also put a line on the system clipboard, since egui only sends a paste when it holds text); Ctrl+B duplicates after the selection; Shift+Left/Right shorten and lengthen by the snap; submenus for Chop/Arpeggiate's step and Strum's delay. `flp::Note` derives `Eq` now.
+- Playlist: Ctrl+A / Ctrl+D, arrow nudges (snap step, one track), Ctrl+E splits the selected clips at the play cursor (`Edit::SplitItems`; FL splits with a slice tool, which the playlist does not have).
+- Channel rack: rename (double click, or F2 while the rack is shown), solo on a right click on the switch, and a menu on the name that shifts, fills each 2/4/8 or clears the steps and clones the channel (events copied with the next index; automation clips and notes are not cloned). `crates/model/src/channel_edit.rs`.
+- Mixer: solo (Ctrl+click or right click on the switch; keeps the insert, what sends into it and its way to the master), a strip menu for polarity, swap and separation, M and S keys.
+- Top bar: tempo by drag or typed value (10..522 BPM; every tempo event the project has is written), F4 / "New pattern", "Clone pattern", "Rename pattern" (F2 when the rack is not shown).
+- Robustness: `crates/flp/tests/robustness.rs`, `crates/model/tests/robustness.rs`, `crates/engine/src/sample/robustness.rs`, `crates/engine/tests/dangling.rs`. Fixed: `Pattern::steps` at PPQ < 8 with a note at 2^31 (capped at 65,536 steps), symphonia and wavicle panicking on overflowing WAV headers in debug (caught, now a decode error), a WAV of rate 0, float samples that are NaN or infinite (0, a stand-in), sides of unequal length, a far seek, arpeggiator range/repeat at i32's ends (capped), keys at i16's ends (held to -128..=255 for generators), and insert EQ values past the knobs (clamped; FL itself does not clamp the gain). These bounds are ours and change nothing inside FL's ranges, but a corpus render should confirm that.
+- Live preview: a released key fades out over 5 ms (a stand-in; the engine plays no sampler release) instead of stopping hard.
+
+## Next
+
+- On a machine with FL: rerun the corpus render and the profile harness to confirm the clamps changed no hash, and redraw the screenshots if wanted.
+- Left open: a cloned channel is not selected after it is made; a cloned pattern goes to the lowest free index rather than FL's renumbering after the source; no app test checks that a paste or cut undoes in one step.
+- Everything in the 2026-11-02 "note pitch" section's Next list below still stands.
+
 # Handoff, 2026-11-02, note pitch, the plugin bench and robustness
 
 Branch `claude/fervent-cori-pkwjx7`, off `main` at `f40ac7a`. Worked in a cloud container with no FL Studio install: no DLLs, no corpus, no Ghidra. Nothing here was checked against FL's code or rendered from the corpus. fmt, workspace clippy, the dsp, flp, model, plugins and ui tests (the ui snapshots through lavapipe), the engine lib, fixtures and no_alloc tests (no corpus), `progress.py --check`, `bench.py --check` and the plugin bench check pass at the head.
