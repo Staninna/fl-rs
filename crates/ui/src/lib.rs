@@ -388,6 +388,12 @@ pub enum Edit {
         from: u16,
         to: u16,
     },
+    /// Name the pattern. An empty name gives it its number back, and a
+    /// name for a pattern the project does not have makes it.
+    SetPatternName {
+        pattern: u16,
+        name: String,
+    },
 }
 
 impl Edit {

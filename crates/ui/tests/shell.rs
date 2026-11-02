@@ -320,6 +320,59 @@ fn a_clone_of_the_selected_pattern_is_selected() {
 }
 
 #[test]
+fn f2_or_the_list_renames_the_selected_pattern() {
+    let mut harness = harness(state());
+    harness.run();
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Drums"));
+    field.type_text(" 2 ");
+    harness.run();
+    // The name is trimmed.
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let named = |pattern, name: &str| {
+        let name = name.to_owned();
+        edit_of(Edit::SetPatternName { pattern, name })
+    };
+    assert_eq!(harness.state(), &[named(1, "Drums 2")]);
+    assert!(harness.query_by_role(Role::ComboBox).is_some());
+
+    // Escape leaves the name, and so does the name it had.
+    for key in [egui::Key::Escape, egui::Key::Enter] {
+        harness.key_press(egui::Key::F2);
+        harness.run();
+        if key == egui::Key::Escape {
+            harness.get_by_role(Role::TextInput).type_text("s");
+            harness.run();
+        }
+        harness.key_press(key);
+        harness.run();
+    }
+    assert_eq!(harness.state().len(), 1);
+
+    // A pattern without a name starts from an empty field.
+    let mut harness = crate::harness(UiState {
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label_contains("Rename pattern").click();
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some(""));
+    field.type_text("Bass");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state(), &[named(2, "Bass")]);
+}
+
+#[test]
 fn a_render_shows_how_far_it_is() {
     let mut harness = harness(UiState {
         playing: false,

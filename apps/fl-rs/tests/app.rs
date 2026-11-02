@@ -278,6 +278,19 @@ fn the_pattern_edits_are_saved_reloaded_and_undone() {
     assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
     app.apply(Command::Undo);
     assert_eq!(patterns(app.project()), [(1, None, 4)]);
+
+    // A name, saved, and taken away again.
+    let name = |name: &str| Edit::SetPatternName {
+        pattern: 1,
+        name: name.to_owned(),
+    };
+    edit(&mut app, name("Beat"), None);
+    app.apply(Command::Save);
+    let want = [(1, Some("Beat".to_owned()), 4)];
+    assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
+    edit(&mut app, name(""), None);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
 }
 
 #[test]

@@ -5,7 +5,10 @@
 //! The pattern selector's list ends in what changes the patterns: a new
 //! empty pattern, which F4 makes too (FL's key for the next empty pattern,
 //! inferred), and a clone of the selected pattern. Either goes at the
-//! lowest index the project has free, and is selected.
+//! lowest index the project has free, and is selected. The last entry, and
+//! F2 (inferred too), give the selected pattern a new name: a field takes
+//! the selector's place, Enter and a click elsewhere take the name, and
+//! Escape leaves it.
 //!
 //! A drag up or down on the tempo changes it, a BPM a point and a tenth of
 //! that with Ctrl held, and a double click on it opens a field to type it
@@ -196,17 +199,57 @@ fn transport(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         out.push(Command::ToggleLoop);
     }
 
-    let name = |index: u16| {
-        let pattern = state.project.pattern(index);
-        let name = pattern.and_then(|pattern| pattern.name.clone());
-        name.unwrap_or_else(|| format!("Pattern {index}"))
+    pattern_selector(ui, state, out);
+}
+
+/// A pattern's name that is being typed.
+#[derive(Clone)]
+struct TypedName {
+    pattern: u16,
+    text: String,
+    /// Whether the field has asked for the keyboard, which it does once.
+    focused: bool,
+}
+
+/// The pattern selector: the list of the patterns, and under them a new
+/// pattern, a clone of the selected one and its new name. While the name
+/// is typed, a field takes the selector's place.
+fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    let edit = |edit: Edit| Command::Edit {
+        edit,
+        drag_id: None,
     };
+    let own = |index: u16| state.project.pattern(index).and_then(|p| p.name.clone());
+    let name = |index: u16| own(index).unwrap_or_else(|| format!("Pattern {index}"));
+    let typed_id = egui::Id::new("fl-rs pattern name");
+    if let Some(mut field) = ui.data(|data| data.get_temp::<TypedName>(typed_id)) {
+        let text = egui::TextEdit::singleline(&mut field.text).desired_width(120.0);
+        let response = ui.add(text);
+        if !std::mem::replace(&mut field.focused, true) {
+            response.request_focus();
+        }
+        if response.lost_focus() {
+            let name = field.text.trim();
+            let escaped = ui.input(|input| input.key_pressed(Key::Escape));
+            if !escaped && name != own(field.pattern).unwrap_or_default() {
+                let pattern = field.pattern;
+                let name = name.to_owned();
+                out.push(edit(Edit::SetPatternName { pattern, name }));
+            }
+            ui.data_mut(|data| data.remove::<TypedName>(typed_id));
+        } else {
+            ui.data_mut(|data| data.insert_temp(typed_id, field));
+        }
+        return;
+    }
+
     let mut patterns: Vec<u16> = state.project.patterns.iter().map(|p| p.index).collect();
     patterns.sort_unstable();
     let free = state.project.free_pattern_index();
     let keys = !ui.ctx().egui_wants_keyboard_input();
     let pressed = |ui: &mut Ui, key| keys && ui.input_mut(|i| i.consume_key(Modifiers::NONE, key));
     let mut add = pressed(ui, Key::F4);
+    let mut rename = pressed(ui, Key::F2);
     let mut clone = false;
     let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")
@@ -224,6 +267,8 @@ fn transport(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             add |= ui.add_enabled(free.is_some(), new).clicked();
             let copy = egui::Button::new("Clone pattern");
             clone = ui.add_enabled(free.is_some() && has, copy).clicked();
+            let name = egui::Button::new("Rename pattern…").shortcut_text("F2");
+            rename |= ui.add(name).clicked();
         })
         .response
         .on_hover_text("The pattern that plays in pattern mode");
@@ -233,12 +278,16 @@ fn transport(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         Some(to) if clone => Some((Edit::ClonePattern { from, to }, to)),
         _ => None,
     };
-    if let Some((edit, index)) = made {
-        out.push(Command::Edit {
-            edit,
-            drag_id: None,
-        });
+    if let Some((made, index)) = made {
+        out.push(edit(made));
         out.push(Command::SelectPattern(index));
+    } else if rename {
+        let field = TypedName {
+            pattern: from,
+            text: own(from).unwrap_or_default(),
+            focused: false,
+        };
+        ui.data_mut(|data| data.insert_temp(typed_id, field));
     }
 }
 

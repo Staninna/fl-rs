@@ -1,7 +1,7 @@
 //! Patterns, and what the channel rack and the piano roll change: the steps
 //! of a pattern, which are notes, the notes themselves, and a channel's
 //! switch, volume, pan and insert. What the top bar's pattern selector
-//! changes too: a new pattern and a clone of one.
+//! changes too: a new pattern, a clone of one, and a pattern's name.
 
 use crate::codec::{Codec, Cx, object};
 use crate::{Channel, ChannelKind, Item, Placed, Project, TimeMarker};
@@ -540,6 +540,36 @@ impl Project {
         }
     }
 
+    /// Name the pattern, in its 193, which a pattern without one gets
+    /// behind its first 65. An empty name takes the 193 away, and the
+    /// pattern goes by its number again. A pattern the project does not
+    /// have yet is added for a name, as [`Project::add_pattern`] adds one.
+    ///
+    /// A name the file's strings cannot hold is not set, as with
+    /// [`Project::set_insert_name`].
+    pub fn set_pattern_name(&mut self, index: u16, name: &str) {
+        let name = Some(name.to_owned()).filter(|name| !name.is_empty());
+        if !name
+            .as_ref()
+            .is_none_or(|name| self.holds_string(name, Id::PatternName))
+        {
+            return;
+        }
+        if name.is_some() {
+            self.add_pattern(index);
+        }
+        let Some(pattern) = self.patterns.iter_mut().find(|p| p.index == index) else {
+            return;
+        };
+        if pattern.name == name {
+            return;
+        }
+        pattern.name = name;
+        if pattern.name.is_some() {
+            write_field(&mut pattern.order, Id::PatternNew, Id::PatternName);
+        }
+    }
+
     /// Whether the file's strings can hold `text` in event `id`: not a
     /// character above U+00FF in a file from before 11.5.5, nor a NUL, nor
     /// anything in a project without a writer version.
@@ -1032,6 +1062,51 @@ mod tests {
         project.clone_pattern(9, 7);
         project.clone_pattern(1, 2);
         project.clone_pattern(1, 0);
+        assert!(project == before);
+    }
+
+    #[test]
+    fn a_pattern_s_name_is_its_193() {
+        let mut project = project();
+        project.set_pattern_name(2, "Break");
+        project.set_pattern_name(1, "");
+        let (new, gone) = changes(&project);
+        assert_eq!(new, [(13, text(Id::PatternName, "Break"))]);
+        assert_eq!(
+            gone,
+            [text(Id::PatternName, "Fill"), text(Id::PatternName, "Beat")]
+        );
+        let read = from_flp(&to_flp(&project).unwrap());
+        assert_eq!(read.pattern(2).unwrap().name.as_deref(), Some("Break"));
+        assert_eq!(read.pattern(1).unwrap().name, None);
+
+        // A name goes back where the 193 was, and a name for a pattern the
+        // project lacks makes it, with a 193 behind its 65.
+        project.set_pattern_name(1, "Beat 2");
+        project.set_pattern_name(3, "Intro");
+        let (new, _) = changes(&project);
+        assert_eq!(
+            new,
+            [
+                (1, word(Id::PatternNew, 3)),
+                (2, text(Id::PatternName, "Intro")),
+                (15, text(Id::PatternName, "Break")),
+                (17, text(Id::PatternName, "Beat 2")),
+            ]
+        );
+        let read = from_flp(&to_flp(&project).unwrap());
+        assert_eq!(read.pattern(1).unwrap().name.as_deref(), Some("Beat 2"));
+        assert_eq!(read.pattern(3).unwrap().name.as_deref(), Some("Intro"));
+
+        // No name for a pattern the project lacks, the name it has, a NUL
+        // and a project without a 199 change nothing.
+        let before = project.clone();
+        project.set_pattern_name(4, "");
+        project.set_pattern_name(3, "Intro");
+        project.set_pattern_name(3, "In\0tro");
+        project.writer_version = None;
+        project.set_pattern_name(3, "Outro");
+        project.writer_version.clone_from(&before.writer_version);
         assert!(project == before);
     }
 

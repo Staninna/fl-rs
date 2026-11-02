@@ -248,6 +248,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::SetTempo { milli } => project.set_tempo_milli(milli),
         Edit::AddPattern { index } => project.add_pattern(index),
         Edit::ClonePattern { from, to } => project.clone_pattern(from, to),
+        Edit::SetPatternName { pattern, ref name } => project.set_pattern_name(pattern, name),
         Edit::MoveItems { .. }
         | Edit::ResizeItems { .. }
         | Edit::SetMuted { .. }
