@@ -81,7 +81,7 @@ use crate::parts::Matrix;
 use crate::{Effect, Fidelity, StateError, knob_value, state_version};
 use dsp::biquad::{Biquad64, Coefficients64};
 use dsp::curve::{Curve, Point};
-use dsp::halfband::{Oversampler, WIDEST};
+use dsp::halfband::Oversampler;
 use std::f64::consts::{PI, TAU};
 
 /// The plugin's event 201 name.
@@ -1374,7 +1374,7 @@ impl Maximus {
         let sum = if order == 0 {
             self.bands_frame(frame, gains, steps)
         } else {
-            let mut wide = [[0.0f32; 2]; WIDEST];
+            let mut wide = [[0.0f32; 2]; 1 << MAX_ORDER];
             self.oversampler.up(order, frame, &mut wide);
             for frame in wide.iter_mut().take(1 << order) {
                 *frame = self.bands_frame(*frame, gains, steps);
@@ -2263,7 +2263,7 @@ mod tests {
         HalfBand::default().down(&block_wide, &mut block_back);
         let mut over = Oversampler::default();
         for (n, x) in input.iter().enumerate() {
-            let mut wide = [[0.0; 2]; WIDEST];
+            let mut wide = [[0.0; 2]; 1 << MAX_ORDER];
             over.up(1, [*x, -*x], &mut wide);
             assert_eq!(
                 wide[..2],
@@ -2285,7 +2285,7 @@ mod tests {
             let out: Vec<f32> = tone
                 .iter()
                 .map(|x| {
-                    let mut wide = [[0.0; 2]; WIDEST];
+                    let mut wide = [[0.0; 2]; 1 << MAX_ORDER];
                     over.up(order, [*x; 2], &mut wide);
                     over.down(order, &mut wide)[0]
                 })
@@ -2299,7 +2299,7 @@ mod tests {
         let tone = testing::sine(0.3, 24_000);
         let mut wide_left = Vec::with_capacity(48_000);
         for x in &tone {
-            let mut wide = [[0.0; 2]; WIDEST];
+            let mut wide = [[0.0; 2]; 1 << MAX_ORDER];
             over.up(1, [*x; 2], &mut wide);
             wide_left.extend([wide[0][0], wide[1][0]]);
         }

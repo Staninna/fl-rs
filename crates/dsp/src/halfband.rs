@@ -134,10 +134,12 @@ pub struct Oversampler {
 
 impl Oversampler {
     /// One frame up through `stages` stages into `wide`: `1 << stages`
-    /// frames in time order.
-    pub fn up(&mut self, stages: usize, frame: [f32; 2], wide: &mut [[f32; 2]; WIDEST]) {
+    /// frames in time order. `wide` holds `N` frames, at least that many
+    /// and at most [`WIDEST`]: a plugin that runs fewer stages clears (and
+    /// copies) only what it uses. Fewer than `1 << stages` panics.
+    pub fn up<const N: usize>(&mut self, stages: usize, frame: [f32; 2], wide: &mut [[f32; 2]; N]) {
         wide[0] = frame;
-        let mut scratch = [[0.0f32; 2]; WIDEST];
+        let mut scratch = [[0.0f32; 2]; N];
         for (stage, sides) in self.up[..stages].iter_mut().enumerate() {
             let n = 1 << stage;
             for (i, frame) in wide[..n].iter().enumerate() {
@@ -152,7 +154,7 @@ impl Oversampler {
 
     /// The `1 << stages` frames of `wide` down through `stages` stages to
     /// one. `wide` is used up on the way.
-    pub fn down(&mut self, stages: usize, wide: &mut [[f32; 2]; WIDEST]) -> [f32; 2] {
+    pub fn down<const N: usize>(&mut self, stages: usize, wide: &mut [[f32; 2]; N]) -> [f32; 2] {
         for (stage, sides) in self.down[..stages].iter_mut().enumerate() {
             let n = 1 << (stages - stage - 1);
             for i in 0..n {
@@ -429,6 +431,34 @@ mod tests {
                     *frame = frame.map(|v| v * v);
                 }
                 assert_eq!(over.down(stages, &mut wide), [block[n]; 2], "{stages} {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrower_buffer_gives_the_same_bits() {
+        // Maximus runs up to three stages in eight frames; it must come
+        // out as the sixteen-frame buffer does, to the bit.
+        let input: Vec<f32> = (0..2000)
+            .map(|n| ((n * 7919 % 1009) as f32 / 1009.0 - 0.5) * 1.5)
+            .collect();
+        for stages in 0..=3 {
+            let (mut narrow, mut wide) = (Oversampler::default(), Oversampler::default());
+            for x in &input {
+                let mut eight = [[0.0f32; 2]; 8];
+                let mut sixteen = [[0.0f32; 2]; WIDEST];
+                narrow.up(stages, [*x, 0.5 * *x], &mut eight);
+                wide.up(stages, [*x, 0.5 * *x], &mut sixteen);
+                assert_eq!(eight[..1 << stages], sixteen[..1 << stages]);
+                for frame in &mut eight[..1 << stages] {
+                    *frame = frame.map(f32::tanh);
+                }
+                for frame in &mut sixteen[..1 << stages] {
+                    *frame = frame.map(f32::tanh);
+                }
+                let a = narrow.down(stages, &mut eight);
+                let b = wide.down(stages, &mut sixteen);
+                assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits), "{stages}");
             }
         }
     }
