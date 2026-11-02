@@ -728,6 +728,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
         (Modifiers::SHIFT, Key::Q),
         (Modifiers::ALT, Key::U),
         (Modifiers::ALT, Key::S),
+        (Modifiers::ALT, Key::Y),
     ] {
         harness.key_press_modifiers(modifiers, key);
         harness.run();
@@ -749,6 +750,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
             ids: ids.clone(),
             delay: 6,
         },
+        Edit::FlipNotes { ids: ids.clone() },
     ];
     assert_eq!(edits(&harness)[3..], expected.map(edit));
 }

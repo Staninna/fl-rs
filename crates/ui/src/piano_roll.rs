@@ -45,6 +45,8 @@
 //!   tension; this is a fixed time with no tension.
 //! - Reverse plays the notes backwards: each one's start and end are
 //!   mirrored in the span the notes cover, and its length is kept.
+//! - Flip (Alt+Y) turns the notes upside down: each key is mirrored around
+//!   the middle of the notes' range of keys. FL's shortcut, inferred.
 //!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
@@ -177,10 +179,11 @@ enum Action {
     Strum,
     SnapToScale,
     Reverse,
+    Flip,
 }
 
 impl Action {
-    const ALL: [Action; 8] = [
+    const ALL: [Action; 9] = [
         Action::Glue,
         Action::Quantize,
         Action::QuantizeStarts,
@@ -189,6 +192,7 @@ impl Action {
         Action::Strum,
         Action::SnapToScale,
         Action::Reverse,
+        Action::Flip,
     ];
 
     fn name(self) -> &'static str {
@@ -201,6 +205,7 @@ impl Action {
             Action::Strum => "Strum",
             Action::SnapToScale => "Snap to scale",
             Action::Reverse => "Reverse",
+            Action::Flip => "Flip",
         }
     }
 
@@ -215,6 +220,8 @@ impl Action {
             Action::Chop => Some((Modifiers::ALT, Key::U)),
             Action::Arpeggiate => Some((Modifiers::ALT, Key::A)),
             Action::Strum => Some((Modifiers::ALT, Key::S)),
+            // Inferred from what is known of FL's piano roll.
+            Action::Flip => Some((Modifiers::ALT, Key::Y)),
         }
     }
 
@@ -226,6 +233,7 @@ impl Action {
             Action::SnapToScale => Edit::SnapNotesToScale { ids, keys },
             Action::Glue => Edit::GlueNotes { ids },
             Action::Reverse => Edit::ReverseNotes { ids },
+            Action::Flip => Edit::FlipNotes { ids },
             Action::Quantize | Action::QuantizeStarts => Edit::QuantizeNotes {
                 ids,
                 step,

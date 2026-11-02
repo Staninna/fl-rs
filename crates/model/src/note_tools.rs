@@ -1,7 +1,7 @@
 //! The piano roll's tools that make notes of notes: paint, slice, glue,
-//! quantize, chop, arpeggiate, strum, snap to scale and reverse. Each one
-//! is a single change to a pattern, so the app's undo takes the whole of
-//! it back in one step.
+//! quantize, chop, arpeggiate, strum, snap to scale, reverse and flip.
+//! Each one is a single change to a pattern, so the app's undo takes the
+//! whole of it back in one step.
 //!
 //! A note goes by its place in [`Pattern::notes`], as for the other note
 //! edits, and a place that has no note, or a record FL deleted, is
@@ -280,6 +280,22 @@ impl Pattern {
         self.notes.sort_by_key(|note| note.position);
     }
 
+    /// Turn the notes upside down: each key is mirrored around the middle
+    /// of the notes' range of keys, so the highest becomes the lowest and
+    /// the range stays where it is. FL's Flip, as it does it to keys; the
+    /// mirror is inferred.
+    pub fn flip_notes(&mut self, notes: &[usize]) {
+        let ids = self.live(notes);
+        let keys = ids.iter().map(|id| self.notes[*id].key);
+        let (Some(low), Some(high)) = (keys.clone().min(), keys.max()) else {
+            return;
+        };
+        for id in ids {
+            let note = &mut self.notes[id];
+            note.key = low + high - note.key;
+        }
+    }
+
     /// The chords among the notes: two or more of one channel that start
     /// together, each from the lowest key up.
     fn chords(&self, notes: &[usize]) -> Vec<Vec<usize>> {
@@ -546,6 +562,27 @@ mod tests {
         );
         notes.reverse_notes(&[]);
         assert_eq!(placed(&notes).len(), 4);
+    }
+
+    #[test]
+    fn flip_mirrors_the_keys_around_the_middle_of_their_range() {
+        let mut notes = pattern(&[
+            note(0, 24, 60),
+            note(24, 24, 64),
+            note(48, 24, 67),
+            note(0, 24, 90),
+        ]);
+        notes.flip_notes(&[0, 1, 2, 9]);
+        assert_eq!(
+            placed(&notes),
+            [(0, 24, 67), (24, 24, 63), (48, 24, 60), (0, 24, 90)]
+        );
+        notes.flip_notes(&[0, 1, 2]);
+        assert_eq!(
+            placed(&notes)[..3],
+            [(0, 24, 60), (24, 24, 64), (48, 24, 67)]
+        );
+        notes.flip_notes(&[]);
     }
 
     #[test]
