@@ -9,7 +9,9 @@
 //! along the timeline. A click on the ruler seeks.
 //!
 //! With the pointer over the playlist, Ctrl+A selects every item and
-//! Ctrl+D lets go of them, as in FL.
+//! Ctrl+D lets go of them, as in FL. The left and right arrows move the
+//! selection along by the step a drag snaps to, and the up and down arrows
+//! by a track (inferred: FL's own keys for this were not looked up).
 //!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
@@ -213,6 +215,9 @@ struct Memory {
     /// Where the playlist was drawn and in which frame, for [`keys`], which
     /// runs before the windows are drawn.
     area: Option<(Rect, u64)>,
+    /// Points per tick as the timeline was drawn last, for the step the
+    /// arrows move by.
+    scale: f32,
 }
 
 impl Default for Memory {
@@ -222,6 +227,7 @@ impl Default for Memory {
             left: 0.0,
             drag: None,
             area: None,
+            scale: 1.0,
         }
     }
 }
@@ -267,6 +273,23 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();
         out.push(edit(Edit::SelectItems { ids, add: false }));
+    }
+    // Each press is a step for Undo of its own.
+    let step = snap_step(Grid::of(&state.project), memory.scale) as i64;
+    for (key, delta_ticks, delta_tracks) in [
+        (Key::ArrowLeft, -step, 0),
+        (Key::ArrowRight, step, 0),
+        (Key::ArrowUp, 0, -1),
+        (Key::ArrowDown, 0, 1),
+    ] {
+        if pressed(Modifiers::NONE, key) {
+            let ids = selected.clone();
+            out.push(edit(Edit::MoveItems {
+                ids,
+                delta_ticks,
+                delta_tracks,
+            }));
+        }
     }
 }
 
@@ -473,6 +496,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         left,
         scale,
     };
+    memory.scale = scale;
     let step = bar_step(grid.bar as f32 * scale);
 
     // The ruler: a number on every `step` bars, and a click seeks.

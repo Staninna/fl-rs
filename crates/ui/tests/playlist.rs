@@ -144,3 +144,44 @@ fn the_keys_are_the_playlist_s_only_with_the_pointer_over_it() {
     harness.run();
     assert!(harness.state().is_empty(), "{:?}", harness.state());
 }
+
+#[test]
+fn the_arrows_move_the_selection_a_beat_or_a_track_a_press() {
+    let mut harness = harness(fixture());
+    // The eight bars fill 804 points, so a beat is 25 points and the
+    // drag's step is a beat.
+    for key in [
+        egui::Key::ArrowRight,
+        egui::Key::ArrowLeft,
+        egui::Key::ArrowDown,
+        egui::Key::ArrowUp,
+    ] {
+        harness.key_press(key);
+        harness.run();
+    }
+    let moved = |delta_ticks, delta_tracks| {
+        edit(Edit::MoveItems {
+            ids: vec![2, 4],
+            delta_ticks,
+            delta_tracks,
+        })
+    };
+    assert_eq!(
+        harness.state(),
+        &[moved(96, 0), moved(-96, 0), moved(0, 1), moved(0, -1)]
+    );
+
+    // Zoomed in, the step is less than a beat.
+    harness.event(egui::Event::Zoom(8.0));
+    harness.run();
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run();
+    let Some(Command::Edit {
+        edit: Edit::MoveItems { delta_ticks, .. },
+        ..
+    }) = harness.state().last()
+    else {
+        panic!("{:?}", harness.state());
+    };
+    assert!(*delta_ticks < 96 && 96 % *delta_ticks == 0, "{delta_ticks}");
+}
