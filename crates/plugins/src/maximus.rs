@@ -739,6 +739,11 @@ impl Saturator {
                 expect,
                 norm,
             } => {
+                // A ceiling of 0 puts out 0 times the curve: silence, and
+                // not the NaN of 0 over 0.
+                if ceiling <= 0.0 {
+                    return 0.0;
+                }
                 let size = f64::from(x.abs().min(expect) / ceiling);
                 let bent = size.powf(k).atan().powf(1.0 / k) * norm * f64::from(ceiling);
                 (bent as f32).copysign(x)
