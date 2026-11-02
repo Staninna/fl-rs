@@ -337,6 +337,28 @@ pub enum Edit {
         insert: u16,
         enabled: bool,
     },
+    /// Solo the insert, or with it soloed already, switch every insert
+    /// back on: see [`model::Project::solo_insert`] for which inserts stay
+    /// on. One step for `Undo`, however many switches it moves.
+    SoloInsert {
+        insert: u16,
+    },
+    /// The insert's stereo separation: -64 all separated, 0 as it comes,
+    /// 64 merged to mono.
+    SetInsertSeparation {
+        insert: u16,
+        separation: i32,
+    },
+    /// Reverse the insert's polarity, or put it back.
+    SetInsertPolarity {
+        insert: u16,
+        reversed: bool,
+    },
+    /// Swap the insert's left and right, or put them back.
+    SetInsertSwapped {
+        insert: u16,
+        swapped: bool,
+    },
     /// Name the insert. An empty name gives it its number back.
     SetInsertName {
         insert: u16,
@@ -368,6 +390,31 @@ pub enum Edit {
         insert: u16,
         slot: u8,
         mix: i32,
+    },
+    /// The song's tempo in thousandths of a BPM, held to FL's 10 to 522
+    /// BPM.
+    SetTempo {
+        milli: u32,
+    },
+    /// Add an empty pattern with this index, which the project has no
+    /// pattern for. The pattern selector sends a `SelectPattern` of it
+    /// behind this.
+    AddPattern {
+        index: u16,
+    },
+    /// Copy pattern `from` to a new pattern `to`, which the project has no
+    /// pattern for: see [`model::Project::clone_pattern`] for what comes
+    /// along. The pattern selector sends a `SelectPattern` of `to` behind
+    /// this.
+    ClonePattern {
+        from: u16,
+        to: u16,
+    },
+    /// Name the pattern. An empty name gives it its number back, and a
+    /// name for a pattern the project does not have makes it.
+    SetPatternName {
+        pattern: u16,
+        name: String,
     },
 }
 

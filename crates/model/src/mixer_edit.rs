@@ -1,6 +1,7 @@
-//! What the mixer window changes: an insert's volume, pan and send levels
-//! and a slot's switch and mix level, which are 225 records, and an
-//! insert's routes, its switch and its name, which are its own events.
+//! What the mixer window changes: an insert's volume, pan, stereo
+//! separation and send levels and a slot's switch and mix level, which are
+//! 225 records, and an insert's routes, its switch, its polarity, its swap
+//! of left and right and its name, which are its own events.
 //!
 //! [`InsertMix`](crate::InsertMix) reads every value set here, and each
 //! setter leaves the project alone when the value is the one that reads
@@ -8,7 +9,7 @@
 //! slot past 9.
 
 use crate::codec::{Codec, Cx};
-use crate::mixer::ENABLED;
+use crate::mixer::{ENABLED, POLARITY, SWAP};
 use crate::rec::{LAST_INSERT, RecTarget, control};
 use crate::{Insert, Item, Placed, Project};
 use flp::event::{Id, layout};
@@ -26,6 +27,8 @@ const LEGACY_CURRENT: u16 = 126;
 /// a pan and of a slot's mix level.
 const FADER: RangeInclusive<i32> = 0..=16_000;
 const PAN: RangeInclusive<i32> = -6400..=6400;
+/// The ends of an insert's stereo separation, which the loader clamps to.
+const SEPARATION: RangeInclusive<i32> = -64..=64;
 const MIX: RangeInclusive<i32> = 0..=12_800;
 
 /// An insert's own events in the order FL writes them, by ID: every one of
@@ -184,6 +187,15 @@ impl Project {
         self.set_control((insert, None, control::PAN), pan, PAN, Some(now));
     }
 
+    /// The insert's stereo separation, record 0x1FC2: -64 is all
+    /// separated, 0 is the sound as it comes and 64 is merged to the mean
+    /// of the two sides (`docs/mixer-insert.md`).
+    pub fn set_insert_separation_raw(&mut self, insert: u16, separation: i32) {
+        let now = self.insert_mix(insert).separation_raw();
+        let control = (insert, None, control::SEPARATION);
+        self.set_control(control, separation, SEPARATION, Some(now));
+    }
+
     /// The level of the send from insert `from` to insert `to`, record
     /// 0x2000 + `to`: 0 to 16000 with 12800 at unity. The level is kept
     /// whether or not the route is there, see [`Project::set_route`].
@@ -219,10 +231,32 @@ impl Project {
     /// [`InsertMix::enabled`](crate::InsertMix::enabled) reads it. An
     /// insert with neither stays on. No insert of the corpus is one.
     pub fn set_insert_enabled(&mut self, insert: u16, enabled: bool) {
+        self.set_insert_flag(insert, ENABLED, enabled);
+    }
+
+    /// Reverse the insert's polarity or put it back: bit 0 of the same
+    /// flags as [`Project::set_insert_enabled`], where
+    /// [`InsertMix::polarity_reversed`](crate::InsertMix::polarity_reversed)
+    /// reads it.
+    pub fn set_insert_polarity_reversed(&mut self, insert: u16, reversed: bool) {
+        self.set_insert_flag(insert, POLARITY, reversed);
+    }
+
+    /// Swap the insert's left and right or put them back: bit 1 of the
+    /// same flags as [`Project::set_insert_enabled`], where
+    /// [`InsertMix::swapped`](crate::InsertMix::swapped) reads it.
+    pub fn set_insert_swapped(&mut self, insert: u16, swapped: bool) {
+        self.set_insert_flag(insert, SWAP, swapped);
+    }
+
+    /// Set or clear `bit` of the insert's flags: its 236's flags word, or
+    /// its last 27 when the 236 is the 5-byte kind. The loader reads bits
+    /// 0 to 4 from either (`docs/event-dictionary.md`, rows 27 and 236).
+    fn set_insert_flag(&mut self, insert: u16, bit: u32, on: bool) {
         let Some(insert) = self.insert_to_edit(insert) else {
             return;
         };
-        let switch = |bits: u32| (bits & !ENABLED) | (u32::from(enabled) * ENABLED);
+        let switch = |bits: u32| (bits & !bit) | (u32::from(on) * bit);
         if let Some(flags) = insert.flags.as_mut().filter(|flags| flags.len != 5) {
             flags.flags = switch(flags.flags);
             return;
@@ -238,6 +272,60 @@ impl Project {
         if let Some(bits) = old {
             *bits = switch(u32::from(*bits)) as u8;
         }
+    }
+
+    /// The inserts in front of the current track, by the loader's numbers:
+    /// the master and the ones after it, which are the mixer's strips.
+    fn strip_numbers(&self) -> Vec<u16> {
+        let numbers = (0..self.inserts.len()).filter_map(|place| self.insert_index(place));
+        numbers.filter(|index| *index != LAST_INSERT).collect()
+    }
+
+    /// Solo the insert, or with it soloed already, switch every insert
+    /// back on: what a Ctrl+click or a right-click on its switch does in
+    /// FL (the keys are inferred from FL's manual, not read from its
+    /// code).
+    ///
+    /// Soloing switches the insert on, and with it the master, the inserts
+    /// it sends to on its way to the master, and the inserts that send to
+    /// it, so that a soloed bus still gets its sources. Every other insert
+    /// in front of the current track is switched off. Which inserts FL
+    /// leaves on is inferred too. The insert counts as soloed when each
+    /// insert is on or off as that would leave it. The current track takes
+    /// no part, and an insert the project lacks is skipped.
+    ///
+    /// Like FL, this keeps no solo state of its own: the switches are what
+    /// is written, bit 3 of each insert's 236 as
+    /// [`Project::set_insert_enabled`] sets it.
+    pub fn solo_insert(&mut self, insert: u16) {
+        let strips = self.strip_numbers();
+        if !strips.contains(&insert) {
+            return;
+        }
+        let mut kept = self.inserts_fed_by(insert);
+        kept.extend(self.inserts_feeding(insert));
+        kept.extend([0, insert]);
+        let soloed = strips
+            .iter()
+            .all(|strip| self.insert_mix(*strip).enabled() == kept.contains(strip));
+        for strip in strips {
+            self.set_insert_enabled(strip, soloed || kept.contains(&strip));
+        }
+    }
+
+    /// Every insert that `insert`'s sound gets to, through however many
+    /// routes: its way to the master.
+    pub fn inserts_fed_by(&self, insert: u16) -> BTreeSet<u16> {
+        let mut fed = BTreeSet::new();
+        let mut reached = vec![insert];
+        while let Some(from) = reached.pop() {
+            for to in self.insert_mix(from).destinations() {
+                if to != insert && fed.insert(to) {
+                    reached.push(to);
+                }
+            }
+        }
+        fed
     }
 
     /// Every insert whose sound gets to `insert`, through however many
@@ -668,6 +756,105 @@ mod tests {
         );
         p.set_insert_enabled(0, false);
         assert_eq!(written(&p), old.events);
+    }
+
+    #[test]
+    fn polarity_and_swap_are_bits_0_and_1_beside_the_switch() {
+        let file = file(NEW, &[]);
+        let mut p = project(&file);
+        p.set_insert_polarity_reversed(2, true);
+        p.set_insert_swapped(3, true);
+        let bits = |bits: u32| [[0; 4], bits.to_le_bytes(), [0; 4]].concat();
+        let mut want = file.clone();
+        want.events = with_event(&file, Id::InsertFlags, 2, &bits(0b0100_1101));
+        want.events = with_event(&want, Id::InsertFlags, 3, &bits(0b0100_1110));
+        assert_eq!(written(&p), want.events);
+        let read = from_flp(&to_flp(&p).unwrap());
+        assert!(read.insert_mix(2).polarity_reversed() && !read.insert_mix(2).swapped());
+        assert!(read.insert_mix(3).swapped() && !read.insert_mix(3).polarity_reversed());
+        assert!(read.insert_mix(2).enabled() && read.insert_mix(3).enabled());
+        p.set_insert_polarity_reversed(2, false);
+        p.set_insert_swapped(3, false);
+        assert_eq!(written(&p), file.events);
+
+        // A 5-byte 236 leaves them to the last 27, as it does the switch.
+        let mut old = file.clone();
+        let flags = old.events.iter().position(|e| e.id == 236).unwrap();
+        old.events[flags].data = vec![0, 0, 0, 0, 1];
+        old.events.insert(flags, ev(Id::FXProperties, &[0b1000]));
+        let mut p = project(&old);
+        p.set_insert_swapped(0, true);
+        p.set_insert_polarity_reversed(0, true);
+        assert_eq!(
+            written(&p),
+            with_event(&old, Id::FXProperties, 0, &[0b1011])
+        );
+    }
+
+    #[test]
+    fn the_separation_is_record_0x1fc2() {
+        let records = [(0x4000_0000, 12_800), (id(1, 0, control::SEPARATION), 32)];
+        let file = file(NEW, &records);
+        let mut p = project(&file);
+        assert_eq!(p.insert_mix(1).separation_raw(), 32);
+        p.set_insert_separation_raw(1, -64);
+        // A value past the end stops there, and 0 needs no record.
+        p.set_insert_separation_raw(2, 99);
+        p.set_insert_separation_raw(3, 0);
+        let mut want = records.to_vec();
+        want[1].1 = -64;
+        want.push((id(2, 0, control::SEPARATION), 64));
+        assert_eq!(written(&p), with_records(&file, &want));
+        let read = from_flp(&to_flp(&p).unwrap());
+        assert_eq!(read.insert_mix(1).separation_raw(), -64);
+        assert_eq!(read.insert_mix(2).separation_raw(), 64);
+        assert_eq!(read.insert_mix(3).separation_raw(), 0);
+    }
+
+    #[test]
+    fn a_solo_leaves_on_the_insert_its_sources_and_its_way_out() {
+        let file = file(NEW, &[]);
+        let mut p = project(&file);
+        // 1 sends to 2 as well as to the master, and 3 to the master.
+        p.set_route(1, 2, true);
+        assert_eq!(p.inserts_fed_by(1), BTreeSet::from([0, 2]));
+        assert_eq!(p.inserts_fed_by(0), BTreeSet::new());
+        p.set_insert_enabled(1, false);
+        let routed = flp::Project {
+            header: file.header,
+            events: written(&p),
+        };
+        let on = |p: &Project| [0, 1, 2, 3, 501].map(|i| p.insert_mix(i).enabled());
+
+        // 2 keeps 1, which sends to it, and the master. 1 was off.
+        p.solo_insert(2);
+        assert_eq!(on(&p), [true, true, true, false, true]);
+        let bits = |bits: u32| [[0; 4], bits.to_le_bytes(), [0; 4]].concat();
+        let (on_bits, off) = (bits(0b0100_1100), bits(0b0100_0100));
+        let mut want = routed.clone();
+        want.events = with_event(&routed, Id::InsertFlags, 1, &on_bits);
+        assert_eq!(written(&p), with_event(&want, Id::InsertFlags, 3, &off));
+        assert_eq!(on(&from_flp(&to_flp(&p).unwrap())), on(&p));
+
+        // Again on the soloed insert, and every insert is on.
+        p.solo_insert(2);
+        assert_eq!(on(&p), [true; 5]);
+        assert_eq!(written(&p), want.events);
+
+        // 1 keeps 2, which it sends to on its way to the master.
+        p.solo_insert(1);
+        assert_eq!(on(&p), [true, true, true, false, true]);
+        // With 3 soloed, 1 and 2 go off, and the current track stays.
+        p.solo_insert(3);
+        assert_eq!(on(&p), [true, false, false, true, true]);
+        p.solo_insert(3);
+        assert_eq!(on(&p), [true; 5]);
+
+        // An insert the project lacks, and the current track, solo nothing.
+        let before = p.clone();
+        p.solo_insert(4);
+        p.solo_insert(501);
+        assert!(p == before);
     }
 
     #[test]

@@ -1,8 +1,15 @@
 //! The project and the events that belong to no smaller object.
 
 use crate::codec::{self, Cx, object};
+use crate::pattern::write_field;
+use crate::rec::{RecTarget, control};
 use crate::{Arrangement, Channel, Error, Insert, Item, Pattern, Placed};
 use flp::event::{Id, layout};
+use std::ops::RangeInclusive;
+
+/// FL's tempo range, 10 to 522 BPM, in thousandths of a BPM: the range its
+/// tempo control maps automation onto (`docs/automation-234.md`).
+pub const TEMPO_MILLI: RangeInclusive<u32> = 10_000..=522_000;
 
 /// A whole project.
 ///
@@ -119,6 +126,42 @@ impl Project {
             None => {
                 let fine = self.tempo_fine.unwrap_or(0);
                 Some(f64::from(self.tempo_coarse?) + f64::from(fine) / 1000.0)
+            }
+        }
+    }
+
+    /// Set the tempo, in thousandths of a BPM, held to [`TEMPO_MILLI`].
+    ///
+    /// The loader's tempo setter takes 156 whole, and 66 and 93 as the
+    /// whole BPM and the thousandths of it (`docs/event-dictionary.md`).
+    /// Each of the three the project has gets the new tempo, so the file
+    /// reads as that tempo whichever of them comes last. A project with
+    /// neither 156 nor 66 gets a 156 behind its 199, and a 66 without a
+    /// 93 gets one behind it when the tempo has a fraction. No file of the
+    /// corpus has a 225 record for the tempo, but one that does is set
+    /// too, since the loader replays the records after the events.
+    pub fn set_tempo_milli(&mut self, milli: u32) {
+        let milli = milli.clamp(*TEMPO_MILLI.start(), *TEMPO_MILLI.end());
+        let old_pair = self.tempo_coarse.is_some();
+        if self.tempo_milli.is_some() || !old_pair {
+            self.tempo_milli = Some(milli);
+            write_field(&mut self.order, Id::FLVersion, Id::Tempo);
+        }
+        if old_pair {
+            let (whole, fraction) = ((milli / 1000) as u16, (milli % 1000) as u16);
+            self.tempo_coarse = Some(whole);
+            if self.tempo_fine.is_some() || fraction != 0 {
+                self.tempo_fine = Some(fraction);
+                write_field(&mut self.order, Id::TempoCoarse, Id::TempoFine);
+            }
+        }
+        let tempo = RecTarget::Global {
+            control: control::TEMPO,
+        };
+        let legacy = self.legacy_rec_ids();
+        for record in &mut self.initial_values {
+            if RecTarget::decode(record.rec_id, legacy) == tempo {
+                record.value = milli as i32;
             }
         }
     }
@@ -303,6 +346,94 @@ mod tests {
                 data: arrangement.to_le_bytes().to_vec(),
             }),
         });
+    }
+
+    fn ev(id: Id, data: &[u8]) -> RawEvent {
+        RawEvent {
+            id: id.0,
+            data: data.to_vec(),
+        }
+    }
+
+    /// A file of these events after a 199 of FL 20.8, read and checked to
+    /// write back the same, and what it writes once `edit` has run.
+    fn edited(events: &[RawEvent], edit: impl FnOnce(&mut Project)) -> (Project, Vec<RawEvent>) {
+        let mut all = vec![ev(Id::FLVersion, b"20.8.4.2576\0")];
+        all.extend_from_slice(events);
+        let file = flp::Project {
+            header: flp::Header {
+                format: 0,
+                channel_count: 0,
+                ppq: 96,
+            },
+            events: all,
+        };
+        let mut project = crate::from_flp(&file);
+        assert_eq!(to_flp(&project), Ok(file));
+        edit(&mut project);
+        let written = to_flp(&project).unwrap();
+        // What is written reads back as the same events.
+        assert_eq!(to_flp(&crate::from_flp(&written)), Ok(written.clone()));
+        (crate::from_flp(&written), written.events[1..].to_vec())
+    }
+
+    #[test]
+    fn the_tempo_goes_into_156_held_to_fl_s_range() {
+        let tempo = |milli: u32| ev(Id::Tempo, &milli.to_le_bytes());
+        let title = ev(Id::Title, b"Song\0");
+        let events = [tempo(140_000), title.clone()];
+        let (read, written) = edited(&events, |p| p.set_tempo_milli(128_500));
+        assert_eq!(written, [tempo(128_500), title.clone()]);
+        assert_eq!(read.tempo(), Some(128.5));
+        let (read, _) = edited(&events, |p| p.set_tempo_milli(5));
+        assert_eq!(read.tempo(), Some(10.0));
+        let (read, _) = edited(&events, |p| p.set_tempo_milli(999_999));
+        assert_eq!(read.tempo(), Some(522.0));
+
+        // A file without a tempo gets a 156 behind its 199.
+        let (read, written) = edited(std::slice::from_ref(&title), |p| p.set_tempo_milli(90_000));
+        assert_eq!(written, [tempo(90_000), title]);
+        assert_eq!(read.tempo(), Some(90.0));
+    }
+
+    #[test]
+    fn an_old_tempo_goes_into_66_and_93_and_a_225_record_too() {
+        let word = |id: Id, value: u16| ev(id, &value.to_le_bytes());
+        let coarse = word(Id::TempoCoarse, 128);
+        let (read, written) = edited(std::slice::from_ref(&coarse), |p| p.set_tempo_milli(99_500));
+        let want = [word(Id::TempoCoarse, 99), word(Id::TempoFine, 500)];
+        assert_eq!(written, want);
+        assert_eq!(read.tempo(), Some(99.5));
+        // A whole tempo needs no 93, and one that is there is set.
+        let (_, written) = edited(std::slice::from_ref(&coarse), |p| {
+            p.set_tempo_milli(100_000)
+        });
+        assert_eq!(written, [word(Id::TempoCoarse, 100)]);
+        let (_, written) = edited(&want, |p| p.set_tempo_milli(100_000));
+        assert_eq!(
+            written,
+            [word(Id::TempoCoarse, 100), word(Id::TempoFine, 0)]
+        );
+
+        // Beside a 156 both are set, and so is a record for the tempo.
+        let record = |value: i32| {
+            let id = 0x4000_0005u32.to_le_bytes();
+            ev(Id::MixerParams, &[[0; 4], id, value.to_le_bytes()].concat())
+        };
+        let both = [
+            ev(Id::Tempo, &140_000u32.to_le_bytes()),
+            coarse,
+            record(140_000),
+        ];
+        let (read, written) = edited(&both, |p| p.set_tempo_milli(75_250));
+        let want = [
+            ev(Id::Tempo, &75_250u32.to_le_bytes()),
+            word(Id::TempoCoarse, 75),
+            word(Id::TempoFine, 250),
+            record(75_250),
+        ];
+        assert_eq!(written, want);
+        assert_eq!(read.tempo(), Some(75.25));
     }
 
     #[test]

@@ -208,6 +208,92 @@ fn render_writes_the_song_to_a_wav() {
 }
 
 #[test]
+fn a_tempo_edit_is_saved_undone_and_played() {
+    let dir = Dir::new("tempo");
+    let (mut app, path) = open_fixture(&dir);
+    let rate = app.state().sample_rate.unwrap_or(44_100) as usize;
+    // A drag on the tempo is one step, and the last value counts.
+    for milli in [100_000, 80_000, 60_000] {
+        edit(&mut app, Edit::SetTempo { milli }, Some(1));
+    }
+    assert_eq!(app.project().tempo(), Some(60.0));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(fl_rs::read(&path).unwrap().tempo(), Some(60.0));
+
+    // The bar takes four seconds at 60 BPM, where it took two.
+    let wav = dir.0.join("slow.wav");
+    app.apply(Command::Render(wav.clone()));
+    settle(&mut app);
+    let frames = hound::WavReader::open(&wav).unwrap().duration() as usize;
+    assert!(frames > 2 * rate && frames <= 4 * rate, "{frames} frames");
+
+    app.apply(Command::Undo);
+    assert_eq!(app.project().tempo(), Some(120.0));
+    // FL's range ends at 522 BPM.
+    edit(&mut app, Edit::SetTempo { milli: 900_000 }, None);
+    assert_eq!(app.project().tempo(), Some(522.0));
+}
+
+/// The indices of the project's patterns, with each one's name and how
+/// many notes it has.
+fn patterns(project: &Project) -> Vec<(u16, Option<String>, usize)> {
+    let pattern = |p: &Pattern| (p.index, p.name.clone(), p.notes.len());
+    let mut all: Vec<_> = project.patterns.iter().map(pattern).collect();
+    all.sort();
+    all
+}
+
+#[test]
+fn the_pattern_edits_are_saved_reloaded_and_undone() {
+    let dir = Dir::new("patterns");
+    let (mut app, path) = open_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    edit(&mut app, Edit::AddPattern { index: 2 }, None);
+    app.apply(Command::SelectPattern(2));
+    assert_eq!(app.state().pattern, 2);
+    let want = vec![(1, None, 4), (2, None, 0)];
+    assert_eq!(patterns(app.project()), want);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
+
+    // A step in the new pattern goes into it.
+    edit(&mut app, set_step(0, true), None);
+    assert_eq!(patterns(app.project())[1], (2, None, 1));
+    app.apply(Command::Undo);
+    app.apply(Command::Undo);
+    assert_eq!(patterns(app.project()), [(1, None, 4)]);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+    // A pattern that is there already is no step.
+    edit(&mut app, Edit::AddPattern { index: 1 }, None);
+    assert!(!app.is_modified());
+
+    // A clone has the notes.
+    edit(&mut app, Edit::ClonePattern { from: 1, to: 2 }, None);
+    let want = vec![(1, None, 4), (2, Some("Pattern 1 #2".to_owned()), 4)];
+    assert_eq!(patterns(app.project()), want);
+    app.apply(Command::Save);
+    assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
+    app.apply(Command::Undo);
+    assert_eq!(patterns(app.project()), [(1, None, 4)]);
+
+    // A name, saved, and taken away again.
+    let name = |name: &str| Edit::SetPatternName {
+        pattern: 1,
+        name: name.to_owned(),
+    };
+    edit(&mut app, name("Beat"), None);
+    app.apply(Command::Save);
+    let want = [(1, Some("Beat".to_owned()), 4)];
+    assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
+    edit(&mut app, name(""), None);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+}
+
+#[test]
 fn a_render_reports_its_progress_up_to_the_whole() {
     let dir = Dir::new("progress");
     let path = write_fixture(&dir.0);
@@ -1250,6 +1336,66 @@ fn the_mixer_s_edits_are_saved_reloaded_and_undone() {
     assert!(!app.is_modified());
     app.apply(Command::Redo);
     assert_eq!(app.project().insert_mix(1).volume_raw(), 9600);
+}
+
+#[test]
+fn a_solo_is_one_undo_step_and_is_saved() {
+    let dir = Dir::new("solo");
+    let (mut app, path) = open_mixer_fixture(&dir);
+    let on = |project: &Project| [0, 1, 2, 3].map(|i| project.insert_mix(i).enabled());
+    edit(&mut app, Edit::SoloInsert { insert: 1 }, None);
+    assert_eq!(on(app.project()), [true, true, false, false]);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(on(&fl_rs::read(&path).unwrap()), [true, true, false, false]);
+    // Two switches went off, and one undo puts both back.
+    app.apply(Command::Undo);
+    assert_eq!(on(app.project()), [true; 4]);
+    app.apply(Command::Redo);
+    edit(&mut app, Edit::SoloInsert { insert: 1 }, None);
+    assert_eq!(on(app.project()), [true; 4]);
+}
+
+#[test]
+fn polarity_swap_and_separation_are_saved_reloaded_and_undone() {
+    let dir = Dir::new("strip-menu");
+    let (mut app, path) = open_mixer_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    // A knob's drag is one step.
+    for separation in [-10, -40, -64] {
+        let edit = Edit::SetInsertSeparation {
+            insert: 2,
+            separation,
+        };
+        self::edit(&mut app, edit, Some(1));
+    }
+    let edits = [
+        Edit::SetInsertPolarity {
+            insert: 1,
+            reversed: true,
+        },
+        Edit::SetInsertSwapped {
+            insert: 3,
+            swapped: true,
+        },
+    ];
+    for edit in edits {
+        self::edit(&mut app, edit, None);
+    }
+    let check = |project: &Project| {
+        assert_eq!(project.insert_mix(2).separation_raw(), -64);
+        assert!(project.insert_mix(1).polarity_reversed());
+        assert!(project.insert_mix(3).swapped() && project.insert_mix(3).enabled());
+    };
+    check(app.project());
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    check(&fl_rs::read(&path).unwrap());
+    for _ in 0..3 {
+        app.apply(Command::Undo);
+    }
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
 }
 
 #[test]

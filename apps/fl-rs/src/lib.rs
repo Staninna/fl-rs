@@ -238,6 +238,14 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::SetInsertVolume { insert, volume } => project.set_insert_volume_raw(insert, volume),
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),
+        Edit::SoloInsert { insert } => project.solo_insert(insert),
+        Edit::SetInsertSeparation { insert, separation } => {
+            project.set_insert_separation_raw(insert, separation);
+        }
+        Edit::SetInsertPolarity { insert, reversed } => {
+            project.set_insert_polarity_reversed(insert, reversed);
+        }
+        Edit::SetInsertSwapped { insert, swapped } => project.set_insert_swapped(insert, swapped),
         Edit::SetInsertName { insert, ref name } => project.set_insert_name(insert, name),
         Edit::SetRoute { from, to, on } => project.set_route(from, to, on),
         Edit::SetSendLevel { from, to, level } => project.set_send_level_raw(from, to, level),
@@ -247,6 +255,10 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
             enabled,
         } => project.set_slot_enabled(insert, slot, enabled),
         Edit::SetSlotMix { insert, slot, mix } => project.set_slot_mix_raw(insert, slot, mix),
+        Edit::SetTempo { milli } => project.set_tempo_milli(milli),
+        Edit::AddPattern { index } => project.add_pattern(index),
+        Edit::ClonePattern { from, to } => project.clone_pattern(from, to),
+        Edit::SetPatternName { pattern, ref name } => project.set_pattern_name(pattern, name),
         Edit::MoveItems { .. }
         | Edit::ResizeItems { .. }
         | Edit::SetMuted { .. }
