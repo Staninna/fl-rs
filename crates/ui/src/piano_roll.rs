@@ -64,7 +64,8 @@
 //! pattern plays in pattern mode the play cursor runs across the notes,
 //! and the view turns a page when the cursor leaves it. A drag along the
 //! ruler sets the ticks the pattern plays round, snapped, and a click on
-//! the ruler plays the whole pattern again.
+//! the ruler plays the whole pattern again and, in pattern mode, moves the
+//! clock to where it is, snapped, as FL's does.
 //!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
@@ -1110,7 +1111,8 @@ impl Roll<'_> {
     }
 
     /// The ruler's range: drawn over the ruler and the notes, and set by a
-    /// drag along the ruler.
+    /// drag along the ruler. A click on the ruler lets go of the range and,
+    /// in pattern mode, moves the clock to the step it is nearest.
     fn ruler(
         &self,
         ui: &Ui,
@@ -1141,8 +1143,18 @@ impl Roll<'_> {
                 out.push(Command::SetLoopRange(Some((from, to))));
             }
         }
-        if response.clicked() && range.is_some() {
-            out.push(Command::SetLoopRange(None));
+        if response.clicked() {
+            if range.is_some() {
+                out.push(Command::SetLoopRange(None));
+            }
+            // In pattern mode the clock is the pattern's, and a click puts
+            // it there, snapped. In song mode it is the song's, which the
+            // pattern's ticks say nothing about.
+            if self.playhead.is_some()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                out.push(Command::Seek(tick(pos.x)));
+            }
         }
         let shown = if memory.range.is_some() {
             dragged

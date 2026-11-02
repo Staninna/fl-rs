@@ -923,10 +923,28 @@ fn a_drag_along_the_ruler_sets_the_loop_range() {
     let range = Command::SetLoopRange(Some((96, 288)));
     assert_eq!(harness.state(), &[range.clone(), range]);
 
-    // A click plays the whole pattern again, when a range is set.
+    // A click plays the whole pattern again, when a range is set, and
+    // moves the clock to the step nearest it.
     let mut harness = harness_with(fixture(), |state| state.loop_range = Some((96, 288)));
     click(&mut harness, x(200.0));
-    assert_eq!(harness.state(), &[Command::SetLoopRange(None)]);
+    let whole = Command::SetLoopRange(None);
+    assert_eq!(harness.state(), &[whole, Command::Seek(192)]);
+}
+
+#[test]
+fn a_click_on_the_ruler_seeks_to_the_snapped_step() {
+    let mut harness = harness(fixture());
+    let ruler = harness.get_by_label("Loop range").rect();
+    let x = |tick: f32| pos2(ruler.left() + tick * 64.0 / 96.0, ruler.center().y);
+    // Tick 150 is nearer the step at 144 than those either side of it.
+    click(&mut harness, x(150.0));
+    click(&mut harness, x(5.0));
+    assert_eq!(harness.state(), &[Command::Seek(144), Command::Seek(0)]);
+
+    // In song mode the clock is the song's, and a click leaves it.
+    let mut harness = harness_with(fixture(), |state| state.song_mode = true);
+    click(&mut harness, x(150.0));
+    assert_eq!(harness.state(), &[]);
 }
 
 #[test]
