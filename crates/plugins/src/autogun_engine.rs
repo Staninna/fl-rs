@@ -601,6 +601,12 @@ impl Timbre {
         self.step = ratio * engine.base_step;
     }
 
+    /// The step the last [`Timbre::set_pitch`] set.
+    #[cfg(test)]
+    pub(crate) fn step(&self) -> f64 {
+        self.step
+    }
+
     /// `FUN_00846f30`: a unison copy's pitch, start phase (as a share of
     /// the table, only before the first render) and pan gains.
     pub fn set_copy(&mut self, i: usize, ratio: f64, phase: f64, left: f32, right: f32) {

@@ -26,7 +26,11 @@ counter is only ever zeroed) and is not ported.
   inside its release loop (`FUN_1800ebc50`, `marker_value` in
   `morphine.rs`) are called approximate by the agent that wrote them. They
   were not rechecked; do that against the listings to move toward Exact.
-- Unison and the per-note tuning a host sends are left out. Parameter 3
+- The per-note tuning a host sends (`set_note_pitch`) is in, as an offset
+  on the glide from the next spectrum; how the DLL reads it is inferred
+  (doc, Fidelity). Check it against `CFLWrapper`'s voice code when a
+  binary is to hand.
+- Unison is left out. Parameter 3
   (`int(12 v)` at `this+0x38dc`, `FUN_180111ec0` case 3) is not read by
   the port; it may be the unison count.
 - No null test against FL.
