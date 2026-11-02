@@ -4,7 +4,10 @@
 //! but finite samples.
 //!
 //! And every plugin takes any bytes as a state, a valid one cut short or
-//! with a word changed, or noise, without a panic, and plays on.
+//! with a word changed, or noise, without a panic, and plays on. Every
+//! generator takes notes in any order: let go of twice, for numbers no
+//! note has, on twice, after all are let go of, and more at once than it
+//! has voices.
 //!
 //! Each plugin runs under `catch_unwind`, so one run lists every plugin
 //! that fails, not only the first.
@@ -382,5 +385,82 @@ fn every_plugin_takes_any_bytes_as_a_state_and_plays_on() {
             let first: Vec<&str> = failed.iter().take(4).map(String::as_str).collect();
             panic!("{} states, as {}", failed.len(), first.join("; "));
         }
+    });
+}
+
+/// The generator a driver plays.
+fn g(d: &mut Driver) -> &mut dyn Generator {
+    match &mut d.plugin {
+        Plugin::Generator(g) => g.as_mut(),
+        Plugin::Effect(_) => unreachable!(),
+    }
+}
+
+/// A generator's note on, at a key and a velocity of 0.8.
+fn on(g: &mut dyn Generator, voice: u32, key: i16) {
+    g.note_on(NoteOn {
+        voice,
+        key,
+        velocity: 0.8,
+        ..NoteOn::default()
+    });
+}
+
+#[test]
+fn every_generator_takes_notes_in_any_order() {
+    each(|_, make| {
+        let mut d = Driver::new(make(), 44_100.0);
+        if matches!(d.plugin, Plugin::Effect(_)) {
+            return;
+        }
+        // Numbers no note has.
+        g(&mut d).note_off(7);
+        g(&mut d).set_note_pitch(7, 300.0);
+        d.play(64, "a note off and a pitch for an unknown voice");
+
+        // The same number on twice, and let go of twice.
+        on(g(&mut d), 1, 60);
+        d.play(64, "a note on");
+        on(g(&mut d), 1, 64);
+        d.play(64, "the same voice on again");
+        g(&mut d).note_off(1);
+        d.play(64, "a note off");
+        g(&mut d).note_off(1);
+        d.play(64, "the same note off again");
+        g(&mut d).set_note_pitch(1, -1200.0);
+        d.play(64, "a pitch after the note off");
+
+        // Everything let go of, a pitch for a note that was, then a note.
+        on(g(&mut d), 2, 48);
+        on(g(&mut d), 3, 72);
+        d.play(64, "two notes");
+        g(&mut d).all_notes_off();
+        g(&mut d).set_note_pitch(2, 700.0);
+        d.play(64, "a pitch after all notes off");
+        on(g(&mut d), 4, 55);
+        d.play(64, "a note after all notes off");
+        g(&mut d).all_notes_off();
+        g(&mut d).all_notes_off();
+        d.play(64, "all notes off twice");
+
+        // More notes at once than a voice pool holds, over the keyboard
+        // and past its ends, then let go of in another order.
+        for n in 0..200u32 {
+            on(g(&mut d), 100 + n, (n * 7 % 140) as i16 - 6);
+            if n % 25 == 0 {
+                d.play(16, &format!("{n} notes held"));
+            }
+        }
+        d.play(256, "200 notes held");
+        for n in (0..200u32).rev().step_by(3) {
+            g(&mut d).set_note_pitch(100 + n, n as f32 * 10.0 - 1000.0);
+            g(&mut d).note_off(100 + n);
+        }
+        d.play(256, "a third of 200 notes let go of");
+        g(&mut d).all_notes_off();
+        d.play(512, "the rest let go of");
+        g(&mut d).reset();
+        on(g(&mut d), 1, 60);
+        d.play(64, "a note after a reset");
     });
 }
