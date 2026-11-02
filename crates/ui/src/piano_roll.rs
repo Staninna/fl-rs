@@ -63,7 +63,9 @@
 //! after the span the notes cover, moved by its length rounded up to a
 //! step of the grid. The next paste goes after that one. The notes are
 //! kept in the piano roll, and the system's clipboard gets a line that
-//! says how many.
+//! says how many. Ctrl+B duplicates the selection, as FL's does: the
+//! copies go right after it, where a paste would go, and become the
+//! selection. That FL rounds the shift up to the snap's step is inferred.
 //!
 //! The snap menu has FL's choices, which [`Snap`] explains, and every
 //! drag, click, arrow key and tool goes by it. The scale menu takes a
@@ -699,6 +701,12 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
     }
     if cut {
         out.push(edit(Edit::DeleteNotes { ids: ids.clone() }, None));
+    }
+    // FL's Ctrl+B: the copies go where a paste of the selection would go
+    // when the pattern is not playing.
+    if pressed(ctrl, Key::B) {
+        let notes = shifted(&chosen, after(&chosen, step, sixteenth), channel.index);
+        out.push(edit(Edit::PasteNotes { notes }, None));
     }
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();

@@ -822,6 +822,27 @@ fn copy_cut_and_paste_take_the_selection_and_put_it_after_itself() {
     assert_eq!(edits(&harness), [edit(copies(&project, &ids, 240))]);
 }
 
+#[test]
+fn ctrl_b_duplicates_the_selection_after_itself() {
+    // The D#4 from tick 192 lasts 144 ticks, six steps.
+    let project = with_selected(&[BASS[2]]);
+    let mut harness = harness(project.clone());
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+    harness.run();
+    assert_eq!(edits(&harness), [edit(copies(&project, &[BASS[2]], 144))]);
+
+    // With a bar's snap the copy goes a bar on.
+    choose_snap(&mut harness, "Line", "Bar");
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+    harness.run();
+    assert_eq!(
+        edits(&harness)[1..],
+        [edit(copies(&project, &[BASS[2]], 384))]
+    );
+}
+
 fn choose_snap(harness: &mut Harness<'_, Vec<Command>>, from: &str, to: &str) {
     harness.get_by_value(from).click();
     harness.run();
