@@ -758,14 +758,6 @@ impl Graph {
     /// the block's place.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], add: bool) {
         let len = left.len().min(right.len());
-        if self.buffers.is_empty() {
-            // No state yet: nothing to play, and silence to give.
-            if !add {
-                left.fill(0.0);
-                right.fill(0.0);
-            }
-            return;
-        }
         let mut offset = 0;
         while offset < len {
             let n = (len - offset).min(BLOCK);
