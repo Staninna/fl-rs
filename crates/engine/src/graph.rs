@@ -8,6 +8,7 @@ use crate::automation::Automation;
 use crate::clock::Clock;
 use crate::generator::{Cue, Rack};
 use crate::mix::{Mixer, Told};
+use crate::parts::UnplayedParts;
 use crate::sample::Sample;
 use crate::sequence::{self, Song};
 use crate::slide::Slides;
@@ -80,6 +81,9 @@ pub(crate) struct Graph {
     /// for a part the engine does not build, by that part. Their notes
     /// play as they are.
     pub unplayed_arpeggiators: BTreeMap<&'static str, usize>,
+    /// The channels with a note or a clip that sounds before the limit
+    /// with a part on that the engine does not play.
+    pub unplayed_parts: UnplayedParts,
 }
 
 impl Graph {
@@ -170,6 +174,10 @@ impl Graph {
         let song = arpeggiated.as_ref().map_or(song, |arp| &arp.song);
         let unbuilt = arpeggiated.as_ref().map(|arp| &arp.unbuilt);
         let mut unplayed = BTreeSet::new();
+        // The channels with a note that sounds, with a clip that does, and
+        // the TS404 channels with a note, for the parts they leave out.
+        let (mut noted, mut clipped, mut ts404) =
+            (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
         // The plugins are made at the slowest tempo a clip can take the
         // song to, where one that keeps time asks for the most memory, and
         // then told the tempo the song starts at.
@@ -197,6 +205,9 @@ impl Graph {
             if unbuilt.is_some_and(|unbuilt| unbuilt.contains_key(&channel.index)) {
                 unplayed.insert(channel.index);
             }
+            if channel.is_ts404() {
+                ts404.insert(channel.index);
+            }
             let glide = song.glides.get(&at);
             if channel.kind == Some(ChannelKind::Plugin) {
                 let insert = target_insert(channel);
@@ -208,6 +219,7 @@ impl Graph {
                 let Some(place) = rack.place(channel, insert, timing, adjusts, curves) else {
                     continue;
                 };
+                noted.insert(channel.index);
                 if automation.drives_pitch(channel.index) {
                     rack.follow_pitch(place);
                 }
@@ -242,6 +254,7 @@ impl Graph {
             let Some(sample) = sample(path)? else {
                 continue;
             };
+            noted.insert(channel.index);
             let levels = levels::trigger(&note.note, channel, curves);
             // FinalLevels.Pitch, from where the sample plays at its own
             // speed.
@@ -347,6 +360,7 @@ impl Graph {
             len = len.max(start.saturating_add(voice.frames()).min(limit));
             played.insert(insert);
             events.push(Event { start, voice });
+            clipped.insert(channel.index);
             clips += 1;
             stretched += usize::from(settings.stretch != 1.0);
         }
@@ -390,6 +404,7 @@ impl Graph {
                 *unplayed_arpeggiators.entry(what).or_default() += 1;
             }
         }
+        let unplayed_parts = UnplayedParts::of(project, &noted, &clipped, &ts404, &automation);
         mixer.host(rack.hosted);
         mixer.set_tempo(automation.tempo_at(0.0).unwrap_or(tempo));
         Ok(Graph {
@@ -413,6 +428,7 @@ impl Graph {
             unhosted_generators: rack.unhosted,
             approximated_generators,
             unplayed_arpeggiators,
+            unplayed_parts,
         })
     }
 }

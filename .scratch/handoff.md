@@ -39,7 +39,7 @@ A code review of the PR, fixed before the merge: an arpeggiator on one channel n
 - Emphasizer's LimiterLite and Transporter's TransientLooper: `Shared/ildsp_x64.dll` is in this install after all, and exports both. Their notes have the steps.
 - Distructor (2 slots, 2 inside Patchers in Bien Duro), Fruity Vocoder, Hardcore, and the silent render tests of PoiZone, Sawer, SimSynth and the Voltage Controller.
 - Eight generators ignore `set_note_pitch`, so slides and pitch clips do not bend them: GMS, MiniSynth, Kepler, Kepler Exo, Autogun, Ogun, Morphine, FL Slayer. 3x Osc ignores the channel sample the engine hands it.
-- The channel parts the engine leaves out ("Left out" in `docs/rec-channel.md`: the instrument envelopes 0x1000.., time stretch, tracking, echo delay, TS404). Count how many corpus channels turn each on, as was done for the arpeggiator, and have the render count them; it may not today.
+- The channel parts the engine leaves out ("Left out" in `docs/rec-channel.md`: the instrument envelopes 0x1000.., time stretch, tracking, echo delay, TS404). The render now counts them (`Rendered::unplayed_parts`, `crates/engine/src/parts.rs`; the rules are in `docs/rec-channel.md`, "Channel parts the engine counts"). Next: run the corpus render through `tools/progress.py --render` on a machine with FL to get the counts, and build the most used part first. `progress.py` now counts a project with any of them as not played in full, so the "play in full" figure will drop at that render.
 
 ## Earlier claims that no longer hold
 
