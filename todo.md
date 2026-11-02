@@ -8,7 +8,7 @@ The next big steps, biggest payoff first. None of them needs FL Studio running: 
 
 3. **Close the biggest sound gaps the corpus render lists.** 123 of 165 projects have sound and 92 play in full.
    - FLEX: 13 silent channels. Decide first whether to read `.flexpack` or leave FLEX out.
-   - Eight generators ignore `set_note_pitch`, so slides and pitch clips do not bend them: GMS, MiniSynth, Kepler, Kepler Exo, Autogun, Ogun, Morphine, FL Slayer.
+   - Check how the eight generators that now follow `set_note_pitch` (GMS, MiniSynth, Kepler, Kepler Exo, Autogun, Ogun, Morphine, FL Slayer) re-read the pitch against their DLLs: each one's timing is inferred from its doc, and FL Slayer's whole mapping is a guess.
    - The channel features under "Left out" in `docs/rec-channel.md`: instrument envelopes, time stretch, tracking, echo delay, TS404. Count how many corpus channels turn each on, as was done for the arpeggiator, and build the most used first.
    - Emphasizer's LimiterLite and Transporter's TransientLooper, both exported by `Shared/ildsp_x64.dll`. Their notes in `.scratch/notes/` have the steps.
 
