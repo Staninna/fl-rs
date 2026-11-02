@@ -1,7 +1,7 @@
 //! The piano roll's tools that make notes of notes: paint, slice, glue,
-//! quantize, chop, arpeggiate, strum, snap to scale, reverse and flip.
-//! Each one is a single change to a pattern, so the app's undo takes the
-//! whole of it back in one step.
+//! quantize, chop, arpeggiate, strum, snap to scale, reverse, flip and
+//! legato. Each one is a single change to a pattern, so the app's undo
+//! takes the whole of it back in one step.
 //!
 //! A note goes by its place in [`Pattern::notes`], as for the other note
 //! edits, and a place that has no note, or a record FL deleted, is
@@ -296,6 +296,31 @@ impl Pattern {
         }
     }
 
+    /// Make each note end where the next of the notes starts, of its
+    /// channel and starting later than it: longer to close a gap, shorter
+    /// to end an overlap. The notes that start last keep their lengths, and
+    /// so does a step, which has no end. FL's quick legato, as far as is
+    /// known of it.
+    pub fn legato_notes(&mut self, notes: &[usize]) {
+        let ids = self.live(notes);
+        let mut starts: BTreeMap<u16, Vec<i32>> = BTreeMap::new();
+        for id in &ids {
+            let note = &self.notes[*id];
+            starts.entry(note.channel).or_default().push(note.position);
+        }
+        starts
+            .values_mut()
+            .for_each(|starts| starts.sort_unstable());
+        for id in ids {
+            let note = &mut self.notes[id];
+            let starts = &starts[&note.channel];
+            let next = starts.get(starts.partition_point(|at| *at <= note.position));
+            if let Some(next) = next.filter(|_| note.length > 0) {
+                note.length = next - note.position;
+            }
+        }
+    }
+
     /// The chords among the notes: two or more of one channel that start
     /// together, each from the lowest key up.
     fn chords(&self, notes: &[usize]) -> Vec<Vec<usize>> {
@@ -583,6 +608,34 @@ mod tests {
             [(0, 24, 60), (24, 24, 64), (48, 24, 67)]
         );
         notes.flip_notes(&[]);
+    }
+
+    #[test]
+    fn legato_ends_each_note_where_the_next_one_starts() {
+        let mut other = note(30, 10, 70);
+        other.channel = 2;
+        let mut notes = pattern(&[
+            note(0, 10, 60),
+            note(0, 200, 64),
+            other,
+            note(48, 0, 62),
+            note(96, 24, 60),
+            note(96, 12, 67),
+        ]);
+        notes.legato_notes(&[0, 1, 2, 3, 4, 5]);
+        // The chord at 0 ends at the step, which keeps no length, and the
+        // chord at 96 is last. Channel 2's note has none after it.
+        assert_eq!(
+            placed(&notes),
+            [
+                (0, 48, 60),
+                (0, 48, 64),
+                (30, 10, 70),
+                (48, 0, 62),
+                (96, 24, 60),
+                (96, 12, 67)
+            ]
+        );
     }
 
     #[test]

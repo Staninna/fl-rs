@@ -205,6 +205,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         | Edit::SnapNotesToScale { .. }
         | Edit::ReverseNotes { .. }
         | Edit::FlipNotes { .. }
+        | Edit::LegatoNotes { .. }
         | Edit::MoveNotes { .. }
         | Edit::ResizeNotes { .. }
         | Edit::SetNotesMuted { .. }
@@ -300,6 +301,7 @@ fn edit_notes(pattern: &mut Pattern, edit: &Edit) {
         Edit::SnapNotesToScale { ids, keys } => pattern.snap_notes_to_scale(ids, *keys),
         Edit::ReverseNotes { ids } => pattern.reverse_notes(ids),
         Edit::FlipNotes { ids } => pattern.flip_notes(ids),
+        Edit::LegatoNotes { ids } => pattern.legato_notes(ids),
         _ => {}
     }
 }

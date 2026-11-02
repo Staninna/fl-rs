@@ -303,6 +303,10 @@ pub enum Edit {
     FlipNotes {
         ids: Vec<NoteId>,
     },
+    /// End each note where the next of the notes starts that starts later.
+    LegatoNotes {
+        ids: Vec<NoteId>,
+    },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for
     /// `Undo` and no change to save.

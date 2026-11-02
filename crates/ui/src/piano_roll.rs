@@ -47,6 +47,8 @@
 //!   mirrored in the span the notes cover, and its length is kept.
 //! - Flip (Alt+Y) turns the notes upside down: each key is mirrored around
 //!   the middle of the notes' range of keys. FL's shortcut, inferred.
+//! - Legato (Ctrl+L) ends each note where the next one starts, longer or
+//!   shorter, and the last ones keep their lengths: FL's quick legato.
 //!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
@@ -180,10 +182,11 @@ enum Action {
     SnapToScale,
     Reverse,
     Flip,
+    Legato,
 }
 
 impl Action {
-    const ALL: [Action; 9] = [
+    const ALL: [Action; 10] = [
         Action::Glue,
         Action::Quantize,
         Action::QuantizeStarts,
@@ -193,6 +196,7 @@ impl Action {
         Action::SnapToScale,
         Action::Reverse,
         Action::Flip,
+        Action::Legato,
     ];
 
     fn name(self) -> &'static str {
@@ -206,6 +210,7 @@ impl Action {
             Action::SnapToScale => "Snap to scale",
             Action::Reverse => "Reverse",
             Action::Flip => "Flip",
+            Action::Legato => "Legato",
         }
     }
 
@@ -222,6 +227,7 @@ impl Action {
             Action::Strum => Some((Modifiers::ALT, Key::S)),
             // Inferred from what is known of FL's piano roll.
             Action::Flip => Some((Modifiers::ALT, Key::Y)),
+            Action::Legato => Some((Modifiers::COMMAND, Key::L)),
         }
     }
 
@@ -234,6 +240,7 @@ impl Action {
             Action::Glue => Edit::GlueNotes { ids },
             Action::Reverse => Edit::ReverseNotes { ids },
             Action::Flip => Edit::FlipNotes { ids },
+            Action::Legato => Edit::LegatoNotes { ids },
             Action::Quantize | Action::QuantizeStarts => Edit::QuantizeNotes {
                 ids,
                 step,
