@@ -15,6 +15,8 @@
 //! fills them.
 
 use crate::{Effect, StateError, knob_value};
+use dsp::lagrange::read as lagrange;
+use dsp::rand::msvc as rand;
 
 pub const NAME: &str = "Luxeverb";
 
@@ -273,28 +275,8 @@ fn hermite(newer: f32, x0: f32, x1: f32, x2: f32, frac: f32) -> f32 {
     ((b * frac - (b + a)) * frac + c1) * frac + x0
 }
 
-/// The four-point Lagrange read the predelay and the pitch shifter use:
-/// `newer` is one sample nearer the write than `x0`, `x1` and `x2` older.
-fn lagrange(newer: f32, x0: f32, x1: f32, x2: f32, frac: f32) -> f32 {
-    const THIRD: f32 = f32::from_bits(0x3eaa_aa9f);
-    const SIXTH: f32 = f32::from_bits(0x3e2a_aac1);
-    let f2 = frac * frac;
-    let x2 = x2 * SIXTH;
-    (((x1 - (newer * THIRD + x0 * 0.5)) - x2) + ((x2 - newer * SIXTH) + (x0 - x1) * 0.5) * f2)
-        * frac
-        + x0
-        + ((x1 * 0.5 + newer * 0.5) - x0) * f2
-}
-
 /// The window of a grain: `sin(i * pi / 1023)^2` in doubles.
 const WINDOW: usize = 1024;
-
-/// MSVC's `rand` step, which the shifters share through one static in the
-/// library: the next 15-bit number.
-fn rand(seed: &mut u32) -> u32 {
-    *seed = seed.wrapping_mul(0x343fd).wrapping_add(0x269ec3);
-    (*seed >> 16) & 0x7fff
-}
 
 /// One grain of a pitch shifter.
 #[derive(Debug, Clone, Copy, Default)]

@@ -113,8 +113,7 @@ struct Rand(u32);
 
 impl Rand {
     fn next(&mut self) -> i32 {
-        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
-        ((self.0 >> 16) & 0x7fff) as i32
+        dsp::rand::msvc(&mut self.0) as i32
     }
 }
 

@@ -21,6 +21,8 @@
 //! and a random seed of its own. It is written out here.
 
 use crate::{Effect, Fidelity, StateError, knob_value, state_version};
+use dsp::lagrange::read as lagrange;
+use dsp::rand::msvc as rand;
 use std::cmp::Ordering;
 use std::f64::consts::PI;
 
@@ -59,27 +61,8 @@ const V7_LEN: usize = 75;
 /// fast and accurate (`DAT_00786568`).
 const DETECTOR: [f32; 2] = [1024.0, 2048.0];
 
-/// MSVC's `rand` step on a seed: the next 15-bit number.
-fn rand(seed: &mut u32) -> u32 {
-    *seed = seed.wrapping_mul(0x343fd).wrapping_add(0x269ec3);
-    (*seed >> 16) & 0x7fff
-}
-
 /// The seed the library's static starts at (`DAT_1803f67d0`).
 const SEED: u32 = 0x3920a;
-
-/// The four-point Lagrange read both engines' grains use. `older` is one
-/// sample before `x0` in the buffer, `x1` and `x2` after it.
-fn lagrange(older: f32, x0: f32, x1: f32, x2: f32, frac: f32) -> f32 {
-    const THIRD: f32 = f32::from_bits(0x3eaa_aa9f);
-    const SIXTH: f32 = f32::from_bits(0x3e2a_aac1);
-    let f2 = frac * frac;
-    let x2 = x2 * SIXTH;
-    (((x1 - (older * THIRD + x0 * 0.5)) - x2) + ((x2 - older * SIXTH) + (x0 - x1) * 0.5) * f2)
-        * frac
-        + x0
-        + ((x1 * 0.5 + older * 0.5) - x0) * f2
-}
 
 /// Read a ring of `n` samples at a place inside it, as both engines do.
 fn read_ring(buf: &[f32], place: f32) -> f32 {
