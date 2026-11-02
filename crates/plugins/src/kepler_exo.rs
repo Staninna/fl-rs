@@ -253,6 +253,12 @@ impl Generator for KeplerExo {
         self.engine.note_on(note);
     }
 
+    /// As Kepler: the note keeps its key and the rest becomes its fine
+    /// pitch, which the voice reads every frame.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        self.engine.set_note_pitch(voice, pitch);
+    }
+
     fn note_off(&mut self, voice: u32) {
         self.engine.note_off(voice);
     }
@@ -414,6 +420,32 @@ mod tests {
         let b = play(&mut kepler, 4410);
         assert_eq!(a, b);
         assert!(a.iter().any(|x| x.abs() > 1e-3));
+    }
+
+    #[test]
+    fn a_note_s_new_pitch_retunes_its_voice_as_in_kepler() {
+        let bytes = state(4, &[], &[]);
+        let crossings = |sound: &[f32]| {
+            sound
+                .windows(2)
+                .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+                .count()
+        };
+        let run = |bend: Option<u32>| {
+            let mut exo = KeplerExo::default();
+            exo.set_state(&bytes).unwrap();
+            exo.note_on(note(1, 45));
+            play(&mut exo, 128);
+            if let Some(voice) = bend {
+                // Key 45 bent up an octave, to 57's cents from key 60.
+                exo.set_note_pitch(voice, -300.0);
+            }
+            play(&mut exo, 44_100)
+        };
+        let (plain, bent) = (run(None), run(Some(1)));
+        let ratio = crossings(&bent[4410..]) as f32 / crossings(&plain[4410..]) as f32;
+        assert!((ratio - 2.0).abs() < 0.05, "{ratio}");
+        assert_eq!(run(Some(2)), plain);
     }
 
     #[test]

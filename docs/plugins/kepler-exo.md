@@ -102,4 +102,9 @@ modulation and AM; LFO 2 and envelope 2; the filter's FM, its other
 slopes and types; the matrix; mono, legato and portamento; hold; the
 chorus noise; EQ, saturation, delay, reverb, hyper chorus; master tune
 and the X/Y and DCO pitch offsets. Two of the 188 presets use none of it.
+A note whose pitch moves after it starts (a slide, a pitch clip) is
+retuned as in Kepler (`kepler.md`): it keeps its key and the cents the
+pitch now lies from it become the voice's fine pitch, read every frame.
+That FL's wrapper sends the fine pitch again when the pitch moves is
+`inferred`, as for Kepler.
 `.scratch/notes/kepler-exo.md` is the handover.
