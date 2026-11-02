@@ -258,6 +258,40 @@ fn a_ctrl_click_or_a_right_click_on_the_led_solos_the_insert() {
 }
 
 #[test]
+fn m_switches_the_selected_insert_and_s_solos_it() {
+    let mut harness = harness();
+    // The master is selected to begin with, and is on.
+    harness.key_press(egui::Key::M);
+    harness.run();
+    select_bass(&mut harness);
+    harness.key_press(egui::Key::S);
+    harness.run();
+    // Insert 3 is off, so M switches it on.
+    harness.get_by_label("Insert 3 strip").click();
+    harness.run();
+    harness.key_press(egui::Key::M);
+    harness.run();
+    let enabled = |insert, enabled| edit(Edit::SetInsertEnabled { insert, enabled });
+    assert_eq!(
+        harness.state(),
+        &[
+            enabled(0, false),
+            edit(Edit::SoloInsert { insert: 2 }),
+            enabled(3, true)
+        ]
+    );
+
+    // While a name is typed the keys are the field's.
+    harness.get_by_label("Drums").click();
+    harness.run();
+    for key in [egui::Key::M, egui::Key::S] {
+        harness.key_press(key);
+        harness.run();
+    }
+    assert_eq!(harness.state().len(), 3);
+}
+
+#[test]
 fn the_strip_s_menu_sets_polarity_swap_and_separation() {
     let mut harness = harness();
     assert!(harness.query_by_label("Reverse polarity").is_none());

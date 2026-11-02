@@ -5,7 +5,8 @@
 //! fader, and the LED that switches it on and off, and with Ctrl held or
 //! with the right button solos it. A click on a strip
 //! selects its insert, a click on its name renames it as well, and the
-//! left and right arrows move the selection.
+//! left and right arrows move the selection. M switches the selected
+//! insert on or off and S solos it.
 //!
 //! A right-click on a strip or on its name opens a menu with what the
 //! strip has no room for: the solo, the insert's polarity, the swap of its
@@ -223,9 +224,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         .rename
         .take_if(|rename| !shown.contains(&rename.insert));
 
-    // The arrows that move the selection.
+    // The arrows that move the selection, and the keys for its switch,
+    // while no field has the keyboard.
     let mut moved = false;
-    if ui.memory(|egui| egui.focused().is_none()) {
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    if !typing && ui.memory(|egui| egui.focused().is_none()) {
         let pressed = |key| ui.input_mut(|input| input.consume_key(Modifiers::NONE, key));
         let at = shown.iter().position(|index| *index == memory.selected);
         let at = at.unwrap_or(0);
@@ -234,6 +237,17 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         }
         if pressed(Key::ArrowRight) && at + 1 < shown.len() {
             (memory.selected, moved) = (shown[at + 1], true);
+        }
+        // M switches the selected insert and S solos it (inferred from
+        // FL's mute and solo; FL's own keys were not read from its code).
+        let insert = memory.selected;
+        if pressed(Key::M) {
+            let enabled = !project.insert_mix(insert).enabled();
+            let switch = Edit::SetInsertEnabled { insert, enabled };
+            out.push(edit(switch, None));
+        }
+        if pressed(Key::S) {
+            out.push(edit(Edit::SoloInsert { insert }, None));
         }
     }
 
