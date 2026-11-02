@@ -50,6 +50,10 @@
 //! - The song position the LFO and arpeggiator sync to is counted from the
 //!   first frame the plugin plays.
 //! - Hold, the chorus noise and automation smoothing are not built.
+//! - A note whose pitch moves (a slide, a pitch clip) keeps its key and
+//!   takes the rest as its fine pitch, as FL's wrapper hands a note's fine
+//!   pitch over; that the wrapper sends it again when the pitch moves is
+//!   inferred.
 
 use crate::{Fidelity, Generator, NoteOn, StateError};
 use std::f64::consts::PI;
@@ -527,6 +531,9 @@ impl Ladder {
 struct Voice {
     /// The key, -1 for none, and the frames since the voice started.
     key: i32,
+    /// The host's number for the note that started the voice, `u32::MAX`
+    /// for one the arpeggiator started.
+    id: u32,
     age: i32,
     gate: bool,
     env: f32,
@@ -552,6 +559,7 @@ impl Voice {
     fn new(k: usize) -> Self {
         Voice {
             key: -1,
+            id: u32::MAX,
             age: 0,
             gate: false,
             env: 0.0,
@@ -1154,7 +1162,7 @@ impl Kepler {
     }
 
     /// A voice starts (`FUN_1800188a0`, `FUN_180022280`).
-    fn start(&mut self, key: i32, velocity: f32, pan: f32, fine: f32) {
+    fn start(&mut self, id: u32, key: i32, velocity: f32, pan: f32, fine: f32) {
         let (slot, same) = self.pick(key);
         self.rng = self.rng.wrapping_mul(0xbb3_8435).wrapping_add(0x3619_636b);
         let vtv = self.params[0x49];
@@ -1171,6 +1179,7 @@ impl Kepler {
         v.target = curve;
         v.scaled = curve * 1.025_641_1;
         v.key = key;
+        v.id = id;
         v.age = 0;
         v.stage = 0;
         v.decayed = 1.0;
@@ -1190,7 +1199,7 @@ impl Kepler {
         }
     }
 
-    fn key_on(&mut self, key: i32, velocity: f32, pan: f32, fine: f32) {
+    fn key_on(&mut self, id: u32, key: i32, velocity: f32, pan: f32, fine: f32) {
         let first = self.held.is_empty();
         if first && self.params[0x33] < 0.5 {
             self.lfo_delay = 0.0;
@@ -1203,7 +1212,7 @@ impl Kepler {
             let synced = self.synced();
             self.arp.add(key, velocity, first, synced);
         } else {
-            self.start(key, velocity, pan, fine);
+            self.start(id, key, velocity, pan, fine);
         }
     }
 
@@ -1255,7 +1264,7 @@ impl Kepler {
                 }
                 let (key, velocity) = self.arp.advance();
                 self.arp.sounding = key;
-                self.start(key, velocity, 0.0, 0.0);
+                self.start(u32::MAX, key, velocity, 0.0, 0.0);
                 self.arp.fire = false;
             }
             if self.arp.total < self.arp.next + self.arp.gate {
@@ -1559,7 +1568,23 @@ impl Generator for Kepler {
             self.held.retain(|(_, k)| *k != key);
             self.held.push((note.voice, key));
         }
-        self.key_on(key, velocity, note.pan, note.fine_pitch);
+        self.key_on(note.voice, key, velocity, note.pan, note.fine_pitch);
+    }
+
+    /// The MIDI note keeps its key, and the cents the pitch now lies from
+    /// it become the voice's fine pitch, the expression FL's wrapper hands
+    /// the engine (`FUN_1800184f0`, `cents / 1200` octaves at `+0x1264`),
+    /// which the voice reads every frame. That the wrapper sends it again
+    /// as `FinalLevels.Pitch` moves is inferred. A voice the arpeggiator
+    /// started keeps its pitch.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for v in self
+            .voices
+            .iter_mut()
+            .filter(|v| v.id == voice && v.key >= 0)
+        {
+            v.fine = (pitch - ((v.key - 60) * 100) as f32) * 0.000_833_333_35;
+        }
     }
 
     fn note_off(&mut self, voice: u32) {
@@ -1880,6 +1905,31 @@ mod tests {
             (high as f32 / low as f32 - 2.0).abs() < 0.03,
             "{low} {high}"
         );
+    }
+
+    #[test]
+    fn a_note_s_new_pitch_retunes_its_voice_from_the_next_block() {
+        let saw = [(13, 0.0), (14, 1.0), (15, 0.0), (19, 1.0), (30, 0.0)];
+        let count = |pitch: Option<(u32, f32)>| {
+            let mut plugin = with(&saw);
+            plugin.note_on(note(1, 45));
+            play(&mut plugin, 128);
+            if let Some((voice, pitch)) = pitch {
+                plugin.set_note_pitch(voice, pitch);
+            }
+            let (left, _) = play(&mut plugin, 44_100);
+            crossings(&left[4410..])
+        };
+        let plain = count(None);
+        // Key 45 bent up an octave, to 57's cents from key 60.
+        let bent = count(Some((1, -300.0)));
+        assert!(
+            (bent as f32 / plain as f32 - 2.0).abs() < 0.03,
+            "{plain} {bent}"
+        );
+        assert_eq!(count(Some((2, -300.0))), plain);
+        // The key's own cents leave it where it was.
+        assert_eq!(count(Some((1, -1500.0))), plain);
     }
 
     #[test]
