@@ -8,14 +8,17 @@
 //! around the pointer, the wheel scrolls through the tracks and Shift+wheel
 //! along the timeline. A click on the ruler seeks.
 //!
+//! With the pointer over the playlist, Ctrl+A selects every item and
+//! Ctrl+D lets go of them, as in FL.
+//!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
 
 use crate::widgets::next_drag_id;
 use crate::{Command, Edit, Grid, ItemId, UiState};
 use egui::{
-    Align2, Color32, Context, CursorIcon, FontId, Key, PointerButton, Pos2, Rect, Sense, Shape,
-    Stroke, StrokeKind, Ui, pos2, vec2,
+    Align2, Color32, Context, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
+    Shape, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use engine::automation::Curve;
 use flp::event::layout::Point;
@@ -207,6 +210,9 @@ struct Memory {
     /// The tick at the timeline's left edge.
     left: f32,
     drag: Option<Drag>,
+    /// Where the playlist was drawn and in which frame, for [`keys`], which
+    /// runs before the windows are drawn.
+    area: Option<(Rect, u64)>,
 }
 
 impl Default for Memory {
@@ -215,7 +221,52 @@ impl Default for Memory {
             zoom: 1.0,
             left: 0.0,
             drag: None,
+            area: None,
         }
+    }
+}
+
+fn memory_id() -> egui::Id {
+    egui::Id::new("fl-rs playlist")
+}
+
+/// The keys the playlist takes when the pointer is over it and no text
+/// field has the keyboard. This runs before the windows are drawn, and
+/// what it takes no other window sees.
+pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
+    let memory: Memory = ui
+        .data(|data| data.get_temp(memory_id()))
+        .unwrap_or_default();
+    let Some((area, frame)) = memory.area else {
+        return;
+    };
+    let pointer = ui.input(|input| input.pointer.hover_pos());
+    let over = pointer.is_some_and(|pos| area.contains(pos));
+    // A playlist that is no longer drawn has no pointer over it.
+    let drawn = frame + 1 >= ui.ctx().cumulative_frame_nr();
+    if !over || !drawn || ui.memory(|egui| egui.focused().is_some()) {
+        return;
+    }
+    let blocks = blocks(&state.project);
+    let selected: Vec<ItemId> = blocks
+        .iter()
+        .filter(|block| block.selected)
+        .map(|block| block.id)
+        .collect();
+    let pressed = |modifiers, key| ui.input_mut(|input| input.consume_key(modifiers, key));
+    let ctrl = Modifiers::COMMAND;
+
+    if pressed(ctrl, Key::A) && !blocks.is_empty() {
+        let ids = blocks.iter().map(|block| block.id).collect();
+        out.push(edit(Edit::SelectItems { ids, add: false }));
+    }
+    // Without a selection the other keys are another window's.
+    if selected.is_empty() {
+        return;
+    }
+    if pressed(ctrl, Key::D) {
+        let ids = Vec::new();
+        out.push(edit(Edit::SelectItems { ids, add: false }));
     }
 }
 
@@ -408,9 +459,10 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let weak = ui.visuals().weak_text_color();
     let playhead = Stroke::new(1.5, Color32::from_rgb(120, 220, 110));
 
-    let memory_id = egui::Id::new("fl-rs playlist");
+    let memory_id = memory_id();
     let mut memory: Memory = ui.data(|data| data.get_temp(memory_id)).unwrap_or_default();
     let whole = ui.available_rect_before_wrap();
+    memory.area = Some((whole, ui.ctx().cumulative_frame_nr()));
     let width = ui.available_width();
     let fit = (width - NAMES).max(1.0) / ticks as f32;
     let dragged = memory.drag.as_ref();
