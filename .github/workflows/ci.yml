@@ -27,6 +27,16 @@ jobs:
       - run: python3 -I tools/bench.py --check
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+  # Times every built plugin on input of its own, with no FL files, and
+  # fails where one costs over twice its baseline in crates/plugins/bench.tsv,
+  # measured against a reference workload timed in the same run.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release -p plugins --example bench -- --check crates/plugins/bench.tsv
   test:
     strategy:
       fail-fast: false
