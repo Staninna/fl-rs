@@ -48,7 +48,10 @@
 //! a key lets go of the first. The note's pan and velocity gain, by FL's
 //! circular pan law, its fine pitch and its mod X and Y go to the key's
 //! slot, which the voice playing the key reads as its gains and as offsets
-//! to its pitch, cutoff and resonance.
+//! to its pitch, cutoff and resonance. A slide note starts nothing: the
+//! host bends the note it slides with [`Generator::set_note_pitch`], which
+//! moves the key's semitones as FL's slot fill does with
+//! `FinalLevels.Pitch`, from the next block of 32 frames.
 //!
 //! The synth renders in blocks of 32 frames: the LFO, each voice's pitch,
 //! oscillator and filter are worked out once a block, the rest per sample.
@@ -663,6 +666,10 @@ pub struct MiniSynth {
     slots: [Slot; KEYS],
     /// The host's note on each key, which FL's wrapper keeps per key.
     keys: [Option<u32>; KEYS],
+    /// The host's number for the last note on each key, kept past its note
+    /// off while its release sounds: the note whose `FinalLevels.Pitch`
+    /// the key's slot follows.
+    last_note: [Option<u32>; KEYS],
     /// +0x3ce4 and +0x3ce8.
     count: u32,
     last: u8,
@@ -692,6 +699,7 @@ impl Default for MiniSynth {
             held: [0.0; KEYS],
             slots: [EMPTY; KEYS],
             keys: [None; KEYS],
+            last_note: [None; KEYS],
             count: 1,
             last: 0,
             lfo: 0.0,
@@ -798,6 +806,7 @@ impl MiniSynth {
     fn start_over(&mut self) {
         self.held = [0.0; KEYS];
         self.keys = [None; KEYS];
+        self.last_note = [None; KEYS];
         self.lfo_phase = 0.0;
         for voice in &mut self.voices {
             voice.kill(&mut self.seed);
@@ -1205,6 +1214,7 @@ impl Generator for MiniSynth {
             self.key(key, 0.0);
         }
         self.keys[k] = Some(note.voice);
+        self.last_note[k] = Some(note.voice);
         let (left, right) = crate::sampler::circular(note.pan, note.velocity);
         self.slots[k] = Slot {
             left,
@@ -1231,6 +1241,19 @@ impl Generator for MiniSynth {
                 self.key(k as u8, 0.0);
             }
         }
+    }
+
+    /// The slot fill (`FUN_180003dd0`) keeps
+    /// `FinalLevels.Pitch / 100 - key + 60` as the key's semitones, and a
+    /// voice on the key adds them to
+    /// its pitch at the top of each of its blocks (`FUN_180022250`): the
+    /// note moves from the next block on, past the glide, which follows
+    /// only the key TriggerVoice took.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        let Some(k) = self.last_note.iter().position(|n| *n == Some(voice)) else {
+            return;
+        };
+        self.slots[k].semitones = (f64::from(pitch) * 0.01 - k as f64 + 60.0) as f32;
     }
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -1487,6 +1510,36 @@ mod tests {
         synth.note_off(1);
         play(&mut synth, 44_100);
         assert!(synth.voices.iter().all(|v| v.note.is_none()));
+    }
+
+    #[test]
+    fn a_note_follows_the_pitch_the_host_moves_it_to() {
+        testing::follows_note_pitch(|| Box::new(with_sine()), 44_100.0);
+
+        // A4 an octave up from the next block, and a number no note has
+        // moves nothing.
+        let mut synth = with_sine();
+        synth.note_on(note(1, 69, 1.0));
+        play(&mut synth, 512);
+        let voice = synth.voices.iter().position(|v| v.note.is_some()).unwrap();
+        let near = |f: f64, want: f64| (f / want - 1.0).abs() < 0.006;
+        assert!(near(synth.voices[voice].freq, 440.0));
+        synth.set_note_pitch(9, 0.0);
+        play(&mut synth, 64);
+        assert!(near(synth.voices[voice].freq, 440.0));
+        synth.set_note_pitch(1, 2100.0);
+        assert!(
+            near(synth.voices[voice].freq, 440.0),
+            "not before the block"
+        );
+        play(&mut synth, 32);
+        assert!(near(synth.voices[voice].freq, 880.0));
+        // A note let go of follows on through its release.
+        synth.note_off(1);
+        synth.set_note_pitch(1, 900.0);
+        play(&mut synth, 32);
+        assert!(synth.voices[voice].note.is_some());
+        assert!(near(synth.voices[voice].freq, 440.0));
     }
 
     #[test]
