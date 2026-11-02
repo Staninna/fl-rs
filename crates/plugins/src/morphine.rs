@@ -25,8 +25,16 @@
 //! # What is not FL's
 //!
 //! See [`Generator::fidelity`] and the doc: the noise layer and the
-//! release-loop jump are approximated, unison and the per-note tuning a
-//! host can send are left out. The effects are read from the binary.
+//! release-loop jump are approximated and unison is left out. The effects
+//! are read from the binary.
+//!
+//! A host's [`Generator::set_note_pitch`] moves a sounding voice by how far
+//! the pitch is from the one its note started at, in semitones on top of
+//! the glide, from the next spectrum the voice builds (every third control
+//! block, where the glide moves too). The doc does not say how the DLL
+//! takes a note's pitch after it starts: that it is read with the glide by
+//! the pitch functions (`FUN_1800e9e90`, `FUN_1800e9e50`) is inferred. The
+//! key the note started on still picks the zones and the key tracking.
 
 use crate::morphine_fx::Fx;
 use crate::morphine_noise::{NoiseBlock, NoiseRun, NoiseSample};
@@ -423,6 +431,12 @@ struct Voice {
     /// The note the glide is at, and how far it moves a sample.
     glide: f32,
     glide_rate: f32,
+    /// The host's number for the note it plays, the note's pitch at the
+    /// start in cents from key 60, and the semitones the host has moved
+    /// it by since ([`Generator::set_note_pitch`]).
+    id: Option<u32>,
+    origin: f32,
+    bend: f32,
     adsr: Adsr,
     done: u32,
     egs: [EgRun; 4],
@@ -452,6 +466,9 @@ impl Default for Voice {
             velocity: 0.0,
             glide: 0.0,
             glide_rate: 0.0,
+            id: None,
+            origin: 0.0,
+            bend: 0.0,
             adsr: Adsr {
                 finished: true,
                 ..Adsr::default()
@@ -499,9 +516,11 @@ pub struct Morphine {
     clock: u32,
     /// The key last played, for the glide (`this+0x3990`).
     last_key: i32,
-    /// The keys held, and which host voice holds each.
+    /// The keys held, which host voice holds each and its pitch at the
+    /// start, in cents from key 60.
     held: [bool; 128],
     holder: [Option<u32>; 128],
+    origin: [f32; 128],
     gens: [Spectrum; 4],
     spectrum: Spectrum,
     scratch_l: Vec<f32>,
@@ -529,6 +548,7 @@ impl Default for Morphine {
             last_key: -1,
             held: [false; 128],
             holder: [None; 128],
+            origin: [0.0; 128],
             gens: Default::default(),
             spectrum: Spectrum::default(),
             scratch_l: Vec::new(),
@@ -865,8 +885,9 @@ impl Morphine {
             v.velocity,
         );
         v.morph_t += speed * self.units(p[0x53] >= 0.5) * n as f64;
-        // The note's pitch (`FUN_1800e9e90`, `FUN_1800e9e50`).
-        let note = self.tuning() + v.glide;
+        // The note's pitch (`FUN_1800e9e90`, `FUN_1800e9e50`), with what
+        // the host has moved it by.
+        let note = self.tuning() + v.glide + v.bend;
         let hz = exp2(f64::from((note - 57.0) * (1.0 / 12.0))) * 220.0;
         let hz = f64::from(hz as f32) * f64::from(v.pitch);
         v.bank
@@ -887,9 +908,13 @@ impl Morphine {
         self.clock += 1;
         let p = self.params;
         let transpose = self.transpose();
+        let (id, origin) = (self.holder[key as usize], self.origin[key as usize]);
         let v = &mut self.voices[i];
         let was_free = v.key < 0;
         v.key = key;
+        v.id = id;
+        v.origin = origin;
+        v.bend = 0.0;
         v.age = self.clock;
         let start = if f64::from(glide) < 0.001 {
             key as f32
@@ -1091,7 +1116,7 @@ impl Morphine {
                     voice_pan: v.pan,
                     velocity: v.velocity,
                     level,
-                    note: f64::from(self.tuning() + v.glide),
+                    note: f64::from(self.tuning() + v.glide + v.bend),
                 };
                 v.noise.block(sample, &b, n, f64::from(self.rate));
             }
@@ -1315,8 +1340,21 @@ impl Generator for Morphine {
             self.key_off(key);
         }
         self.holder[key as usize] = Some(note.voice);
+        self.origin[key as usize] = f32::from(note.key - 60) * 100.0 + note.fine_pitch;
         if velocity > 0.0 {
             self.key_on(key, velocity);
+        }
+    }
+
+    /// The voice that plays the note moves by the change from its pitch
+    /// at the start, from its next spectrum on, as the glide does.
+    fn set_note_pitch(&mut self, voice: u32, pitch: f32) {
+        for v in self
+            .voices
+            .iter_mut()
+            .filter(|v| v.key >= 0 && v.id == Some(voice))
+        {
+            v.bend = (pitch - v.origin) * 0.01;
         }
     }
 
@@ -1399,7 +1437,7 @@ impl Generator for Morphine {
 
     fn fidelity(&self) -> Fidelity {
         Fidelity::Approximate(
-            "Morphine noise layer and release-loop jump approximated, unison and per-note tuning left out",
+            "Morphine noise layer and release-loop jump approximated, how a host's pitch moves a note inferred, unison left out",
         )
     }
 }
@@ -1519,6 +1557,39 @@ mod tests {
         let (mut l, mut r) = (vec![0.0; 44_100], vec![0.0; 44_100]);
         synth.process(&mut l, &mut r);
         assert!(l[40_000..].iter().all(|v| v.abs() < 1e-4));
+    }
+
+    #[test]
+    fn a_note_s_pitch_moves_from_the_next_spectrum_and_a_stranger_s_does_nothing() {
+        let sine = || {
+            let mut synth = Morphine::default();
+            synth.program.gens[0].zones[0].frames.frames[0].amp[0] = 1.0;
+            synth.set_sample_rate(44_100.0);
+            synth.note_on(note(1, 69));
+            let (mut l, mut r) = (vec![0.0; 22_050], vec![0.0; 22_050]);
+            synth.process(&mut l, &mut r);
+            synth
+        };
+        let level = |synth: &mut Morphine, hz: f64| {
+            let (mut l, mut r) = (vec![0.0; 22_050], vec![0.0; 22_050]);
+            synth.process(&mut l, &mut r);
+            assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+            testing::partial(&l[4410..], hz / 44_100.0)
+        };
+        // A4 is 900 cents over key 60; the octave over it 2100.
+        let mut synth = sine();
+        synth.set_note_pitch(2, 2100.0);
+        let (at, over) = (level(&mut synth, 440.0), level(&mut synth, 880.0));
+        assert!(at > 0.01 && over < 0.1 * at, "{at} {over}");
+        synth.set_note_pitch(1, 900.0);
+        assert_eq!(synth.voices.iter().map(|v| v.bend).sum::<f32>(), 0.0);
+        synth.set_note_pitch(1, 2100.0);
+        let (at, over) = (level(&mut synth, 440.0), level(&mut synth, 880.0));
+        assert!(over > 0.01 && at < 0.1 * over, "{at} {over}");
+        // A note let go of still moves while it rings.
+        synth.note_off(1);
+        synth.set_note_pitch(1, 900.0);
+        assert!(synth.voices.iter().all(|v| v.bend == 0.0));
     }
 
     #[test]
