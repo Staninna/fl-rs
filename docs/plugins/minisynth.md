@@ -48,6 +48,16 @@ these as the circular pan law of the note's pan and velocity gain, its fine
 pitch over 100 and its mod X and Y, as `drumpad.rs` does; the binary does
 not say what FL puts in `FinalLevels`.
 
+When the host moves a note's `FinalLevels.Pitch` (a slide note, a pitch
+clip: `Generator::set_note_pitch`), the Rust writes `Pitch / 100 - key +
+60` into the slot of the key the note started on, for the last note on
+the key, held or in its release. The voice reads it at the top of its next
+32-frame block (section 4), so the note moves from there, on top of the
+glide, which still heads for the key TriggerVoice took. That the slot
+fill runs again before every render with the pitch FL holds then is
+inferred from its place beside Gen_Render; its caller was not traced. A
+slide note itself starts nothing.
+
 ## 1. State (event 213)
 
 `SSLF`, u32 length, then the chunk (`0x180025e70`; `0x180007700` first
@@ -238,7 +248,9 @@ All of the above, sample for sample as read, with these differences:
   plays it, at its tempo; FL reads its own. The LFO and phaser follow it
   as while FL plays.
 - The slots are the guessed `FinalLevels` above; the mod wheel and pitch
-  bend stay at 0, as FL sends neither to this plugin.
+  bend stay at 0, as FL sends neither to this plugin. A moved
+  `FinalLevels.Pitch` reaches the slot from the next block, taken as the
+  slot fill running before each render.
 - The ladder's twelve squarings sum in another order, and `pow`, `sin` and
   `cos` are Rust's.
 - The tables are shared between instances reading the same file.
