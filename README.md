@@ -145,7 +145,7 @@ CI runs it with `--check crates/plugins/bench.tsv` and fails where a plugin cost
 
     cargo run --release -p plugins --example bench -- --write crates/plugins/bench.tsv
 
-Plugins that sound only with a file of FL's play silent here, and the line says so; the time is still that of their silent path. Patcher panics with no state and is listed as skipped.
+Plugins that sound only with a file of FL's play silent here, and the line says so; the time is still that of their silent path. A plugin that panics is listed as skipped, and the check fails on it.
 
 The corpus render plays every shipped project offline and prints how many have sound, which generators stay silent and which effects are passed through. It takes about three minutes in release:
 
