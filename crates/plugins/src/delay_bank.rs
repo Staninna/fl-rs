@@ -120,6 +120,10 @@ const OFF: i32 = 0;
 const INVERTED: i32 = 2;
 const PING_PONG: i32 = 3;
 
+/// The slowest tempo FL's song has, which the units' memory is made
+/// ready for.
+const SLOWEST: f64 = 10.0;
+
 /// What FL makes 0 of in a delay line: a size under 2^-24.
 const TINY: f32 = 5.960_464_5e-8;
 
@@ -178,7 +182,15 @@ fn ramp(current: &mut [f32; 4], target: [f32; 4], cap: f32, len: usize) -> ([f32
 
 /// The grain's window for a shape of 0: a raised cosine, its two halves
 /// measured on their own.
+#[cfg(test)]
 fn window(len: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(len);
+    window_into(&mut out, len);
+    out
+}
+
+/// [`window`] into `out`, in the memory it has when that is enough.
+fn window_into(out: &mut Vec<f32>, len: usize) {
     let last = len.saturating_sub(1);
     let half = last / 2;
     let rise = (std::f64::consts::PI / half as f64) as f32;
@@ -193,7 +205,8 @@ fn window(len: usize) -> Vec<f32> {
         // A window of one or two samples divides by 0 in FL.
         if value.is_finite() { value } else { 1.0 }
     };
-    (0..len).map(value).collect()
+    out.clear();
+    out.extend((0..len).map(value));
 }
 
 /// The designer's kind for each filter mode of the state (`0x7344e0`): off,
@@ -560,24 +573,51 @@ impl Unit {
         if self.delays() {
             // A line of another length starts empty.
             if self.line.len() != delay + late + 1 {
-                self.line = vec![[0.0; 2]; delay + late + 1];
+                self.line.clear();
+                self.line.resize(delay + late + 1, [0.0; 2]);
                 self.at = 0;
             }
             self.delay = delay;
             self.late = if offset > 0 { [0, late] } else { [late, 0] };
         } else {
-            self.line = Vec::new();
+            self.line.clear();
         }
 
         let period = f64::from(frames / self.grain_division as f32);
         let len = period.round_ties_even();
         if self.grain_division < 1 || !self.enabled || len.is_nan() || len < 1.0 {
-            self.grain = Vec::new();
+            self.grain.clear();
         } else {
             self.grain_period = period;
             if self.grain.len() != len as usize {
-                self.grain = window(len as usize);
+                window_into(&mut self.grain, len as usize);
             }
+        }
+    }
+
+    /// Have the memory for the longest line and grain the wheels and the
+    /// tempo can ask for at the units' `rate`, so that [`Unit::time`]
+    /// asks for none on the audio thread. A tempo under [`SLOWEST`] may
+    /// still ask. What is reserved and never written costs the machine
+    /// no memory.
+    fn make_room(&mut self, rate: f32) {
+        let time = f64::from(RANGES[GLOBALS + TIME].1) * f64::from(rate);
+        let frames = if self.beats {
+            time * 0.031_25 / SLOWEST
+        } else {
+            time / 3840.0
+        };
+        // A frame or two past the rounding in `time`.
+        let frames = frames.ceil() as usize + 2;
+        if self.delays() {
+            let late = offset_frames(RANGES[GLOBALS + OFFSET].1, f64::from(rate));
+            let longest = frames + late + 1;
+            self.line
+                .reserve_exact(longest.saturating_sub(self.line.len()));
+        }
+        if self.enabled && self.grain_division >= 1 {
+            self.grain
+                .reserve_exact(frames.saturating_sub(self.grain.len()));
         }
     }
 
@@ -891,7 +931,9 @@ impl Effect for DelayBank {
         // up, flushes them, and only then takes the parameters: the gains
         // glide to them from where they were.
         self.oversampler.reset();
+        let rate = self.unit_rate();
         for unit in &mut self.units {
+            unit.make_room(rate);
             unit.flush();
         }
         self.set();
@@ -905,6 +947,10 @@ impl Effect for DelayBank {
         if hz.is_finite() && hz > 0.0 {
             self.rate = hz;
             self.oversampler.reset();
+            let rate = self.unit_rate();
+            for unit in &mut self.units {
+                unit.make_room(rate);
+            }
             self.set();
             for unit in &mut self.units {
                 unit.flush();
@@ -987,8 +1033,8 @@ impl Effect for DelayBank {
         }
     }
 
-    /// A time wheel that moves makes a line of another length, which asks
-    /// for memory here and never in [`Effect::process`].
+    /// A time wheel that moves makes a line of another length, in the
+    /// memory [`Unit::make_room`] has set aside.
     fn set_param(&mut self, index: usize, value: f32) {
         if index < PARAMS {
             self.params[index] = knob_value(value, range(index));

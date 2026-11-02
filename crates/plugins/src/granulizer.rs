@@ -599,7 +599,7 @@ impl Generator for Granulizer {
     fn set_tempo(&mut self, bpm: f64) {
         if bpm.is_finite() && bpm > 0.0 {
             self.tempo = bpm;
-            self.retab();
+            self.played.set_tempo(&self.tab, bpm);
         }
     }
 

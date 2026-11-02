@@ -579,12 +579,18 @@ struct Fir {
     taps: [Vec<f32>; 3],
     history: [Vec<f32>; 2],
     at: usize,
+    /// Room to design the taps in, in doubles, so that a parameter that
+    /// moves them asks for no memory.
+    design: [Vec<f64>; 3],
 }
 
 impl Fir {
     fn make_room(&mut self, longest: usize) {
         for taps in &mut self.taps {
             taps.reserve_exact(longest.saturating_sub(taps.len()));
+        }
+        for design in &mut self.design {
+            design.reserve_exact(longest.saturating_sub(design.len()));
         }
         for history in &mut self.history {
             history.reserve_exact((2 * longest).saturating_sub(history.len()));
@@ -1118,28 +1124,35 @@ impl Maximus {
         self.remainder = off.unwrap_or(1);
 
         let fir = self.switches.fir && !self.switches.linear;
-        let (low, mid_high, mid_low, high) = (
-            self.sections(Kind::Low, low_hz, low_slope, low_slope + 1),
-            self.sections(Kind::High, low_hz, low_slope, low_slope + 1),
-            self.sections(Kind::Low, high_hz, high_slope, high_slope + 1),
-            self.sections(Kind::High, high_hz, high_slope, high_slope + 1),
-        );
-        let mut low = low;
-        if high_slope > 0 {
-            low.push(section(Kind::All, high_hz, 0, self.band_hz()));
-        }
+        let rate = self.band_hz();
+        let count = |slope: i32| (slope + 1).max(0) as usize;
+        let all_pass = usize::from(high_slope > 0);
         // A section keeps the state of the one in its place before, as
-        // FL's do when a frequency moves.
-        for (old, mut new) in [
-            (&mut self.low, low),
-            (&mut self.mid_high, mid_high),
-            (&mut self.mid_low, mid_low),
-            (&mut self.high, high),
-        ] {
-            for (section, kept) in new.iter_mut().zip(old.iter()) {
-                section.state = kept.state;
+        // FL's do when a frequency moves. They are made in the memory the
+        // lists have, so that a parameter asks for none.
+        let lists = [
+            (&mut self.low, Kind::Low, low_hz, low_slope, all_pass),
+            (&mut self.mid_high, Kind::High, low_hz, low_slope, 0),
+            (&mut self.mid_low, Kind::Low, high_hz, high_slope, 0),
+            (&mut self.high, Kind::High, high_hz, high_slope, 0),
+        ];
+        for (list, kind, hz, slope, extra) in lists {
+            let n = count(slope);
+            list.truncate(n + extra);
+            for at in 0..n + extra {
+                let mut new = if at < n {
+                    section(kind, hz, slope, rate)
+                } else {
+                    section(Kind::All, high_hz, 0, rate)
+                };
+                match list.get_mut(at) {
+                    Some(kept) => {
+                        new.state = kept.state;
+                        *kept = new;
+                    }
+                    None => list.push(new),
+                }
             }
-            *old = new;
         }
         self.bands[0].sign = if fir || self.switches.linear {
             1.0
@@ -1162,11 +1175,15 @@ impl Maximus {
             };
             let (n_low, n_high) = (taps(low_slope, low_hz), taps(high_slope, high_hz));
             let (f_low, f_high) = (low_hz / rate, high_hz / rate);
-            let mut buffer = vec![0.0; total];
-            let mut other = vec![0.0; total];
+            let [mut buffer, mut other, mut low_taps] = std::mem::take(&mut self.fir.design);
+            for taps in [&mut buffer, &mut other] {
+                taps.clear();
+                taps.resize(total, 0.0);
+            }
             sinc_low_pass(&mut buffer, total, n_low, f_low);
             window(&mut buffer, total, n_low);
-            let low_taps = buffer.clone();
+            low_taps.clear();
+            low_taps.extend_from_slice(&buffer);
             sinc_low_pass(&mut other, total, n_high, f_high);
             invert(&mut other, total);
             window(&mut other, total, n_high);
@@ -1175,17 +1192,10 @@ impl Maximus {
             }
             invert(&mut buffer, total);
             self.fir.set([&low_taps, &buffer, &other]);
+            self.fir.design = [buffer, other, low_taps];
         } else {
             self.fir.clear();
         }
-    }
-
-    /// `count` sections of a kind at `hz` with a slope's Q, none for a
-    /// count under 1.
-    fn sections(&self, kind: Kind, hz: f64, slope: i32, count: i32) -> Vec<Section> {
-        (0..count.max(0))
-            .map(|_| section(kind, hz, slope, self.band_hz()))
-            .collect()
     }
 
     /// The linear-phase crossover's inputs, as `FUN_00847e50` reads them:
