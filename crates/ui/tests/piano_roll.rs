@@ -702,7 +702,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
     }
     let mut harness = harness(project);
     let ids = vec![BASS[0], BASS[2]];
-    for entry in ["Glue", "Arpeggiate"] {
+    for entry in ["Glue", "Arpeggiate", "Reverse"] {
         harness.get_by_label("Tools").click();
         harness.run();
         harness.get_by_label(entry).click();
@@ -717,6 +717,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
                 ids: ids.clone(),
                 step
             }),
+            edit(Edit::ReverseNotes { ids: ids.clone() }),
         ]
     );
 
@@ -749,7 +750,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
             delay: 6,
         },
     ];
-    assert_eq!(edits(&harness)[2..], expected.map(edit));
+    assert_eq!(edits(&harness)[3..], expected.map(edit));
 }
 
 fn choose_snap(harness: &mut Harness<'_, Vec<Command>>, from: &str, to: &str) {

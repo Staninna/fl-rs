@@ -43,6 +43,8 @@
 //! - Strum (Alt+S) starts each note of a chord a 64th note after the one
 //!   under it and keeps its end. FL's strummer has a time knob and a
 //!   tension; this is a fixed time with no tension.
+//! - Reverse plays the notes backwards: each one's start and end are
+//!   mirrored in the span the notes cover, and its length is kept.
 //!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
@@ -174,10 +176,11 @@ enum Action {
     Arpeggiate,
     Strum,
     SnapToScale,
+    Reverse,
 }
 
 impl Action {
-    const ALL: [Action; 7] = [
+    const ALL: [Action; 8] = [
         Action::Glue,
         Action::Quantize,
         Action::QuantizeStarts,
@@ -185,6 +188,7 @@ impl Action {
         Action::Arpeggiate,
         Action::Strum,
         Action::SnapToScale,
+        Action::Reverse,
     ];
 
     fn name(self) -> &'static str {
@@ -196,6 +200,7 @@ impl Action {
             Action::Arpeggiate => "Arpeggiate",
             Action::Strum => "Strum",
             Action::SnapToScale => "Snap to scale",
+            Action::Reverse => "Reverse",
         }
     }
 
@@ -204,7 +209,7 @@ impl Action {
     /// held.
     fn shortcut(self) -> Option<(Modifiers, Key)> {
         match self {
-            Action::Glue | Action::SnapToScale => None,
+            Action::Glue | Action::SnapToScale | Action::Reverse => None,
             Action::Quantize => Some((Modifiers::COMMAND, Key::Q)),
             Action::QuantizeStarts => Some((Modifiers::SHIFT, Key::Q)),
             Action::Chop => Some((Modifiers::ALT, Key::U)),
@@ -220,6 +225,7 @@ impl Action {
         match self {
             Action::SnapToScale => Edit::SnapNotesToScale { ids, keys },
             Action::Glue => Edit::GlueNotes { ids },
+            Action::Reverse => Edit::ReverseNotes { ids },
             Action::Quantize | Action::QuantizeStarts => Edit::QuantizeNotes {
                 ids,
                 step,

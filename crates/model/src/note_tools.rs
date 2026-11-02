@@ -1,7 +1,7 @@
 //! The piano roll's tools that make notes of notes: paint, slice, glue,
-//! quantize, chop, arpeggiate, strum and snap to scale. Each one is a
-//! single change to a pattern, so the app's undo takes the whole of it
-//! back in one step.
+//! quantize, chop, arpeggiate, strum, snap to scale and reverse. Each one
+//! is a single change to a pattern, so the app's undo takes the whole of
+//! it back in one step.
 //!
 //! A note goes by its place in [`Pattern::notes`], as for the other note
 //! edits, and a place that has no note, or a record FL deleted, is
@@ -258,6 +258,28 @@ impl Pattern {
         });
     }
 
+    /// Play the notes backwards: each note's start and end are mirrored in
+    /// the span from the first start to the last end, so the note that
+    /// ends last starts first, and every length is kept. A step, which has
+    /// no end, is mirrored at its start. FL's Tools menu flips notes in
+    /// time too; that this is what it does to them is inferred.
+    pub fn reverse_notes(&mut self, notes: &[usize]) {
+        let ids = self.live(notes);
+        let end = |note: &Note| i64::from(note.position) + i64::from(note.length.max(0));
+        let starts = ids.iter().map(|id| i64::from(self.notes[*id].position));
+        let Some(first) = starts.min() else {
+            return;
+        };
+        let last = ids.iter().map(|id| end(&self.notes[*id])).max();
+        let last = last.unwrap_or(first);
+        for id in ids {
+            let note = &mut self.notes[id];
+            let position = first + last - end(note);
+            note.position = position.clamp(0, i64::from(i32::MAX)) as i32;
+        }
+        self.notes.sort_by_key(|note| note.position);
+    }
+
     /// The chords among the notes: two or more of one channel that start
     /// together, each from the lowest key up.
     fn chords(&self, notes: &[usize]) -> Vec<Vec<usize>> {
@@ -501,6 +523,29 @@ mod tests {
             placed(&notes),
             [(0, 96, 60), (4, 92, 64), (8, 88, 67), (12, 1, 70)]
         );
+    }
+
+    #[test]
+    fn reverse_mirrors_the_notes_in_their_span_and_keeps_their_lengths() {
+        let mut first = note(10, 30, 60);
+        first.velocity = 40;
+        let mut notes = pattern(&[first, note(40, 0, 62), note(50, 60, 64), note(300, 5, 65)]);
+        // The span is from 10 to 110: the note from 10 to 40 goes to 80 to
+        // 110, the step at 40 to 80 and the note that ends at 110 to 10.
+        notes.reverse_notes(&[0, 1, 2, 9]);
+        assert_eq!(
+            placed(&notes),
+            [(10, 60, 64), (80, 30, 60), (80, 0, 62), (300, 5, 65)]
+        );
+        assert_eq!(notes.notes[1].velocity, 40);
+        // Twice is where they were.
+        notes.reverse_notes(&[0, 1, 2]);
+        assert_eq!(
+            placed(&notes),
+            [(10, 30, 60), (40, 0, 62), (50, 60, 64), (300, 5, 65)]
+        );
+        notes.reverse_notes(&[]);
+        assert_eq!(placed(&notes).len(), 4);
     }
 
     #[test]

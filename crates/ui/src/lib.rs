@@ -293,6 +293,11 @@ pub enum Edit {
         ids: Vec<NoteId>,
         keys: u16,
     },
+    /// Mirror the notes in time within the span they cover, keeping each
+    /// one's length.
+    ReverseNotes {
+        ids: Vec<NoteId>,
+    },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for
     /// `Undo` and no change to save.
