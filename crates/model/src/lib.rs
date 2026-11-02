@@ -93,6 +93,7 @@ pub use channel::{Channel, ChannelKind};
 pub use codec::{Item, Placed};
 pub use flp::event::layout::{ClipSettings, ItemSource, Note, PlaylistItem, Trim};
 pub use mixer::{EqBand, Insert, InsertMix, Slot};
+pub use note_tools::slice_line_at;
 pub use pattern::{NoteField, Pattern};
 pub use project::{ControllerLink, LinkKind, Project, to_flp};
 pub use read::from_flp;
