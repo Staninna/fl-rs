@@ -3,6 +3,9 @@
 //! moving, every parameter at its ends. None may panic or play anything
 //! but finite samples.
 //!
+//! And every plugin takes any bytes as a state, a valid one cut short or
+//! with a word changed, or noise, without a panic, and plays on.
+//!
 //! Each plugin runs under `catch_unwind`, so one run lists every plugin
 //! that fails, not only the first.
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -38,6 +41,13 @@ impl Plugin {
         match self {
             Plugin::Effect(e) => e.set_ppq(ppq),
             Plugin::Generator(g) => g.set_ppq(ppq),
+        }
+    }
+
+    fn set_state(&mut self, bytes: &[u8]) -> Result<(), plugins::StateError> {
+        match self {
+            Plugin::Effect(e) => e.set_state(bytes),
+            Plugin::Generator(g) => g.set_state(bytes),
         }
     }
 
@@ -151,9 +161,18 @@ impl Driver {
     }
 }
 
+/// What a panic said.
+fn message(error: &(dyn std::any::Any + Send)) -> &str {
+    error
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| error.downcast_ref::<&str>().copied())
+        .unwrap_or("?")
+}
+
 /// Runs `test` on every plugin, handing it a way to make a fresh one,
 /// and fails with the list of those it panicked on.
-fn each(test: impl Fn(&dyn Fn() -> Plugin)) {
+fn each(test: impl Fn(&str, &dyn Fn() -> Plugin)) {
     let mut failed = Vec::new();
     for &(name, _) in PORTS {
         let effect = || plugins::by_name(name).map(Plugin::Effect);
@@ -165,14 +184,9 @@ fn each(test: impl Fn(&dyn Fn() -> Plugin)) {
                 continue;
             }
             let make = || make().unwrap();
-            let run = catch_unwind(AssertUnwindSafe(|| test(&make)));
+            let run = catch_unwind(AssertUnwindSafe(|| test(name, &make)));
             if let Err(error) = run {
-                let message = error
-                    .downcast_ref::<String>()
-                    .map(String::as_str)
-                    .or_else(|| error.downcast_ref::<&str>().copied())
-                    .unwrap_or("?");
-                failed.push(format!("{kind} {name}: {message}"));
+                failed.push(format!("{kind} {name}: {}", message(&*error)));
             }
         }
     }
@@ -186,7 +200,7 @@ fn each(test: impl Fn(&dyn Fn() -> Plugin)) {
 
 #[test]
 fn every_plugin_plays_any_block_length_at_any_rate() {
-    each(|make| {
+    each(|_, make| {
         // Each rate from the start, before anything is played.
         for rate in RATES {
             let mut d = Driver::new(make(), rate);
@@ -229,7 +243,7 @@ fn every_plugin_plays_any_block_length_at_any_rate() {
 
 #[test]
 fn every_plugin_plays_with_every_parameter_at_its_ends() {
-    each(|make| {
+    each(|_, make| {
         let mut d = Driver::new(make(), 44_100.0);
         d.note();
         let count = d.plugin.param_count();
@@ -251,5 +265,122 @@ fn every_plugin_plays_with_every_parameter_at_its_ends() {
             d.plugin.set_param(i, value);
         }
         d.play(64, "the parameters set back");
+    });
+}
+
+/// States a plugin may be handed: the ones of `valid` cut short and with
+/// a word changed, and noise of 0 to 300 bytes, some of it after a small
+/// version word.
+fn bad_states(valid: &[Vec<u8>]) -> Vec<(String, Vec<u8>)> {
+    let mut all = Vec::new();
+    for (n, state) in valid.iter().enumerate() {
+        // Every length under 600 bytes, and past that some.
+        let step = (state.len() / 600).max(1);
+        for len in (0..state.len()).step_by(step) {
+            all.push((
+                format!("valid state {n} cut to {len} bytes"),
+                state[..len].to_vec(),
+            ));
+        }
+        for word in (0..state.len() / 4).take(128) {
+            for value in [i32::MIN, -1, i32::MAX, 0x4000] {
+                let mut bytes = state.clone();
+                bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
+                all.push((
+                    format!("valid state {n} with word {word} at {value}"),
+                    bytes,
+                ));
+            }
+        }
+    }
+    let mut seed = 0x9e37_79b9u32;
+    let mut byte = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 24) as u8
+    };
+    for len in 0..300usize {
+        let mut bytes: Vec<u8> = (0..len).map(|_| byte()).collect();
+        all.push((format!("{len} bytes of noise"), bytes.clone()));
+        if len >= 4 {
+            let version = (len % 20) as i32;
+            bytes[..4].copy_from_slice(&version.to_le_bytes());
+            all.push((
+                format!("{len} bytes of noise after version {version}"),
+                bytes,
+            ));
+        }
+    }
+    all
+}
+
+/// States a plugin may take: its parameters as i32, alone or after a
+/// version word, for the plugins that save them so, and the one a plugin
+/// writes itself first. The ones it turns down are left out, and three are
+/// kept.
+fn valid_states(name: &str, make: &dyn Fn() -> Plugin) -> Vec<Vec<u8>> {
+    let plugin = make();
+    let params: Vec<u8> = (0..plugin.param_count())
+        .flat_map(|i| (plugin.param(i) as i32).to_le_bytes())
+        .collect();
+    let mut all = Vec::new();
+    if name.eq_ignore_ascii_case(plugins::fl_slayer::NAME) {
+        all.push(plugins::fl_slayer::FlSlayer::default().state());
+    }
+    all.push(params.clone());
+    for version in 0..20i32 {
+        all.push(
+            version
+                .to_le_bytes()
+                .into_iter()
+                .chain(params.clone())
+                .collect(),
+        );
+    }
+    // A plugin that takes one is made again, so each is tried on a new
+    // one. Three are enough to cut short and change.
+    let mut fresh = make();
+    all.retain(|bytes| {
+        let taken = catch_unwind(AssertUnwindSafe(|| fresh.set_state(bytes).is_ok()));
+        if taken.unwrap_or(true) {
+            fresh = make();
+            return true;
+        }
+        false
+    });
+    all.truncate(3);
+    all
+}
+
+#[test]
+fn every_plugin_takes_any_bytes_as_a_state_and_plays_on() {
+    each(|name, make| {
+        let valid = valid_states(name, make);
+        let mut failed = Vec::new();
+        let mut d = Driver::new(make(), 44_100.0);
+        d.note();
+        for (what, bytes) in bad_states(&valid).iter().chain(
+            valid
+                .iter()
+                .enumerate()
+                .map(|(n, bytes)| (format!("valid state {n}"), bytes.clone()))
+                .collect::<Vec<_>>()
+                .iter(),
+        ) {
+            let run = catch_unwind(AssertUnwindSafe(|| {
+                let taken = d.plugin.set_state(bytes).is_ok();
+                d.note();
+                let took = if taken { "taken" } else { "turned down" };
+                d.play(32, &format!("{what}, {took}"));
+            }));
+            if let Err(error) = run {
+                failed.push(format!("{what}: {}", message(&*error)));
+                d = Driver::new(make(), 44_100.0);
+                d.note();
+            }
+        }
+        if !failed.is_empty() {
+            let first: Vec<&str> = failed.iter().take(4).map(String::as_str).collect();
+            panic!("{} states, as {}", failed.len(), first.join("; "));
+        }
     });
 }
