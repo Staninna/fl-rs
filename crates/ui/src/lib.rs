@@ -219,6 +219,14 @@ pub enum Edit {
     SoloChannel {
         channel: u16,
     },
+    /// Move the channel's notes in the pattern the top bar has selected
+    /// `by` steps along, later when it is positive, round the pattern's
+    /// first `count` steps: what goes off one end comes in at the other.
+    ShiftSteps {
+        channel: u16,
+        by: i32,
+        count: u32,
+    },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
     /// 60 is C5, and 131 is the highest. A `length` of 0 is a step, which

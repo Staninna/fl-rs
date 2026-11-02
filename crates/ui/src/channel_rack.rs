@@ -15,7 +15,9 @@
 //! Enter and a click elsewhere take the name, and Escape leaves the old
 //! one. A right click on a channel's switch solos it, as in FL, and one
 //! on the switch of the channel that is soloed switches every channel back
-//! on. Shift+wheel scrolls along the steps.
+//! on. A right click on a name opens the channel's menu: rename it, and
+//! shift its steps one step left or right round the pattern. Shift+wheel
+//! scrolls along the steps.
 //!
 //! A sample dragged out of the browser can be dropped on the row of a
 //! sampler or an audio clip, which then plays it, or on the space under
@@ -328,6 +330,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         pattern,
         playing,
         last_insert: last_insert(project),
+        count: steps.count,
     };
 
     if memory.graph {
@@ -410,6 +413,8 @@ struct Rack<'a> {
     /// The step the clock is in, when a pattern plays.
     playing: Option<u64>,
     last_insert: i32,
+    /// How many steps the pattern has, which a shift goes round.
+    count: u32,
 }
 
 impl Rack<'_> {
@@ -603,7 +608,38 @@ impl Rack<'_> {
             }
             *rename = Some(Rename::of(channel));
         }
+        response.context_menu(|ui| self.menu(ui, channel, rename, out));
         response.clicked()
+    }
+
+    /// The channel's menu, behind a right click on its name. The entries
+    /// for steps are there for a channel that takes steps only.
+    fn menu(
+        &self,
+        ui: &mut Ui,
+        channel: &Channel,
+        rename: &mut Option<Rename>,
+        out: &mut Vec<Command>,
+    ) {
+        let index = channel.index;
+        if ui.button("Rename").clicked() {
+            *rename = Some(Rename::of(channel));
+            ui.close();
+        }
+        ui.separator();
+        let steps = takes_notes(channel) && !has_long_notes(self.pattern, index);
+        for (label, by) in [("Shift steps left", -1), ("Shift steps right", 1)] {
+            if ui.add_enabled(steps, egui::Button::new(label)).clicked() {
+                let count = self.count;
+                let shift = Edit::ShiftSteps {
+                    channel: index,
+                    by,
+                    count,
+                };
+                out.push(edit(shift, None));
+                ui.close();
+            }
+        }
     }
 
     /// The steps of a channel, and the clicks and drags on them.

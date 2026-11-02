@@ -450,3 +450,42 @@ fn a_right_click_on_a_switch_solos_its_channel() {
     let solo = |channel| edit(Edit::SoloChannel { channel });
     assert_eq!(harness.state(), &[solo(1), solo(0)]);
 }
+
+/// Open a channel's menu and pick an entry of it.
+fn pick(harness: &mut Harness<'_, Vec<Command>>, channel: &str, entry: &str) {
+    let name = harness.get_by_label(channel).rect().center();
+    right_click(harness, name);
+    harness.get_by_label(entry).click();
+    harness.run();
+}
+
+#[test]
+fn the_menu_of_a_name_shifts_its_steps_round_the_pattern() {
+    let mut harness = harness();
+    pick(&mut harness, "Snare", "Shift steps right");
+    pick(&mut harness, "Kick", "Shift steps left");
+    let shift = |channel, by| {
+        edit(Edit::ShiftSteps {
+            channel,
+            by,
+            count: 16,
+        })
+    };
+    assert_eq!(harness.state(), &[shift(1, 1), shift(0, -1)]);
+    // The menu has closed, and nothing else came of the right clicks.
+    assert!(harness.query_by_label("Shift steps left").is_none());
+
+    // The bass has notes from the piano roll, so its entries are off.
+    let bass = harness.get_by_label("Bass").rect().center();
+    right_click(&mut harness, bass);
+    harness.get_by_label("Shift steps right").click();
+    harness.run();
+    assert_eq!(harness.state().len(), 2);
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    // The menu renames too.
+    pick(&mut harness, "Vocal", "Rename");
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Vocal"));
+}

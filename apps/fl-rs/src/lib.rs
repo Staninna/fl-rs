@@ -227,6 +227,12 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         }
         Edit::SetChannelName { channel, ref name } => project.set_channel_name(channel, name),
         Edit::SoloChannel { channel } => project.solo_channel(channel),
+        Edit::ShiftSteps { channel, by, count } => {
+            let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
+            if let Some(pattern) = pattern {
+                pattern.shift_steps(channel, by, count, ppq);
+            }
+        }
         Edit::SetInsertVolume { insert, volume } => project.set_insert_volume_raw(insert, volume),
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),

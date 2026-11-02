@@ -198,6 +198,32 @@ impl Pattern {
         self.notes.insert(at, note);
     }
 
+    /// Move every note of the channel `by` steps along, later when it is
+    /// positive, round the pattern's first `count` steps: a note pushed
+    /// past the last of them comes back in at the start, and one pushed
+    /// before the first at the end. A note keeps where in its step it
+    /// starts. The list stays in the order of the notes' positions, so the
+    /// notes behind a moved one can get other places.
+    pub fn shift_steps(&mut self, channel: u16, by: i32, count: u32, ppq: u16) {
+        let span = i64::from(count) * step_ticks(ppq);
+        if span == 0 || span > i64::from(i32::MAX) || by == 0 {
+            return;
+        }
+        let shift = i64::from(by) * step_ticks(ppq);
+        let own = self.notes.iter_mut();
+        let mut own = own.filter(|note| note.channel == channel && !note.is_deleted());
+        let mut moved = false;
+        for note in &mut own {
+            note.position = (i64::from(note.position) + shift).rem_euclid(span) as i32;
+            moved = true;
+        }
+        if moved {
+            // The sort keeps notes that start together in the order they
+            // had.
+            self.notes.sort_by_key(|note| note.position);
+        }
+    }
+
     /// Light the step when it is not lit, and clear it when it is.
     pub fn toggle_step(&mut self, channel: u16, step: u32, ppq: u16) {
         let lit = self.step_note(channel, step, ppq).is_some();
@@ -789,6 +815,47 @@ mod tests {
         let note = pattern.notes[1];
         assert_eq!((note.velocity, note.pan), (128, 0));
         assert_eq!(pattern.notes[2].velocity, 100);
+    }
+
+    #[test]
+    fn a_shift_moves_a_channel_s_steps_round_the_pattern() {
+        let mut pattern = Pattern::default();
+        for step in [0, 4, 8, 15] {
+            pattern.set_step(0, step, true, PPQ);
+        }
+        pattern.set_step(1, 4, true, PPQ);
+        // A note a quarter into step 1.
+        pattern.add_note(note(0, 30, 0));
+        pattern.shift_steps(0, 1, 16, PPQ);
+        assert_eq!(lit(&pattern, 0), [0, 1, 2, 5, 9]);
+        assert_eq!(lit(&pattern, 1), [4]);
+        // The last step came round to the first, the note off the grid
+        // kept its place in its step, and the list is in order again.
+        let positions: Vec<i32> = pattern.notes.iter().map(|n| n.position).collect();
+        assert_eq!(positions, [0, 24, 54, 96, 120, 216]);
+
+        pattern.shift_steps(0, -3, 16, PPQ);
+        assert_eq!(lit(&pattern, 0), [2, 6, 13, 14, 15]);
+        // Round no steps, or by none, nothing moves.
+        let before = pattern.clone();
+        pattern.shift_steps(0, 5, 0, PPQ);
+        pattern.shift_steps(0, 0, 16, PPQ);
+        assert_eq!(pattern, before);
+    }
+
+    #[test]
+    fn a_shift_changes_the_224_and_nothing_else() {
+        let mut project = project();
+        // The kicks on every beat of a bar, one step later.
+        project.pattern_to_edit(1).shift_steps(0, 1, 16, PPQ);
+        let (new, gone) = changes(&project);
+        let [(2, new)] = &new[..] else {
+            panic!("{new:?}");
+        };
+        assert_eq!(gone.len(), 1);
+        let now = layout::Note::list_from_bytes(&new.data).unwrap();
+        let places: Vec<(i32, u16)> = now.iter().map(|n| (n.position, n.channel)).collect();
+        assert_eq!(places, [(24, 0), (96, 1), (120, 0), (216, 0), (312, 0)]);
     }
 
     #[test]

@@ -676,6 +676,24 @@ fn a_step_is_saved_reloaded_and_undone() {
 }
 
 #[test]
+fn a_shift_of_the_steps_is_saved_and_undone() {
+    let dir = Dir::new("shift");
+    let (mut app, path) = open_fixture(&dir);
+    let shift = Edit::ShiftSteps {
+        channel: 0,
+        by: -1,
+        count: 16,
+    };
+    edit(&mut app, shift, None);
+    assert_eq!(lit(app.project()), [3, 7, 11, 15]);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(lit(&fl_rs::read(&path).unwrap()), [3, 7, 11, 15]);
+    app.apply(Command::Undo);
+    assert_eq!(lit(app.project()), [0, 4, 8, 12]);
+}
+
+#[test]
 fn a_drag_across_steps_or_on_a_knob_is_one_undo_step() {
     let dir = Dir::new("paint");
     let (mut app, _) = open_fixture(&dir);
