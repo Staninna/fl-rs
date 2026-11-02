@@ -52,10 +52,11 @@
 //!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
-//! or by a key, Ctrl+Up and Ctrl+Down by an octave, Ctrl+A selects every
-//! note of the channel and Ctrl+D none. Ctrl+wheel zooms around the
-//! pointer, the wheel scrolls through the keys and Shift+wheel along the
-//! pattern.
+//! or by a key, Ctrl+Up and Ctrl+Down by an octave, Shift+Left and
+//! Shift+Right shorten and lengthen it by a step, to a tick at the
+//! shortest, Ctrl+A selects every note of the channel and Ctrl+D none.
+//! Ctrl+wheel zooms around the pointer, the wheel scrolls through the keys
+//! and Shift+wheel along the pattern.
 //!
 //! Ctrl+C copies the selection and Ctrl+X cuts it, in one undo step, and
 //! Ctrl+V pastes what they took and selects it: at the play cursor,
@@ -722,6 +723,15 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         out.push(edit(Edit::SetNotesMuted { ids, muted }, None));
     }
     let step = step as i64;
+    // A shortcut without Shift matches with it held, so Shift+Left and
+    // Shift+Right go before the arrows that move. They shorten and
+    // lengthen the notes, and a note keeps a tick at least.
+    for (key, delta_ticks) in [(Key::ArrowLeft, -step), (Key::ArrowRight, step)] {
+        if pressed(Modifiers::SHIFT, key) {
+            let ids = ids.clone();
+            out.push(edit(Edit::ResizeNotes { ids, delta_ticks }, None));
+        }
+    }
     // Ctrl does not match a shortcut without it, so the order is free.
     for (modifiers, key, delta_ticks, delta_keys) in [
         (ctrl, Key::ArrowUp, 0, 12),

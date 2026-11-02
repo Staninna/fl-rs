@@ -478,6 +478,8 @@ fn the_keys_act_on_the_selection_under_the_pointer() {
         (Modifiers::NONE, Key::ArrowDown),
         (Modifiers::NONE, Key::ArrowLeft),
         (Modifiers::NONE, Key::ArrowRight),
+        (Modifiers::SHIFT, Key::ArrowLeft),
+        (Modifiers::SHIFT, Key::ArrowRight),
         (ctrl, Key::ArrowUp),
         (ctrl, Key::ArrowDown),
         (ctrl, Key::A),
@@ -498,6 +500,15 @@ fn the_keys_act_on_the_selection_under_the_pointer() {
         moved(&ids, 0, -1),
         moved(&ids, -24, 0),
         moved(&ids, 24, 0),
+        // With Shift they resize, and do not move.
+        Edit::ResizeNotes {
+            ids: ids.clone(),
+            delta_ticks: -24,
+        },
+        Edit::ResizeNotes {
+            ids: ids.clone(),
+            delta_ticks: 24,
+        },
         moved(&ids, 0, 12),
         moved(&ids, 0, -12),
         Edit::SelectNotes {
