@@ -49,6 +49,13 @@ impl Tab {
         }
     }
 
+    /// The same tab at another tempo, as [`Tab::new`] would have it. This
+    /// allocates nothing.
+    pub(crate) fn set_tempo(&mut self, tab: &Articulation, tempo: f64) {
+        self.blocks = std::array::from_fn(|k| Block::of(&tab.blocks[k], tempo, self.ppq));
+        self.tempo = tempo;
+    }
+
     /// The samples of a tick of the song.
     pub(crate) fn tick_len(&self) -> f64 {
         (f64::from(self.rate) * 60.0 / (self.tempo * self.ppq)).max(1.0)
