@@ -42,13 +42,17 @@
 //!   pattern; its range and gate are left at the chord and at a full step.
 //! - Strum (Alt+S) starts each note of a chord a 64th note after the one
 //!   under it and keeps its end. FL's strummer has a time knob and a
-//!   tension; this is a fixed time with no tension.
+//!   tension; this is a time with no tension.
 //! - Reverse plays the notes backwards: each one's start and end are
 //!   mirrored in the span the notes cover, and its length is kept.
 //! - Flip (Alt+Y) turns the notes upside down: each key is mirrored around
 //!   the middle of the notes' range of keys. FL's shortcut, inferred.
 //! - Legato (Ctrl+L) ends each note where the next one starts, longer or
 //!   shorter, and the last ones keep their lengths: FL's quick legato.
+//!
+//! At the foot of the menu, a 32nd to a quarter note can be chosen for
+//! Chop's and Arpeggiate's step in place of the grid's, and a 128th to a
+//! 16th note for Strum's delay. The piano roll keeps the choice.
 //!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
@@ -99,7 +103,7 @@ use egui::{
     Align2, Color32, CursorIcon, Event, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
     Stroke, StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
-use model::{Channel, Note, Pattern};
+use model::{Channel, Note, Pattern, Project};
 use snap::{Scale, Snap};
 use std::ops::RangeInclusive;
 
@@ -242,10 +246,12 @@ impl Action {
         }
     }
 
-    /// The edit, with `step` the snap's step in ticks, `ppq` the
-    /// project's and `keys` the keys of the scale, as
-    /// [`Edit::SnapNotesToScale`] has them.
-    fn edit(self, ids: Vec<NoteId>, step: u64, ppq: u16, keys: u16) -> Edit {
+    /// The edit, with the steps and the scale the piano roll's memory
+    /// has for the project.
+    fn edit(self, ids: Vec<NoteId>, memory: &Memory, project: &Project) -> Edit {
+        let (grid, ppq) = (Grid::of(project), project.header.ppq);
+        let step = memory.step(grid);
+        let keys = memory.keys();
         match self {
             Action::SnapToScale => Edit::SnapNotesToScale { ids, keys },
             Action::Glue => Edit::GlueNotes { ids },
@@ -257,12 +263,17 @@ impl Action {
                 step,
                 lengths: self == Action::Quantize,
             },
-            Action::Chop => Edit::ChopNotes { ids, step },
-            Action::Arpeggiate => Edit::ArpeggiateNotes { ids, step },
-            // A 64th note.
+            Action::Chop => Edit::ChopNotes {
+                ids,
+                step: memory.tool_step(grid, ppq),
+            },
+            Action::Arpeggiate => Edit::ArpeggiateNotes {
+                ids,
+                step: memory.tool_step(grid, ppq),
+            },
             Action::Strum => Edit::StrumNotes {
                 ids,
-                delay: u64::from(ppq / 16).max(1),
+                delay: of_whole(ppq, memory.strum),
             },
         }
     }
@@ -320,6 +331,11 @@ struct Memory {
     /// The notes Ctrl+C or Ctrl+X took, where the next paste puts them
     /// before it moves them.
     clipboard: Vec<Note>,
+    /// Chop's and Arpeggiate's step as a fraction of a whole note, one of
+    /// [`TOOL_STEPS`], or the snap's step when `None`.
+    tool_step: Option<u16>,
+    /// Strum's delay as a fraction of a whole note, one of [`STRUMS`].
+    strum: u16,
 }
 
 impl Default for Memory {
@@ -343,6 +359,8 @@ impl Default for Memory {
             heard: false,
             range: None,
             clipboard: Vec::new(),
+            tool_step: None,
+            strum: 64,
         }
     }
 }
@@ -355,6 +373,13 @@ impl Memory {
     /// How many ticks the snap's step is at the zoom.
     fn step(&self, grid: Grid) -> u64 {
         self.snap.ticks(grid, self.beat / grid.beat as f32)
+    }
+
+    /// Chop's and Arpeggiate's step in ticks: the snap's, unless the
+    /// Tools menu's settings chose another.
+    fn tool_step(&self, grid: Grid, ppq: u16) -> u64 {
+        self.tool_step
+            .map_or_else(|| self.step(grid), |part| of_whole(ppq, part))
     }
 
     /// The keys of the scale, as [`Scale::keys`] has them. None without a
@@ -653,8 +678,7 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
             if let Some((modifiers, key)) = action.shortcut()
                 && pressed(modifiers, key)
             {
-                let ppq = project.header.ppq;
-                let tool = action.edit(targets(&own), step, ppq, memory.keys());
+                let tool = action.edit(targets(&own), &memory, project);
                 out.push(edit(tool, None));
             }
         }
@@ -838,19 +862,18 @@ fn toolbar(
         });
         ui.add_enabled_ui(!own.is_empty(), |ui| {
             ui.menu_button("Tools", |ui| {
-                let step = memory.step(Grid::of(project));
-                let keys = memory.keys();
                 for action in Action::ALL {
-                    let usable = action != Action::SnapToScale || keys != 0;
+                    let usable = action != Action::SnapToScale || memory.keys() != 0;
                     if ui
                         .add_enabled(usable, egui::Button::new(action.name()))
                         .clicked()
                     {
-                        let ppq = project.header.ppq;
-                        let tool = action.edit(targets(&own), step, ppq, keys);
+                        let tool = action.edit(targets(&own), memory, project);
                         out.push(edit(tool, None));
                     }
                 }
+                ui.separator();
+                tool_settings(ui, memory);
             })
             .response
             .on_hover_text("Edit the selected notes, or all of them when none is selected");
@@ -891,6 +914,35 @@ fn toolbar(
             .clicked()
         {
             memory.colours = !memory.colours;
+        }
+    });
+}
+
+/// The steps the Tools menu's settings offer Chop and Arpeggiate besides
+/// the snap's, and the delays they offer Strum, each as a fraction of a
+/// whole note: 1/32 of a whole note is a 32nd note. FL's chopper and
+/// strummer have dialogs of their own, so these choices are not FL's.
+const TOOL_STEPS: [u16; 4] = [32, 16, 8, 4];
+const STRUMS: [u16; 4] = [128, 64, 32, 16];
+
+/// How many ticks this fraction of a whole note is, a tick at least.
+fn of_whole(ppq: u16, part: u16) -> u64 {
+    (u64::from(ppq) * 4 / u64::from(part.max(1))).max(1)
+}
+
+/// The settings at the foot of the Tools menu: a submenu for the step of
+/// Chop and Arpeggiate and one for Strum's delay.
+fn tool_settings(ui: &mut Ui, memory: &mut Memory) {
+    let note = |part: u16| format!("1/{part} note");
+    ui.menu_button("Chop and arpeggiate step", |ui| {
+        ui.selectable_value(&mut memory.tool_step, None, "Snap");
+        for part in TOOL_STEPS {
+            ui.selectable_value(&mut memory.tool_step, Some(part), note(part));
+        }
+    });
+    ui.menu_button("Strum delay", |ui| {
+        for part in STRUMS {
+            ui.selectable_value(&mut memory.strum, part, note(part));
         }
     });
 }

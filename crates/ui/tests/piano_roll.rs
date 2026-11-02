@@ -854,6 +854,56 @@ fn ctrl_b_duplicates_the_selection_after_itself() {
     );
 }
 
+#[test]
+fn the_tools_settings_choose_the_chop_step_and_the_strum_delay() {
+    let mut harness = harness(fixture());
+    for (submenu, entry) in [
+        ("Chop and arpeggiate step", "1/8 note"),
+        ("Strum delay", "1/32 note"),
+    ] {
+        harness.get_by_label("Tools").click();
+        harness.run();
+        harness.get_by_label_contains(submenu).click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+        harness.key_press(Key::Escape);
+        harness.run();
+    }
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.run();
+    for key in [Key::U, Key::A, Key::S] {
+        harness.key_press_modifiers(Modifiers::ALT, key);
+        harness.run();
+    }
+    // At PPQ 96 an 8th note is 48 ticks and a 32nd 12. Quantize keeps
+    // the grid's step.
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Q);
+    harness.run();
+    let ids = BASS.to_vec();
+    let expected = [
+        Edit::ChopNotes {
+            ids: ids.clone(),
+            step: 48,
+        },
+        Edit::ArpeggiateNotes {
+            ids: ids.clone(),
+            step: 48,
+        },
+        Edit::StrumNotes {
+            ids: ids.clone(),
+            delay: 12,
+        },
+        Edit::QuantizeNotes {
+            ids,
+            step: 24,
+            lengths: true,
+        },
+    ];
+    assert_eq!(edits(&harness), expected.map(edit));
+}
+
 fn choose_snap(harness: &mut Harness<'_, Vec<Command>>, from: &str, to: &str) {
     harness.get_by_value(from).click();
     harness.run();
