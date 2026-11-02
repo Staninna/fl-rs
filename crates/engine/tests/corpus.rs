@@ -49,6 +49,13 @@
 //! 10 seconds whose arpeggiator asks for a part the engine does not build.
 //! Their notes play as they are.
 //!
+//! Its unplayed envelopes, time stretch, tracking and echo delays are its
+//! channels with a note or a clip in the 10 seconds that sounds and that
+//! turn on that part of FL's channel, which the engine does not play, and
+//! its TS404s its TS404 channels with a note there (`docs/rec-channel.md`,
+//! "Left out"). The channel parts line adds them up over the corpus, so
+//! that the most used can be built first.
+//!
 //! The sidechain line counts the sidechain inputs the hosted plugins
 //! listen to, each an insert and an insert that sends to it, and the slots
 //! whose plugin is handed one.
@@ -160,6 +167,8 @@ fn every_project_renders_its_first_10_seconds() {
     let mut approximated_generators: BTreeMap<&str, usize> = BTreeMap::new();
     let (mut sidechain_routes, mut sidechain_slots) = (0, 0);
     let (mut latency, mut late, mut delayed) = (0, 0, 0);
+    let mut parts = engine::UnplayedParts::default();
+    let mut arpeggiators: BTreeMap<&str, usize> = BTreeMap::new();
     let (mut approximate, mut exact) = (Peaks::default(), Peaks::default());
     for path in &files {
         let name = path.strip_prefix(&root).unwrap().display().to_string();
@@ -178,8 +187,9 @@ fn every_project_renders_its_first_10_seconds() {
             "{name}: notes {} voices {} clips {} stretched {} unresolved {} unsupported {} \
              skipped {} automation {} unsupported targets {} hosted slots {} unhosted {} \
              generators {} unhosted {} approximated generators {} approximated {} \
-             unplayed arpeggiators {} latency {} delayed inserts {} peak {peak:.3} with FL's \
-             curves {fl_peak:.3}",
+             unplayed arpeggiators {} unplayed envelopes {} unplayed time stretch {} unplayed \
+             tracking {} unplayed echo delays {} TS404 {} latency {} delayed inserts {} peak \
+             {peak:.3} with FL's curves {fl_peak:.3}",
             out.notes,
             out.voices,
             out.clips,
@@ -196,6 +206,11 @@ fn every_project_renders_its_first_10_seconds() {
             out.approximated_generators.values().sum::<usize>(),
             out.approximated_slots.values().sum::<usize>(),
             out.unplayed_arpeggiators.values().sum::<usize>(),
+            out.unplayed_parts.envelopes,
+            out.unplayed_parts.time_stretch,
+            out.unplayed_parts.tracking,
+            out.unplayed_parts.echo_delay,
+            out.unplayed_parts.ts404,
             out.latency,
             out.delayed_inserts,
         );
@@ -215,6 +230,10 @@ fn every_project_renders_its_first_10_seconds() {
         ];
         for (what, list) in gaps.iter().filter(|(_, list)| list != "{}") {
             eprintln!("  {what}: {list}");
+        }
+        parts += out.unplayed_parts;
+        for (&part, &count) in &out.unplayed_arpeggiators {
+            *arpeggiators.entry(part).or_default() += count;
         }
         hosted += out.hosted_slots;
         sidechain_routes += out.sidechain_routes;
@@ -335,6 +354,22 @@ fn every_project_renders_its_first_10_seconds() {
     eprintln!(
         "corpus latency: {latency} frames compensated across the {audible} projects with sound, \
          {late} of them late, {delayed} inserts delayed"
+    );
+    let arpeggiated: usize = arpeggiators.values().sum();
+    let arpeggiators: Vec<_> = arpeggiators
+        .iter()
+        .map(|(part, n)| format!("{n} asking for {part}"))
+        .collect();
+    eprintln!(
+        "corpus channel parts not played, in channels that sound: {} envelopes, {} time \
+         stretch, {} tracking, {} echo delays, {} TS404s; {} arpeggiators ({})",
+        parts.envelopes,
+        parts.time_stretch,
+        parts.tracking,
+        parts.echo_delay,
+        parts.ts404,
+        arpeggiated,
+        arpeggiators.join(", "),
     );
     for path in &unresolved {
         eprintln!("unresolved: {path}");

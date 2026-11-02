@@ -110,9 +110,9 @@ pub(crate) fn shift(channel: &Channel) -> f32 {
 ///
 /// and the same for the cutoff and the resonance.
 ///
-/// The model keeps a channel's two 228 records as bytes. Each is read here
-/// as four i32: the middle, and the knobs for pan, mod X and mod Y. The
-/// first record tracks the velocity and the second the key.
+/// A channel's two 228 records each hold the middle, and the knobs for
+/// pan, mod X and mod Y. The first record tracks the velocity and the
+/// second the key.
 ///
 /// FL plays by floats it makes of those, and how it makes them is not read.
 /// The offsets are taken to cancel the middle: a note at the middle
@@ -123,12 +123,11 @@ pub(crate) fn shift(channel: &Channel) -> f32 {
 /// is without the adjustment of the channel's 229.
 fn tracking(channel: &Channel, vol: f32, pitch: f32, curves: &dyn Curves) -> [f32; 3] {
     let record = |index: usize| {
-        let bytes = channel.tracking.get(index).map_or([0; 16], |t| t.unknown_0);
-        let field = |at: usize| {
-            i32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        let Some(t) = channel.tracking.get(index) else {
+            return (0, [0.0; 3]);
         };
-        let knobs = [4, 8, 12].map(|at| curves.tracking_amount(field(at)));
-        (field(0), knobs)
+        let knobs = [t.pan, t.mod_x, t.mod_y].map(|knob| curves.tracking_amount(knob));
+        (t.middle, knobs)
     };
     let (velocity, by_vol) = record(0);
     let (key, by_key) = record(1);
@@ -189,12 +188,13 @@ mod tests {
     }
 
     /// A 228 record: the middle, then the knobs for pan, mod X and mod Y.
-    fn record(fields: [i32; 4]) -> Tracking {
-        let mut bytes = [0; 16];
-        for (at, field) in fields.into_iter().enumerate() {
-            bytes[at * 4..at * 4 + 4].copy_from_slice(&field.to_le_bytes());
+    fn record([middle, pan, mod_x, mod_y]: [i32; 4]) -> Tracking {
+        Tracking {
+            middle,
+            pan,
+            mod_x,
+            mod_y,
         }
-        Tracking { unknown_0: bytes }
     }
 
     #[test]

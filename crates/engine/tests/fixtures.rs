@@ -1414,12 +1414,11 @@ fn fl_s_curves_put_a_channel_s_volume_on_the_fader_curve() {
 #[test]
 fn fl_s_curves_track_a_note_s_key_and_velocity_into_its_pan() {
     let dir = Dir::new("fl-exact-tracking");
-    let record = |fields: [i32; 4]| {
-        let mut bytes = [0; 16];
-        for (at, field) in fields.into_iter().enumerate() {
-            bytes[at * 4..at * 4 + 4].copy_from_slice(&field.to_le_bytes());
-        }
-        layout::Tracking { unknown_0: bytes }
+    let record = |[middle, pan, mod_x, mod_y]: [i32; 4]| layout::Tracking {
+        middle,
+        pan,
+        mod_x,
+        mod_y,
     };
     // An octave over the middle key, and a velocity under the middle one.
     let mut notes = [note(0), note(BEAT), note(2 * BEAT)];
@@ -4884,4 +4883,101 @@ fn clips_drive_an_insert_s_separation_and_eq() {
         out.left[40_000]
     );
     assert_eq!(out.left[40_000], out.right[40_000]);
+}
+
+/// Channel 0 with the parts the engine leaves out in its events, at 150:
+/// an echo delay with this feedback, the five envelopes with the volume's
+/// switched on or not, key tracking of mod X by this much, and a 215
+/// whose time stretch moves the pitch by this many cents.
+fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, stretch: i32) {
+    let channel = &mut project.channels[0];
+    channel.delay = Some(layout::Delay {
+        feedback,
+        pan: 0,
+        pitch: 0,
+        echoes: 4,
+        time: 144,
+    });
+    let off = layout::EnvelopeLfo::from_bytes(&[0; 68]).unwrap();
+    let mut envelopes = [off; 5];
+    envelopes[1].enabled = i32::from(volume);
+    channel.envelopes = envelopes.to_vec();
+    let record = |middle, mod_x| layout::Tracking {
+        middle,
+        pan: 0,
+        mod_x,
+        mod_y: 0,
+    };
+    channel.tracking = vec![record(100, 0), record(60, mod_x)];
+    let mut parameters = layout::Parameters::from_bytes(&[0; 168]).unwrap();
+    parameters.stretch_pitch = stretch;
+    parameters.formant = 0.5f64.to_le_bytes();
+    channel.parameters = Some(parameters);
+    let ids = [Id::Delay, Id::Parameters, Id::Tracking, Id::Tracking]
+        .into_iter()
+        .chain([Id::EnvelopeLFO; 5]);
+    for id in ids {
+        channel.order.push(Placed {
+            pos: 150,
+            item: Item::Field(id),
+        });
+    }
+}
+
+#[test]
+fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
+    let dir = Dir::new("unplayed-parts");
+    dir.tone(2 * 96_000);
+    let plain = render(&tone(BAR), &dir);
+    assert_eq!(plain.unplayed_parts, engine::UnplayedParts::default());
+
+    // As a new sampler has them, none is on.
+    let mut new = tone(BAR);
+    with_parts(&mut new, 0, false, 0, 0);
+    let out = render(&new, &dir);
+    assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
+
+    // Each on, the sound is the same and each is counted once.
+    let mut on = tone(BAR);
+    with_parts(&mut on, 6400, true, 128, -1200);
+    let out = render(&on, &dir);
+    assert!(out.left == plain.left);
+    let counted = engine::UnplayedParts {
+        envelopes: 1,
+        time_stretch: 1,
+        tracking: 1,
+        echo_delay: 1,
+        ts404: 0,
+    };
+    assert_eq!(out.unplayed_parts, counted);
+    assert_eq!(out.unplayed_parts.total(), 4);
+
+    // Tracking of mod X is played where a clip runs the filter.
+    let open = [Point::new(0.0, 1.0), Point::new(4.0, 1.0)];
+    let clip = add_automation(&mut on, &open, FULL);
+    bind(&mut on, clip, 2);
+    place(&mut on, clip, 0, BAR);
+    on.channels[0].levels = Some(filter_levels(256, 0, 0));
+    let out = render(&on, &dir);
+    assert_eq!(out.unplayed_parts.tracking, 0);
+    assert_eq!(out.unplayed_parts.echo_delay, 1);
+
+    // A channel with no note that sounds is not counted: here its sample
+    // is missing.
+    let mut missing = tone(BAR);
+    with_parts(&mut missing, 6400, true, 128, -1200);
+    missing.channels[0].sample_path = Some("nowhere.wav".to_owned());
+    let out = render(&missing, &dir);
+    assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
+
+    // A TS404 channel with a note is counted, though it does not sound.
+    let mut ts404 = tone(BAR);
+    add_channel(&mut ts404, 0);
+    ts404.channels[1].kind = Some(ChannelKind::Other(1));
+    let mut bass = note(0);
+    bass.channel = 1;
+    ts404.patterns[0].notes.push(bass);
+    let out = render(&ts404, &dir);
+    assert_eq!(out.unplayed_parts.ts404, 1);
+    assert!(out.left == plain.left);
 }
