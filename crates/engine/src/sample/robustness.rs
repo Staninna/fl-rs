@@ -64,8 +64,9 @@ unsafe impl GlobalAlloc for Watching {
 #[global_allocator]
 static ALLOCATOR: Watching = Watching;
 
-/// Run `f` and give the largest single allocation it made on this thread.
-fn largest_allocation<T>(f: impl FnOnce() -> T) -> (T, usize) {
+/// Run `f` and give the largest single allocation it made on this thread,
+/// 0 when it made none. Other tests of the crate use it too.
+pub(crate) fn largest_allocation<T>(f: impl FnOnce() -> T) -> (T, usize) {
     LARGEST.with(|largest| largest.set(0));
     WATCH.with(|watch| watch.set(true));
     let out = f();

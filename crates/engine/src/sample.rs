@@ -502,7 +502,7 @@ fn read_audio(
 }
 
 #[cfg(test)]
-mod robustness;
+pub(crate) mod robustness;
 
 #[cfg(test)]
 mod tests {
