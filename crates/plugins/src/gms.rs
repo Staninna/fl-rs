@@ -559,6 +559,8 @@ pub struct Gms {
 
 impl Default for Gms {
     fn default() -> Self {
+        // The table is made here and not by the first block.
+        ladder_table();
         let mut rng = Rng::default();
         let voices = (0..VOICES)
             .map(|_| {

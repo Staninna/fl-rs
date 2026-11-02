@@ -53,14 +53,14 @@ effect	Fruity WaveShaper	0.4213	17.3	1312.7	sound	10194	0.1
 effect	Fruity Wrapper	0.0015	0.1	369549.2	sound	99	0.0
 effect	Fruity X-Y Controller	0.0044	0.2	125675.5	sound	954	0.0
 effect	Fruity X-Y-Z Controller	0.0035	0.1	158277.9	sound	533	0.0
-effect	Gross Beat	0.5156	21.1	1072.3	sound	5379779	46.3
+effect	Gross Beat	0.5155	21.2	1071.8	sound	16355	0.1
 effect	Hyper Chorus	2.2576	92.8	244.4	sound	59189	0.5
 effect	Low Lifter	9.0844	373.0	60.8	sound	269096	2.3
 effect	Luxeverb	8.2137	337.0	67.3	sound	190485	1.6
 effect	Maximus	7.4062	303.7	74.7	sound	176967	1.5
 effect	Patcher	0.0059	0.2	92988.7	silent	1298	0.0
 effect	Pitch Shifter	4.7861	196.2	115.6	sound	27369	0.2
-effect	Pitcher	10.1189	415.1	54.6	sound	244014	2.1
+effect	Pitcher	10.1186	414.9	54.6	sound	242539	2.1
 effect	Razer Chroma	0.0015	0.1	371885.5	sound	172	0.0
 effect	Soundgoodizer	19.4415	796.9	28.5	sound	395569	3.4
 effect	Spreader	1.0818	44.4	510.4	sound	23599	0.2
@@ -89,7 +89,7 @@ generator	Fruity Granulizer	0.0035	0.1	155739.0	silent	2009	0.0
 generator	Fruity Keyboard Controller	0.0023	0.1	239865.7	silent	2009	0.0
 generator	Fruity Slicer	0.0018	0.1	305530.1	silent	1342	0.0
 generator	Fruity Slicer 2	0.0018	0.1	308451.6	silent	1861	0.0
-generator	GMS	12.3326	506.1	44.8	silent	4708588	40.6
+generator	GMS	12.3882	508.3	44.6	silent	254850	2.2
 generator	Harmless	6.3092	258.8	87.6	sound	206925	1.8
 generator	Harmor	7.2914	299.3	75.8	sound	282389	2.4
 generator	Kepler	19.4970	800.1	28.3	sound	411059	3.5
