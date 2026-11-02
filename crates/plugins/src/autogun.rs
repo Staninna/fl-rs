@@ -252,7 +252,11 @@ impl State {
             return Err(StateError::Version { found: raw });
         }
         let version = if raw > 0xffff { raw >> 16 } else { raw };
-        debug_assert!(version <= NEWEST);
+        // A bare version over the newest, which FL never writes, is
+        // turned down as one in the high word is.
+        if version > NEWEST {
+            return Err(StateError::Version { found: raw });
+        }
         let body = miniz_oxide::inflate::decompress_to_vec_zlib(&bytes[4..]).map_err(|_| {
             StateError::Length {
                 expected: bytes.len() + 1,

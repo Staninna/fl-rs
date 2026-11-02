@@ -760,7 +760,8 @@ impl Block {
             _ => unit,
         };
         let (env, lfo) = (unit_for(FIXED_TICKS), unit_for(LFO_FIXED_TICKS));
-        let over = |value: i32, unit: f64| (1.0 / f64::from(ticks(value, unit) + 1)) as f32;
+        let over =
+            |value: i32, unit: f64| (1.0 / f64::from(ticks(value, unit).saturating_add(1))) as f32;
         let of_128 = |value: i32| value as f32 * (1.0 / 128.0);
         Block {
             enabled: raw[ENABLED] != 0,
