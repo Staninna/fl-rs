@@ -226,3 +226,6 @@ carry on from there. `asm`, `inferred`
   old delays, steps and filters until the next parameter change.
 - The state's parameters are range-checked, as the other plugins here do.
   FL reads any values and clamps them in ProcessParam.
+- A filter's angle `w` is held to at most `0.999 pi`. Past Nyquist `sin w`
+  is negative and FL's biquad is unstable: the default 22 kHz low-pass runs
+  to infinity at 22.05 kHz. Up to 0.4995 of the rate nothing changes.

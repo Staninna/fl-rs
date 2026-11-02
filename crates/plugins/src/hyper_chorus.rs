@@ -263,7 +263,10 @@ impl Biquad {
     /// `FUN_180003030` for type 1, low-pass, or type 2, high-pass: the
     /// cookbook's with `alpha = sin w`, a Q of 0.5.
     fn new(high: bool, hz: f64, rate: f64) -> Self {
-        let w = hz * std::f64::consts::TAU * (1.0 / rate);
+        // Past Nyquist `sin w` turns negative and the filter runs away,
+        // as FL's does with its 22 kHz low-pass under 44 kHz. The corner
+        // stays under it there; up to 0.4995 of the rate it is FL's.
+        let w = (hz * std::f64::consts::TAU * (1.0 / rate)).min(std::f64::consts::PI * 0.999);
         let (sin, cos) = w.sin_cos();
         let norm = 1.0 / (sin + 1.0);
         let (b0, b1) = if high {

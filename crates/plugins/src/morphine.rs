@@ -647,7 +647,7 @@ impl Morphine {
     }
 
     fn polyphony(&self) -> usize {
-        let p = self.params[0x7c] as i32 + 1;
+        let p = (self.params[0x7c] as i32).saturating_add(1);
         if p < 1 || p > VOICES as i32 {
             VOICES
         } else {
@@ -1412,9 +1412,15 @@ impl Generator for Morphine {
         }
     }
 
+    /// The values are 0..1 but for the integers from 0x7c on, of which
+    /// the polyphony is 0..31: FL's engine has 32 voices.
     fn set_param(&mut self, index: usize, value: f32) {
         if index < 0x8d && value.is_finite() {
-            self.params[index] = value;
+            self.params[index] = match index {
+                0..0x7c => value.clamp(0.0, 1.0),
+                0x7c => value.round().clamp(0.0, (VOICES - 1) as f32),
+                _ => value,
+            };
             self.fx.set_params(&self.params, f64::from(self.rate));
         }
     }

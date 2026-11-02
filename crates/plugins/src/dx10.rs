@@ -185,7 +185,8 @@ impl Derived {
         let sq = |p: f32, k: f64| f64::from(p) * k * f64::from(p);
         let fall = |k: f64| (f64::from(-inverse) * k.exp()).exp();
         let octave = (f64::from(p[OCTAVE]) * 6.9).floor() as i32;
-        let tune = (f64::from(inverse) * 8.175_798_915_644 * 2f64.powi(octave - 2)) as f32;
+        let tune =
+            (f64::from(inverse) * 8.175_798_915_644 * 2f64.powi(octave.saturating_sub(2))) as f32;
         let modulator = |at: usize, velocity: usize| {
             let level = |p: f32| (f64::from(per) * 0.0002 * f64::from(p) * f64::from(p)) as f32;
             ModParams {
@@ -316,7 +317,8 @@ impl Dx10 {
     /// derived value again.
     fn update(&mut self) {
         for (n, (low, high)) in RANGES.iter().enumerate() {
-            self.p[n] = (self.values[n] - low) as f32 / (high - low) as f32;
+            let value = f64::from(self.values[n]) - f64::from(*low);
+            self.p[n] = value as f32 / (high - low) as f32;
         }
         self.derived = Derived::of(&self.p, self.rate);
     }
@@ -442,6 +444,15 @@ impl Dx10 {
             m2.depth += m2.rate * (m2.target - m2.depth);
             m1.phase = m1.phase.wrapping_add(m1.step);
             m2.phase = m2.phase.wrapping_add(m2.step);
+            // A state whose values are far out of their wheels' ranges can
+            // throw the carrier so far that mda's loop never ends: FL hangs
+            // there. Such a carrier is brought near first; any other wraps
+            // as in FL.
+            if !carrier.is_finite() {
+                carrier = 0.0;
+            } else if carrier.abs() > 64.0 {
+                carrier %= 2.0;
+            }
             while carrier.abs() > 1.0 {
                 carrier -= 2.0f32.copysign(carrier);
             }
