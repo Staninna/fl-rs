@@ -227,6 +227,9 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         }
         Edit::SetChannelName { channel, ref name } => project.set_channel_name(channel, name),
         Edit::SoloChannel { channel } => project.solo_channel(channel),
+        Edit::CloneChannel { channel } => {
+            project.clone_channel(channel);
+        }
         Edit::FillSteps {
             channel,
             every,

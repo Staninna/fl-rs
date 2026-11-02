@@ -240,6 +240,12 @@ pub enum Edit {
     ClearSteps {
         channel: u16,
     },
+    /// Copy the channel, its plugin and its settings, to the end of the
+    /// rack, named with " #2" behind its name. An automation clip is not
+    /// copied.
+    CloneChannel {
+        channel: u16,
+    },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
     /// 60 is C5, and 131 is the highest. A `length` of 0 is a step, which

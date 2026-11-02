@@ -605,6 +605,27 @@ fn a_solo_is_one_undo_step() {
     assert_eq!(enabled(&app), Some(false));
 }
 
+#[test]
+fn a_clone_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("clone");
+    let (mut app, path) = open_fixture(&dir);
+    edit(&mut app, Edit::CloneChannel { channel: 0 }, None);
+    assert_eq!(app.project().channels.len(), 2);
+    if app.has_audio() {
+        assert_eq!(app.error(), None);
+    }
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    let copy = &saved.channels[1];
+    assert_eq!(copy.index, 1);
+    assert_eq!(copy.sample_path.as_deref(), Some("click.wav"));
+    assert_eq!(copy.levels, saved.channels[0].levels);
+    assert_eq!(saved.header.channel_count, 2);
+    app.apply(Command::Undo);
+    assert_eq!(app.project().channels.len(), 1);
+}
+
 /// The steps of pattern 1 that are lit for channel 0.
 fn lit(project: &Project) -> Vec<usize> {
     let Some(pattern) = project.pattern(1) else {

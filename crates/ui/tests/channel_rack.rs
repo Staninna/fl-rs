@@ -514,3 +514,10 @@ fn the_menu_of_a_name_fills_and_clears_the_steps() {
         ]
     );
 }
+
+#[test]
+fn the_menu_of_a_name_clones_the_channel() {
+    let mut harness = harness();
+    pick(&mut harness, "Bass", "Clone");
+    assert_eq!(harness.state(), &[edit(Edit::CloneChannel { channel: 2 })]);
+}

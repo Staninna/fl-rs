@@ -1,12 +1,12 @@
-//! The channel rack's edits of whole channels: a channel's name, and its
-//! solo.
+//! The channel rack's edits of whole channels: a channel's name, its
+//! solo, and a clone of it.
 //!
 //! Like the edits in `pattern.rs`, each sets a field and sees to it that
 //! the field has an event to be written in, see "Changing a project" in
 //! the crate's docs. A channel index that names no channel is skipped.
 
 use crate::codec::{Codec, Cx};
-use crate::{Item, Placed, Project};
+use crate::{ChannelKind, Item, Placed, Project};
 use flp::event::Id;
 
 /// Whether the entry is the event `id`, typed or raw.
@@ -76,6 +76,66 @@ impl Project {
             let (pos, item) = (order[at].pos, Item::Field(Id::PluginName));
             order.insert(at + 1, Placed { pos, item });
         }
+    }
+
+    /// Copy the channel to the end of the rack, as FL's "Clone channel"
+    /// does, and give the copy's index: the one after the highest a
+    /// channel has, which FL's loader makes the channels up to.
+    ///
+    /// The copy has every event of the channel, its plugin's state
+    /// included, in their order, behind the last event that any channel
+    /// has in the file, which is where [`Project::add_sampler_channel`]
+    /// puts a new channel, and the header counts a channel more. Its name
+    /// is the channel's, or its plugin's, with " #2" behind it, or the
+    /// first number from 2 up that no other channel has with that name
+    /// (inferred from FL's habit with copies, not from its code). A name of
+    /// that form counts from its stem. The pattern's notes stay the
+    /// channel's (inferred: FL is taken to clone the channel and not its
+    /// steps).
+    ///
+    /// An automation clip is not cloned: what it drives is in a controller
+    /// link that names its channel by index, so a copy would drive
+    /// nothing. A project whose channels have no events was not read from
+    /// a file and has no place for the copy's. Either gives `None`.
+    pub fn clone_channel(&mut self, channel: u16) -> Option<u16> {
+        let mut copy = self.channel(channel)?.clone();
+        if copy.kind == Some(ChannelKind::Automation) {
+            return None;
+        }
+        let placed = self.channels.iter().flat_map(|channel| &channel.order);
+        let pos = placed.map(|placed| placed.pos).max()?;
+        let last = self.channels.iter().map(|channel| channel.index).max()?;
+        let index = last.checked_add(1)?;
+        copy.index = index;
+        for placed in &mut copy.order {
+            placed.pos = pos;
+        }
+        let plugin = copy.plugin_name.clone().filter(|name| !name.is_empty());
+        let base = copy.name.clone().or(plugin);
+        self.channels.push(copy);
+        self.header.channel_count = self.header.channel_count.saturating_add(1);
+        if let Some(base) = base {
+            let name = self.copy_name(&base);
+            self.set_channel_name(index, &name);
+        }
+        Some(index)
+    }
+
+    /// `base` with " #n" behind it, for the first n from 2 up that no
+    /// channel's name has. A base of that form already counts from its
+    /// stem.
+    fn copy_name(&self, base: &str) -> String {
+        let numbered = base.rsplit_once(" #");
+        let stem = numbered.filter(|(_, n)| n.parse::<u32>().is_ok());
+        let stem = stem.map_or(base, |(stem, _)| stem);
+        let taken = |name: &str| {
+            let names = self.channels.iter().filter_map(|c| c.name.as_deref());
+            names.into_iter().any(|own| own == name)
+        };
+        (2u32..)
+            .map(|n| format!("{stem} #{n}"))
+            .find(|name| !taken(name))
+            .unwrap_or_else(|| base.to_owned())
     }
 
     /// Solo the channel, as a right click on its switch does in FL: switch
@@ -250,6 +310,68 @@ mod tests {
         let read = from_flp(&written);
         let off = Some(false);
         assert_eq!(enabled(&read), [Some(true), off, off, off]);
+    }
+
+    #[test]
+    fn a_clone_goes_behind_the_last_channel_with_every_event_of_its_own() {
+        let mut project = project();
+        assert_eq!(project.clone_channel(0), Some(4));
+        assert_eq!(project.header.channel_count, 5);
+        let written = to_flp(&project).unwrap();
+        // The copy's events are behind the last channel's and in front of
+        // the pattern, and every event of the file is as it was.
+        let mut events = written.events.clone();
+        let copy: Vec<RawEvent> = events.drain(15..21).collect();
+        assert_eq!(events, file().events);
+        let mut want = file().events[1..7].to_vec();
+        want[0] = word(Id::ChannelNew, 4);
+        want[4] = text(Id::PluginName, "Kick #2");
+        assert_eq!(copy, want);
+
+        // Read back, it is the channel with another index and name.
+        let read = from_flp(&written);
+        assert_eq!(read.header.channel_count, 5);
+        let (kick, copy) = (&read.channels[0], &read.channels[4]);
+        assert_eq!((copy.index, copy.name.as_deref()), (4, Some("Kick #2")));
+        assert_eq!((copy.kind, copy.enabled), (kick.kind, kick.enabled));
+        assert_eq!(copy.wrapper, kick.wrapper);
+        assert_eq!(read.channels[..4], from_flp(&file()).channels[..]);
+
+        // The next copy takes the next number, and so does a copy of the
+        // copy. A channel without a name is named after its plugin, behind
+        // its 212, and one without either keeps none.
+        assert_eq!(project.clone_channel(0), Some(5));
+        assert_eq!(project.clone_channel(4), Some(6));
+        assert_eq!(project.clone_channel(2), Some(7));
+        assert_eq!(project.clone_channel(1), Some(8));
+        let read = from_flp(&to_flp(&project).unwrap());
+        assert_eq!(
+            names(&read)[4..],
+            [
+                Some("Kick #2"),
+                Some("Kick #3"),
+                Some("Kick #4"),
+                Some("Fruity DX10 #2"),
+                None
+            ]
+        );
+        let indices: Vec<u16> = read.channels.iter().map(|c| c.index).collect();
+        assert_eq!(indices, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(read.channels[7].plugin_name.as_deref(), Some("Fruity DX10"));
+        assert_eq!(read.channels[7].enabled, Some(false));
+    }
+
+    #[test]
+    fn an_automation_clip_and_a_channel_that_is_not_there_are_not_cloned() {
+        let mut project = project();
+        project.channels[1].kind = Some(ChannelKind::Automation);
+        assert_eq!(project.clone_channel(1), None);
+        assert_eq!(project.clone_channel(9), None);
+        assert_eq!(project.channels.len(), 4);
+        // A project built in code has no place for the copy's events.
+        let mut built = Project::new(file().header);
+        built.channels.push(crate::Channel::default());
+        assert_eq!(built.clone_channel(0), None);
     }
 
     #[test]

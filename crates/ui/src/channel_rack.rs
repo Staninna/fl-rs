@@ -15,8 +15,8 @@
 //! Enter and a click elsewhere take the name, and Escape leaves the old
 //! one. A right click on a channel's switch solos it, as in FL, and one
 //! on the switch of the channel that is soloed switches every channel back
-//! on. A right click on a name opens the channel's menu: rename it, shift
-//! its steps one step left or right round the pattern, light each second,
+//! on. A right click on a name opens the channel's menu: rename it, clone
+//! it to the end of the rack, shift its steps one step left or right round the pattern, light each second,
 //! fourth or eighth step in place of the ones that are lit, or clear them.
 //! Shift+wheel scrolls along the steps.
 //!
@@ -625,6 +625,13 @@ impl Rack<'_> {
         let index = channel.index;
         if ui.button("Rename").clicked() {
             *rename = Some(Rename::of(channel));
+            ui.close();
+        }
+        // What an automation clip drives names its channel, so a copy
+        // would drive nothing.
+        let clones = channel.kind != Some(ChannelKind::Automation);
+        if ui.add_enabled(clones, egui::Button::new("Clone")).clicked() {
+            out.push(edit(Edit::CloneChannel { channel: index }, None));
             ui.close();
         }
         ui.separator();
