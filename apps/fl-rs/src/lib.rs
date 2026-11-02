@@ -228,6 +228,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::SetInsertVolume { insert, volume } => project.set_insert_volume_raw(insert, volume),
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),
+        Edit::SoloInsert { insert } => project.solo_insert(insert),
         Edit::SetInsertName { insert, ref name } => project.set_insert_name(insert, name),
         Edit::SetRoute { from, to, on } => project.set_route(from, to, on),
         Edit::SetSendLevel { from, to, level } => project.set_send_level_raw(from, to, level),

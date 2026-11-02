@@ -1253,6 +1253,24 @@ fn the_mixer_s_edits_are_saved_reloaded_and_undone() {
 }
 
 #[test]
+fn a_solo_is_one_undo_step_and_is_saved() {
+    let dir = Dir::new("solo");
+    let (mut app, path) = open_mixer_fixture(&dir);
+    let on = |project: &Project| [0, 1, 2, 3].map(|i| project.insert_mix(i).enabled());
+    edit(&mut app, Edit::SoloInsert { insert: 1 }, None);
+    assert_eq!(on(app.project()), [true, true, false, false]);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(on(&fl_rs::read(&path).unwrap()), [true, true, false, false]);
+    // Two switches went off, and one undo puts both back.
+    app.apply(Command::Undo);
+    assert_eq!(on(app.project()), [true; 4]);
+    app.apply(Command::Redo);
+    edit(&mut app, Edit::SoloInsert { insert: 1 }, None);
+    assert_eq!(on(app.project()), [true; 4]);
+}
+
+#[test]
 fn the_meters_follow_the_inserts_that_play() {
     let dir = Dir::new("meters");
     let (mut app, _) = open_mixer_fixture(&dir);

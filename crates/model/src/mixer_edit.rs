@@ -219,10 +219,17 @@ impl Project {
     /// [`InsertMix::enabled`](crate::InsertMix::enabled) reads it. An
     /// insert with neither stays on. No insert of the corpus is one.
     pub fn set_insert_enabled(&mut self, insert: u16, enabled: bool) {
+        self.set_insert_flag(insert, ENABLED, enabled);
+    }
+
+    /// Set or clear `bit` of the insert's flags: its 236's flags word, or
+    /// its last 27 when the 236 is the 5-byte kind. The loader reads bits
+    /// 0 to 4 from either (`docs/event-dictionary.md`, rows 27 and 236).
+    fn set_insert_flag(&mut self, insert: u16, bit: u32, on: bool) {
         let Some(insert) = self.insert_to_edit(insert) else {
             return;
         };
-        let switch = |bits: u32| (bits & !ENABLED) | (u32::from(enabled) * ENABLED);
+        let switch = |bits: u32| (bits & !bit) | (u32::from(on) * bit);
         if let Some(flags) = insert.flags.as_mut().filter(|flags| flags.len != 5) {
             flags.flags = switch(flags.flags);
             return;
@@ -238,6 +245,60 @@ impl Project {
         if let Some(bits) = old {
             *bits = switch(u32::from(*bits)) as u8;
         }
+    }
+
+    /// The inserts in front of the current track, by the loader's numbers:
+    /// the master and the ones after it, which are the mixer's strips.
+    fn strip_numbers(&self) -> Vec<u16> {
+        let numbers = (0..self.inserts.len()).filter_map(|place| self.insert_index(place));
+        numbers.filter(|index| *index != LAST_INSERT).collect()
+    }
+
+    /// Solo the insert, or with it soloed already, switch every insert
+    /// back on: what a Ctrl+click or a right-click on its switch does in
+    /// FL (the keys are inferred from FL's manual, not read from its
+    /// code).
+    ///
+    /// Soloing switches the insert on, and with it the master, the inserts
+    /// it sends to on its way to the master, and the inserts that send to
+    /// it, so that a soloed bus still gets its sources. Every other insert
+    /// in front of the current track is switched off. Which inserts FL
+    /// leaves on is inferred too. The insert counts as soloed when each
+    /// insert is on or off as that would leave it. The current track takes
+    /// no part, and an insert the project lacks is skipped.
+    ///
+    /// Like FL, this keeps no solo state of its own: the switches are what
+    /// is written, bit 3 of each insert's 236 as
+    /// [`Project::set_insert_enabled`] sets it.
+    pub fn solo_insert(&mut self, insert: u16) {
+        let strips = self.strip_numbers();
+        if !strips.contains(&insert) {
+            return;
+        }
+        let mut kept = self.inserts_fed_by(insert);
+        kept.extend(self.inserts_feeding(insert));
+        kept.extend([0, insert]);
+        let soloed = strips
+            .iter()
+            .all(|strip| self.insert_mix(*strip).enabled() == kept.contains(strip));
+        for strip in strips {
+            self.set_insert_enabled(strip, soloed || kept.contains(&strip));
+        }
+    }
+
+    /// Every insert that `insert`'s sound gets to, through however many
+    /// routes: its way to the master.
+    pub fn inserts_fed_by(&self, insert: u16) -> BTreeSet<u16> {
+        let mut fed = BTreeSet::new();
+        let mut reached = vec![insert];
+        while let Some(from) = reached.pop() {
+            for to in self.insert_mix(from).destinations() {
+                if to != insert && fed.insert(to) {
+                    reached.push(to);
+                }
+            }
+        }
+        fed
     }
 
     /// Every insert whose sound gets to `insert`, through however many
@@ -668,6 +729,52 @@ mod tests {
         );
         p.set_insert_enabled(0, false);
         assert_eq!(written(&p), old.events);
+    }
+
+    #[test]
+    fn a_solo_leaves_on_the_insert_its_sources_and_its_way_out() {
+        let file = file(NEW, &[]);
+        let mut p = project(&file);
+        // 1 sends to 2 as well as to the master, and 3 to the master.
+        p.set_route(1, 2, true);
+        assert_eq!(p.inserts_fed_by(1), BTreeSet::from([0, 2]));
+        assert_eq!(p.inserts_fed_by(0), BTreeSet::new());
+        p.set_insert_enabled(1, false);
+        let routed = flp::Project {
+            header: file.header,
+            events: written(&p),
+        };
+        let on = |p: &Project| [0, 1, 2, 3, 501].map(|i| p.insert_mix(i).enabled());
+
+        // 2 keeps 1, which sends to it, and the master. 1 was off.
+        p.solo_insert(2);
+        assert_eq!(on(&p), [true, true, true, false, true]);
+        let bits = |bits: u32| [[0; 4], bits.to_le_bytes(), [0; 4]].concat();
+        let (on_bits, off) = (bits(0b0100_1100), bits(0b0100_0100));
+        let mut want = routed.clone();
+        want.events = with_event(&routed, Id::InsertFlags, 1, &on_bits);
+        assert_eq!(written(&p), with_event(&want, Id::InsertFlags, 3, &off));
+        assert_eq!(on(&from_flp(&to_flp(&p).unwrap())), on(&p));
+
+        // Again on the soloed insert, and every insert is on.
+        p.solo_insert(2);
+        assert_eq!(on(&p), [true; 5]);
+        assert_eq!(written(&p), want.events);
+
+        // 1 keeps 2, which it sends to on its way to the master.
+        p.solo_insert(1);
+        assert_eq!(on(&p), [true, true, true, false, true]);
+        // With 3 soloed, 1 and 2 go off, and the current track stays.
+        p.solo_insert(3);
+        assert_eq!(on(&p), [true, false, false, true, true]);
+        p.solo_insert(3);
+        assert_eq!(on(&p), [true; 5]);
+
+        // An insert the project lacks, and the current track, solo nothing.
+        let before = p.clone();
+        p.solo_insert(4);
+        p.solo_insert(501);
+        assert!(p == before);
     }
 
     #[test]

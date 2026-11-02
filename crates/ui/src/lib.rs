@@ -315,6 +315,12 @@ pub enum Edit {
         insert: u16,
         enabled: bool,
     },
+    /// Solo the insert, or with it soloed already, switch every insert
+    /// back on: see [`model::Project::solo_insert`] for which inserts stay
+    /// on. One step for `Undo`, however many switches it moves.
+    SoloInsert {
+        insert: u16,
+    },
     /// Name the insert. An empty name gives it its number back.
     SetInsertName {
         insert: u16,

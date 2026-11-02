@@ -238,6 +238,26 @@ fn the_led_switches_its_insert_and_the_knob_pans_it() {
 }
 
 #[test]
+fn a_ctrl_click_or_a_right_click_on_the_led_solos_the_insert() {
+    let mut harness = harness();
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    harness.get_by_label("Drums on").click();
+    harness.run();
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    harness.get_by_label("Bass on").click_secondary();
+    harness.run();
+    // A plain click still switches.
+    harness.get_by_label("Reverb on").click();
+    harness.run();
+    let solo = |insert| edit(Edit::SoloInsert { insert });
+    let switch = edit(Edit::SetInsertEnabled {
+        insert: 4,
+        enabled: false,
+    });
+    assert_eq!(harness.state(), &[solo(1), solo(2), switch]);
+}
+
+#[test]
 fn a_click_and_the_arrows_select_the_insert() {
     let mut harness = harness();
     assert!(harness.query_by_label("Master slots").is_some());

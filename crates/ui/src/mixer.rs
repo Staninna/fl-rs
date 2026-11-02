@@ -2,7 +2,8 @@
 //! the ten effect slots of the selected insert.
 //!
 //! A strip has the insert's name, its pan knob, its peak meter beside its
-//! fader, and the LED that switches it on and off. A click on a strip
+//! fader, and the LED that switches it on and off, and with Ctrl held or
+//! with the right button solos it. A click on a strip
 //! selects its insert, a click on its name renames it as well, and the
 //! left and right arrows move the selection.
 //!
@@ -28,8 +29,8 @@ use crate::top_bar::meter_fraction;
 use crate::widgets::{Knob, drag_value};
 use crate::{Command, Edit, UiState};
 use egui::{
-    Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, Sense, Shape, Stroke, StrokeKind,
-    Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use engine::{Curves, FlExact};
 use model::rec::LAST_INSERT;
@@ -152,8 +153,8 @@ fn fader_fraction(volume: i32) -> f32 {
 }
 
 /// An LED that switches something on and off. One that cannot be clicked
-/// is drawn faint. True when it was clicked.
-fn led(ui: &mut Ui, on: bool, enabled: bool, label: &str, hint: &str) -> bool {
+/// is drawn faint.
+fn led(ui: &mut Ui, on: bool, enabled: bool, label: &str, hint: &str) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
@@ -172,7 +173,7 @@ fn led(ui: &mut Ui, on: bool, enabled: bool, label: &str, hint: &str) -> bool {
     };
     ui.painter()
         .circle(rect.center(), LED / 2.0 - 1.5, fill, stroke);
-    response.on_hover_text(hint).clicked()
+    response.on_hover_text(hint)
 }
 
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
@@ -356,8 +357,15 @@ impl Strips<'_> {
         let (row, _) = ui.allocate_exact_size(size, Sense::hover());
         self.fader(ui, row, index, &name, mix.volume_raw(), out);
 
+        // FL solos an insert on a Ctrl+click or a right-click on its
+        // switch (from FL's manual).
         let enabled = mix.enabled();
-        if led(ui, enabled, true, &format!("{name} on"), "Insert on or off") {
+        let hint = "Insert on or off. Ctrl+click or right-click to solo it";
+        let switch = led(ui, enabled, true, &format!("{name} on"), hint);
+        let ctrl = ui.input(|input| input.modifiers.command);
+        if switch.secondary_clicked() || (switch.clicked() && ctrl) {
+            out.push(edit(Edit::SoloInsert { insert: index }, None));
+        } else if switch.clicked() {
             let enabled = !enabled;
             let switch = Edit::SetInsertEnabled {
                 insert: index,
@@ -636,13 +644,8 @@ fn slots(ui: &mut Ui, project: &Project, index: u16, out: &mut Vec<Command>) {
         let filled = plugin.is_some();
         ui.horizontal(|ui| {
             let enabled = mix.slot_enabled(slot).unwrap_or(true);
-            if led(
-                ui,
-                enabled,
-                filled,
-                &format!("{label} on"),
-                "Slot on or off",
-            ) {
+            let hint = "Slot on or off";
+            if led(ui, enabled, filled, &format!("{label} on"), hint).clicked() {
                 let enabled = !enabled;
                 let switch = Edit::SetSlotEnabled {
                     insert: index,
