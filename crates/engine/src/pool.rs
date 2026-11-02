@@ -157,6 +157,9 @@ fn flushed(body: impl FnOnce()) {
 
 /// A worker's life: wait for a round, run its job, say so, and again.
 fn work(shared: &Shared) {
+    // The workers fill the output beside the audio thread, so they want
+    // the same real-time turn on the processor.
+    crate::priority::promote_current();
     let mut seen = 0;
     loop {
         let mut spins = 0;

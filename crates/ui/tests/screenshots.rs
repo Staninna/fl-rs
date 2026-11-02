@@ -30,6 +30,7 @@ fn state(project: model::Project, data: Option<PathBuf>) -> UiState {
         data_root: data,
         project_dir: None,
         sample_rate: Some(48_000),
+        buffer_frames: 1024,
         last_error: None,
         busy: None,
         progress: None,

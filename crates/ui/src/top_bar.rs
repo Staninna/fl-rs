@@ -41,6 +41,8 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         meter(ui, state.peaks);
         ui.separator();
         windows(ui);
+        ui.separator();
+        buffer(ui, state, out);
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let title = state.project.title.as_deref().unwrap_or_default();
@@ -215,6 +217,29 @@ fn icon_style(visuals: &egui::Visuals) -> IconButtonStyle {
         corner_radius: visuals.widgets.inactive.corner_radius,
         focus_stroke: visuals.selection.stroke,
     }
+}
+
+/// The output buffer selector: a larger buffer plays a heavy project
+/// without dropping out, a smaller one plays live notes sooner.
+fn buffer(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    const CHOICES: [u32; 5] = [256, 512, 1024, 2048, 4096];
+    let label = |frames: u32| format!("{frames} smp");
+    egui::ComboBox::from_id_salt("buffer")
+        .width(70.0)
+        .selected_text(label(state.buffer_frames))
+        .show_ui(ui, |ui| {
+            for frames in CHOICES {
+                let chosen = frames == state.buffer_frames;
+                if ui.selectable_label(chosen, label(frames)).clicked() && !chosen {
+                    out.push(Command::SetBuffer(frames));
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Audio buffer: larger plays heavy projects without dropouts, \
+             smaller plays notes sooner",
+        );
 }
 
 /// A number on a dark plate with its unit beside it.

@@ -98,6 +98,7 @@ fn state() -> UiState {
         data_root: None,
         project_dir: None,
         sample_rate: Some(48_000),
+        buffer_frames: 1024,
         last_error: Some("2 samples not found under /samples".to_owned()),
         busy: None,
         progress: None,
@@ -157,7 +158,7 @@ fn the_pattern_selector_lists_the_patterns() {
     harness.run();
     // The selector shows the name of pattern 1, and the list has the
     // pattern without a name by its number.
-    let selector = harness.get_by_role(Role::ComboBox);
+    let selector = harness.get_by_value("Drums");
     assert_eq!(selector.value().as_deref(), Some("Drums"));
     selector.click();
     harness.run();

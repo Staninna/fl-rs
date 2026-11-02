@@ -94,6 +94,7 @@ fn state() -> UiState {
         data_root: None,
         project_dir: None,
         sample_rate: Some(48_000),
+        buffer_frames: 1024,
         last_error: None,
         busy: None,
         progress: None,

@@ -132,6 +132,7 @@ mod live;
 mod mix;
 mod parts;
 mod pool;
+mod priority;
 mod sample;
 mod sequence;
 mod slide;

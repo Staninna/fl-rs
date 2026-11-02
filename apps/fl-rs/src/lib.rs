@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
 use ui::{Command, Dialog, Edit, Ticks, UiState};
 
 /// A render stops here, in seconds, even when the song goes on.
@@ -28,6 +29,16 @@ const RENDER_RATE: u32 = 44_100;
 const PEAK_FALL: f32 = 0.93;
 /// How many steps back `Undo` goes. Each one keeps a whole project.
 const UNDO_STEPS: usize = 100;
+/// The output buffer a stream opens with, in frames, until the user picks
+/// another. Big enough that most heavy projects play without dropping out,
+/// small enough that notes played live do not lag by much.
+const DEFAULT_BUFFER: u32 = 2048;
+/// The most often an edit during a drag hands the transport a rebuilt
+/// graph. Building one reconstructs every generator and effect of the
+/// project, far too much to do on every frame of a drag through a busy
+/// song. The open project still changes on each edit, so the windows show
+/// every one; only the audio graph waits for the interval to pass.
+const COALESCE: Duration = Duration::from_millis(100);
 
 /// A project read from disk with its samples decoded.
 pub struct Loaded {
@@ -448,6 +459,11 @@ pub struct App {
     redo: Vec<Arc<Project>>,
     /// The drag the last edit was part of.
     drag: Option<Drag>,
+    /// An edit made during a drag whose graph the transport has not been
+    /// given yet. [`App::poll`] hands it over once [`COALESCE`] has passed.
+    pending: Option<Arc<Project>>,
+    /// When the transport last got a rebuilt graph.
+    last_graph: Instant,
     /// The file the project came from. `None` until one is open.
     path: Option<PathBuf>,
     /// `None` until a project is open, and when no stream could be opened.
@@ -460,6 +476,9 @@ pub struct App {
     previews: u64,
     /// Where samples are looked up. `None` for the project's own directory.
     sample_root: Option<PathBuf>,
+    /// The output buffer streams open with, in frames: a bigger one for a
+    /// heavy project, a smaller one for less latency.
+    buffer_frames: u32,
     song_mode: bool,
     /// Whether the song starts over when it ends.
     looping: bool,
@@ -506,11 +525,14 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             drag: None,
+            pending: None,
+            last_graph: Instant::now(),
             path: None,
             transport: None,
             preview: None,
             previews: 0,
             sample_root,
+            buffer_frames: DEFAULT_BUFFER,
             // The engine plays the song, so that is the mode to start in.
             song_mode: true,
             looping: false,
@@ -620,6 +642,7 @@ impl App {
                 if here { Path::new(".") } else { folder }.to_path_buf()
             }),
             sample_rate: self.transport.as_ref().map(Transport::sample_rate),
+            buffer_frames: self.buffer_frames,
             last_error: self.error.clone(),
             busy: self.rendering.clone().or(self.loading.clone()),
             progress: self.rendering.as_ref().map(|_| {
@@ -654,6 +677,7 @@ impl App {
             Command::ToggleSongMode => self.set_mode(!self.song_mode, self.looping, self.pattern),
             Command::ToggleLoop => self.set_mode(self.song_mode, !self.looping, self.pattern),
             Command::SelectPattern(index) => self.set_mode(self.song_mode, self.looping, index),
+            Command::SetBuffer(frames) => self.set_buffer(frames),
             Command::Preview(path) => {
                 self.preview(&path);
                 Ok(())
@@ -670,6 +694,7 @@ impl App {
 
     /// Take what the workers have finished.
     pub fn poll(&mut self) {
+        self.flush();
         while let Ok(done) = self.receiver.try_recv() {
             match done {
                 Done::Loaded { load, .. } if load != self.load => {}
@@ -777,7 +802,12 @@ impl App {
         self.peaks = (0.0, 0.0);
         self.insert_peaks.clear();
         let mut notices: Vec<String> = loaded.notice.into_iter().collect();
-        match Transport::open(Arc::clone(&project), loaded.samples, None) {
+        match Transport::open(
+            Arc::clone(&project),
+            loaded.samples,
+            None,
+            Some(self.buffer_frames),
+        ) {
             Ok(transport) => self.transport = Some(transport),
             Err(e) => notices.push(format!("no sound: {e}")),
         }
@@ -791,6 +821,7 @@ impl App {
         self.undo.clear();
         self.redo.clear();
         self.drag = None;
+        self.pending = None;
         self.path = Some(path);
         self.error = (!notices.is_empty()).then(|| notices.join("; "));
         if std::mem::take(&mut self.play_when_loaded) && self.transport.is_some() {
@@ -860,7 +891,9 @@ impl App {
             self.redo.clear();
         }
         self.drag = drag_id.map(|id| Drag { id, base, kind });
-        let shown = self.show_edited(Arc::new(project));
+        // A drag's edits coalesce: the windows show each one, but the
+        // transport is handed the latest no more often than [`COALESCE`].
+        let shown = self.show_edited(Arc::new(project), drag_id.is_some());
         // The stream has the samples the project was opened with, and this
         // one is new to it.
         if let Edit::SetChannelSample { path, .. } | Edit::AddSamplerChannel { path } = edit {
@@ -909,7 +942,9 @@ impl App {
         // The stream of the last preview closes before this one opens.
         self.preview = None;
         let rate = self.transport.as_ref().map(Transport::sample_rate);
-        let mut transport = Transport::open(Arc::new(one_shot(sample)), samples, rate)
+        // A preview takes the device's default buffer, so it plays as soon
+        // as it can whatever the project's buffer is set to.
+        let mut transport = Transport::open(Arc::new(one_shot(sample)), samples, rate, None)
             .map_err(|e| format!("no sound: {e}"))?;
         transport.play().map_err(|e| e.to_string())?;
         self.preview = Some(transport);
@@ -922,7 +957,7 @@ impl App {
             return Ok(());
         };
         self.redo.push(Arc::clone(&self.project));
-        self.show_edited(before)
+        self.show_edited(before, false)
     }
 
     fn redo(&mut self) -> Result<(), String> {
@@ -931,18 +966,57 @@ impl App {
             return Ok(());
         };
         self.undo.push(Arc::clone(&self.project));
-        self.show_edited(after)
+        self.show_edited(after, false)
     }
 
     /// Make an edited project the open one and play it from where the
     /// clock is.
-    fn show_edited(&mut self, project: Arc<Project>) -> Result<(), String> {
+    ///
+    /// The open project changes at once, so the windows show the edit this
+    /// frame. The transport is handed a rebuilt graph at once too, unless
+    /// `coalesce` is set and the last graph went over less than [`COALESCE`]
+    /// ago: then the project waits in [`App::pending`], and [`App::poll`]
+    /// hands it over on a later frame. A drag sets `coalesce`, so dragging
+    /// through a busy song does not rebuild every generator on every frame.
+    fn show_edited(&mut self, project: Arc<Project>, coalesce: bool) -> Result<(), String> {
         self.project = Arc::clone(&project);
+        if coalesce && self.last_graph.elapsed() < COALESCE {
+            self.pending = Some(project);
+            // Keep frames coming so the waiting graph is handed over even
+            // when the drag has stopped and nothing else asks for a repaint.
+            (self.waker)();
+            return Ok(());
+        }
+        self.push_graph(project)
+    }
+
+    /// Give the transport a project to play from where the clock is, now.
+    fn push_graph(&mut self, project: Arc<Project>) -> Result<(), String> {
+        self.pending = None;
+        self.last_graph = Instant::now();
         match self.transport.as_mut() {
             Some(transport) => transport
                 .set_project(project)
                 .map_err(|e| format!("the change does not play: {e}")),
             None => Ok(()),
+        }
+    }
+
+    /// Hand the transport the graph an edit during a drag left waiting,
+    /// once [`COALESCE`] has passed since the last one went over.
+    fn flush(&mut self) {
+        if self.pending.is_none() {
+            return;
+        }
+        if self.last_graph.elapsed() < COALESCE {
+            // Not yet. Come back for it on a later frame.
+            (self.waker)();
+            return;
+        }
+        if let Some(project) = self.pending.take()
+            && let Err(error) = self.push_graph(project)
+        {
+            self.error = Some(error);
         }
     }
 
@@ -1017,6 +1091,32 @@ impl App {
             transport.set_range(range).map_err(|e| e.to_string())?;
         }
         self.loop_range = range;
+        Ok(())
+    }
+
+    /// Open the stream again with another output buffer, in frames. A
+    /// bigger one keeps a heavy project from dropping out; a smaller one
+    /// plays notes sooner. The clock keeps its place and the mode, loop and
+    /// range stay as they were, and the song plays on when it was playing.
+    fn set_buffer(&mut self, frames: u32) -> Result<(), String> {
+        self.buffer_frames = frames;
+        let Some(transport) = self.transport.as_mut() else {
+            return Ok(());
+        };
+        let was_playing = transport.is_playing();
+        let position = transport.position();
+        let failed = |e: engine::Error| e.to_string();
+        transport.set_buffer(Some(frames)).map_err(failed)?;
+        // The reopened stream starts stopped at tick 0, so put the app's
+        // mode, loop, range and place back.
+        transport.set_pattern(self.pattern).map_err(failed)?;
+        transport.set_song_mode(self.song_mode).map_err(failed)?;
+        transport.set_loop(self.looping).map_err(failed)?;
+        transport.set_range(self.loop_range).map_err(failed)?;
+        transport.seek(position).map_err(failed)?;
+        if was_playing {
+            transport.play().map_err(failed)?;
+        }
         Ok(())
     }
 

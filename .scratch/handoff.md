@@ -1,3 +1,15 @@
+# Handoff, 2026-11-03, big projects stay smooth
+
+Playing and editing large projects lagged. Three changes, on `main`.
+
+- Editing. A drag sent one edit a frame, and each one deep-cloned the project and rebuilt the whole audio graph, every generator and effect from state. The clone and the windows' view still happen each frame, but the transport is handed a rebuilt graph no more often than `COALESCE` (100 ms) during a drag, and `App::poll` flushes the last one when the drag stops (`apps/fl-rs/src/lib.rs`: `pending`, `last_graph`, `flush`, `show_edited(coalesce)`).
+- Realtime scheduling. The audio callback and every mixer worker now ask for real-time priority (`crates/engine/src/priority.rs`, best-effort via `thread-priority`; the callback promotes itself on its first call, a worker at startup). It does nothing the OS refuses. It is `thread-priority` and not `audio_thread_priority` to keep off a dbus/C dep and a CI change; the cost is no macOS audio workgroup, a later refinement.
+- Output buffer as a setting. `Transport::open` takes a buffer size and `Transport::set_buffer` reopens the stream in place, keeping mode, loop, range and position. The app defaults to 2048 frames and offers 256 to 4096 in a top-bar combo (`Command::SetBuffer`, `UiState::buffer_frames`). Previews stay on the device default so they are snappy.
+
+Measured why, from `cargo run --release -p engine --features profile --example profile -- --frames 1024 --warmup 0` on 8 cores (`taskset -c 0-7`): 19 of 165 projects have a call over the 21 ms budget. The worst six are almost all one generator (Harmor, Harmless or Sytrus) on one thread, which the pool cannot split, so they beat the deadline on compute alone. A 2048 buffer clears 15 of the 19 (43 ms budget), 4096 clears all 19 (the worst is Harmless Essentials at 67 ms). The rest are marginal and lose to preemption when nothing has real-time priority.
+
+Not done, and it needs a GPU, since this box has no Vulkan and the wgpu snapshots no-op: the `ui` snapshots and README screenshots for the new top-bar combo. Run `UPDATE_SNAPSHOTS=true cargo test -p ui` and the screenshots test, look, and commit. Next for realtime: the single-generator projects are compute-bound, so only a faster Harmor, Harmless or Sytrus helps them (the 2026-10-23 handoff names their hot spots), and the fan-out projects like Bien Duro and Bombs Away could use more than the eight-thread pool cap.
+
 # Handoff, 2026-11-02, note pitch, the plugin bench and robustness
 
 Branch `claude/fervent-cori-pkwjx7`, off `main` at `f40ac7a`. Worked in a cloud container with no FL Studio install: no DLLs, no corpus, no Ghidra. Nothing here was checked against FL's code or rendered from the corpus. fmt, workspace clippy, the dsp, flp, model, plugins and ui tests (the ui snapshots through lavapipe), the engine lib, fixtures and no_alloc tests (no corpus), `progress.py --check`, `bench.py --check` and the plugin bench check pass at the head.

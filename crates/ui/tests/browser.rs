@@ -81,6 +81,7 @@ fn state(folder: &Path) -> UiState {
         data_root: None,
         project_dir: Some(folder.to_path_buf()),
         sample_rate: Some(48_000),
+        buffer_frames: 1024,
         last_error: None,
         busy: None,
         progress: None,

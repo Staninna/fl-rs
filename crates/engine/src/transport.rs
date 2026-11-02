@@ -22,7 +22,7 @@ use crate::live::Live;
 use crate::mix::BLOCK;
 use crate::{Approximate, Curves, Error, PreparedSamples, Ticks};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, I24, Sample, SampleFormat, SizedSample};
+use cpal::{BufferSize, FromSample, I24, Sample, SampleFormat, SizedSample, SupportedBufferSize};
 use cpal::{Stream, StreamConfig, SupportedStreamConfig};
 use model::Project;
 use model::rec::LAST_INSERT;
@@ -93,6 +93,9 @@ struct Player {
     live: Option<Box<Live>>,
     live_left: [f32; BLOCK],
     live_right: [f32; BLOCK],
+    /// Whether this thread has asked for real-time scheduling, which it
+    /// does on its first callback, once it is the thread the device calls.
+    promoted: bool,
 }
 
 impl Player {
@@ -100,6 +103,12 @@ impl Player {
     /// frame get the left and the right side and any others stay silent. A
     /// device with one channel gets the mean of the two sides.
     fn fill<T: Sample + FromSample<f32>>(&mut self, data: &mut [T], channels: usize) {
+        if !self.promoted {
+            // The device calls this on a thread of its own: now that we are
+            // on it, ask for the real-time turn a glitch-free output needs.
+            crate::priority::promote_current();
+            self.promoted = true;
+        }
         let channels = channels.max(1);
         for frames in data.chunks_mut(channels * BLOCK) {
             let count = frames.len() / channels;
@@ -210,6 +219,10 @@ pub struct Transport {
     samples: PreparedSamples,
     sample_rate: u32,
     mode: Mode,
+    /// The output buffer the device was asked for, or `None` for its
+    /// default. A larger one gives a heavy project more time to fill each
+    /// block, at the cost of that much latency.
+    buffer_frames: Option<u32>,
     /// The channel the audio thread plays live, and the project it was
     /// built from.
     live: Option<(u16, Arc<Project>)>,
@@ -227,55 +240,61 @@ impl Transport {
     /// device's default rate otherwise. [`Transport::sample_rate`] says
     /// which.
     ///
+    /// `buffer_frames` is the output buffer to ask the device for, clamped
+    /// to what it supports, or `None` for its default. See
+    /// [`Transport::set_buffer`].
+    ///
     /// Playback uses the [`Approximate`](crate::Approximate) curves.
     pub fn open(
         project: Arc<Project>,
         samples: PreparedSamples,
         sample_rate_hint: Option<u32>,
+        buffer_frames: Option<u32>,
     ) -> Result<Self, Error> {
-        let host = cpal::default_host();
-        let device = host.default_output_device().ok_or(Error::NoDevice)?;
-        let config = config(&device, sample_rate_hint).map_err(stream_error)?;
-        let sample_rate = config.sample_rate();
-        let (commands, waiting) = RingBuffer::new(COMMANDS);
-        let (done, retired) = RingBuffer::new(COMMANDS);
-        let shared = Arc::new(Shared::default());
-        let player = Player {
-            engine: Engine::with_graph(engine::graph(&project, &samples, sample_rate)?, VOICES),
-            commands: waiting,
-            retired: done,
-            shared: Arc::clone(&shared),
-            left: [0.0; BLOCK],
-            right: [0.0; BLOCK],
-            live: None,
-            live_left: [0.0; BLOCK],
-            live_right: [0.0; BLOCK],
-        };
-        let format = config.sample_format();
-        let config = config.config();
-        let stream = match format {
-            SampleFormat::F32 => stream::<f32>(&device, config, player),
-            SampleFormat::I16 => stream::<i16>(&device, config, player),
-            SampleFormat::I24 => stream::<I24>(&device, config, player),
-            SampleFormat::I32 => stream::<i32>(&device, config, player),
-            other => {
-                let reason = format!("the device wants {other} samples");
-                return Err(Error::Stream { reason });
-            }
-        };
-        let stream = stream.map_err(stream_error)?;
-        stream.play().map_err(stream_error)?;
+        let mode = Mode::default();
+        let started = start(&project, &samples, sample_rate_hint, buffer_frames, mode)?;
         Ok(Transport {
-            _stream: stream,
-            commands,
-            retired,
-            shared,
+            _stream: started.stream,
+            commands: started.commands,
+            retired: started.retired,
+            shared: started.shared,
             project,
             samples,
-            sample_rate,
-            mode: Mode::default(),
+            sample_rate: started.sample_rate,
+            mode,
+            buffer_frames,
             live: None,
         })
+    }
+
+    /// The output buffer the device was asked for, or `None` for its
+    /// default.
+    pub fn buffer_frames(&self) -> Option<u32> {
+        self.buffer_frames
+    }
+
+    /// Open the stream again on the default device with another output
+    /// buffer, clamped to what the device supports, or `None` for its
+    /// default. A larger buffer gives a heavy project that drops out more
+    /// time to fill each block, at the cost of that much output latency; a
+    /// smaller one plays notes sooner.
+    ///
+    /// The clock goes back to the start stopped, as opening does: the
+    /// caller puts back the mode, loop, range and position it wants. The
+    /// live channel is dropped. On an error the old stream plays on.
+    pub fn set_buffer(&mut self, buffer_frames: Option<u32>) -> Result<(), Error> {
+        let rate = Some(self.sample_rate);
+        let started = start(&self.project, &self.samples, rate, buffer_frames, self.mode)?;
+        // The new stream is already playing; dropping the old one last
+        // joins its audio thread.
+        self.commands = started.commands;
+        self.retired = started.retired;
+        self.shared = started.shared;
+        self.sample_rate = started.sample_rate;
+        self.buffer_frames = buffer_frames;
+        self.live = None;
+        self._stream = started.stream;
+        Ok(())
     }
 
     /// Run the clock from where it is.
@@ -476,6 +495,81 @@ fn stream_error(error: cpal::Error) -> Error {
     }
 }
 
+/// A stream opened and playing on the default device, with the halves of
+/// the rings that talk to its audio thread and the rate it runs at.
+struct Started {
+    stream: Stream,
+    commands: Producer<Command>,
+    retired: Consumer<Retired>,
+    shared: Arc<Shared>,
+    sample_rate: u32,
+}
+
+/// Open and start a stream on the default output device, playing `project`
+/// in `mode` from its start, stopped. [`Transport::open`] and
+/// [`Transport::set_buffer`] both build their stream here.
+fn start(
+    project: &Project,
+    samples: &PreparedSamples,
+    sample_rate_hint: Option<u32>,
+    buffer_frames: Option<u32>,
+    mode: Mode,
+) -> Result<Started, Error> {
+    let host = cpal::default_host();
+    let device = host.default_output_device().ok_or(Error::NoDevice)?;
+    let supported = config(&device, sample_rate_hint).map_err(stream_error)?;
+    let sample_rate = supported.sample_rate();
+    let (commands, waiting) = RingBuffer::new(COMMANDS);
+    let (done, retired) = RingBuffer::new(COMMANDS);
+    let shared = Arc::new(Shared::default());
+    let player = Player {
+        engine: Engine::with_graph(
+            engine::graph_of(project, samples, sample_rate, mode)?,
+            VOICES,
+        ),
+        commands: waiting,
+        retired: done,
+        shared: Arc::clone(&shared),
+        left: [0.0; BLOCK],
+        right: [0.0; BLOCK],
+        live: None,
+        live_left: [0.0; BLOCK],
+        live_right: [0.0; BLOCK],
+        promoted: false,
+    };
+    let format = supported.sample_format();
+    let mut config = supported.config();
+    buffer_size(&mut config, supported.buffer_size(), buffer_frames);
+    let stream = match format {
+        SampleFormat::F32 => stream::<f32>(&device, config, player),
+        SampleFormat::I16 => stream::<i16>(&device, config, player),
+        SampleFormat::I24 => stream::<I24>(&device, config, player),
+        SampleFormat::I32 => stream::<i32>(&device, config, player),
+        other => {
+            let reason = format!("the device wants {other} samples");
+            return Err(Error::Stream { reason });
+        }
+    };
+    let stream = stream.map_err(stream_error)?;
+    stream.play().map_err(stream_error)?;
+    Ok(Started {
+        stream,
+        commands,
+        retired,
+        shared,
+        sample_rate,
+    })
+}
+
+/// Ask for `frames` as the output buffer, clamped to the range the device
+/// reports. A `None`, or a device that reports no range, keeps the
+/// device's default, since a fixed size it does not expect can be refused.
+fn buffer_size(config: &mut StreamConfig, supported: &SupportedBufferSize, frames: Option<u32>) {
+    if let (Some(frames), SupportedBufferSize::Range { min, max }) = (frames, supported) {
+        config.buffer_size = BufferSize::Fixed(frames.clamp(*min, *max));
+    }
+}
+
 /// The device's default output configuration, at the hinted rate when the
 /// device offers that rate with the same channel count and sample format.
 fn config(device: &cpal::Device, hint: Option<u32>) -> Result<SupportedStreamConfig, cpal::Error> {
@@ -593,6 +687,7 @@ mod tests {
             live: None,
             live_left: [0.0; BLOCK],
             live_right: [0.0; BLOCK],
+            promoted: false,
         };
         Halves {
             player,

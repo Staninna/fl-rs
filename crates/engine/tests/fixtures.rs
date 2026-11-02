@@ -2104,7 +2104,7 @@ fn a_transport_plays_the_clicks_on_the_default_device() {
     let dir = Dir::new("device");
     let song = Arc::new(project(&[(1, &four_beats())], &[item(0, 1)]));
     let samples = engine::prepare(&song, &dir.0).unwrap();
-    let mut transport = match Transport::open(Arc::clone(&song), samples, Some(RATE)) {
+    let mut transport = match Transport::open(Arc::clone(&song), samples, Some(RATE), None) {
         Ok(transport) => transport,
         Err(e @ (Error::NoDevice | Error::Stream { .. })) => {
             eprintln!("no audio stream, device test skipped: {e}");

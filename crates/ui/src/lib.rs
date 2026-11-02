@@ -75,6 +75,10 @@ pub enum Command {
     ToggleSongMode,
     /// Switch between stopping at the end of the song and starting over.
     ToggleLoop,
+    /// Open the output stream again with this buffer, in frames. A bigger
+    /// one keeps a heavy project from dropping out; a smaller one plays
+    /// live notes sooner.
+    SetBuffer(u32),
     /// Make the pattern with this index the one that plays in pattern
     /// mode.
     SelectPattern(u16),
@@ -409,6 +413,9 @@ pub struct UiState {
     pub project_dir: Option<PathBuf>,
     /// The rate of the output stream in Hz, or `None` when there is none.
     pub sample_rate: Option<u32>,
+    /// The output buffer the stream uses, in frames: the latency against
+    /// the headroom a heavy project has to fill each block.
+    pub buffer_frames: u32,
     pub last_error: Option<String>,
     /// What a worker thread is doing right now, such as loading a project
     /// or rendering one. Drawn with a spinner, or with a bar when
