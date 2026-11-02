@@ -1,9 +1,9 @@
 //! Patterns, and what the channel rack and the piano roll change: the steps
 //! of a pattern, which are notes, the notes themselves, and a channel's
 //! switch, volume, pan and insert. What the top bar's pattern selector
-//! changes too: a new pattern.
+//! changes too: a new pattern and a clone of one.
 
-use crate::codec::object;
+use crate::codec::{Codec, Cx, object};
 use crate::{Channel, ChannelKind, Item, Placed, Project, TimeMarker};
 use flp::event::{Id, layout};
 
@@ -488,6 +488,69 @@ impl Project {
         pattern.order.retain(|placed| placed.item != notes);
     }
 
+    /// Copy pattern `from` to a new pattern `to`: its notes and its
+    /// controller events, its colour, its length and its loop switch, and
+    /// its name with " #2" behind it, or " #3" and on when another pattern
+    /// has that name. A pattern without a name gives the one it shows,
+    /// "Pattern 4 #2". Each of them is written in the event of its field,
+    /// behind the new pattern's 65. The name FL gives a clone is inferred.
+    ///
+    /// Nothing happens without a pattern `from`, or when `to` is one
+    /// [`Project::add_pattern`] skips.
+    pub fn clone_pattern(&mut self, from: u16, to: u16) {
+        let Some(source) = self.pattern(from).cloned() else {
+            return;
+        };
+        if !(1..=LAST_PATTERN).contains(&to) || self.pattern(to).is_some() {
+            return;
+        }
+        let base = source.name.clone().unwrap_or(format!("Pattern {from}"));
+        let taken = |name: &String| self.patterns.iter().any(|p| p.name.as_ref() == Some(name));
+        let name = (2..)
+            .map(|n| format!("{base} #{n}"))
+            .find(|name| !taken(name));
+        let name = name.filter(|name| self.holds_string(name, Id::PatternName));
+        let pattern = self.pattern_to_edit(to);
+        pattern.notes = source
+            .notes
+            .into_iter()
+            .filter(|n| !n.is_deleted())
+            .collect();
+        if pattern.notes.is_empty() {
+            // No notes are no 224, as with a new empty pattern.
+            let notes = Item::Field(Id::PatternNotes);
+            pattern.order.retain(|placed| placed.item != notes);
+        }
+        pattern.controller_events = source.controller_events;
+        (pattern.color, pattern.length) = (source.color, source.length);
+        (pattern.looped, pattern.name) = (source.looped, name);
+        let order = &mut pattern.order;
+        let fields = [
+            (
+                !pattern.controller_events.is_empty(),
+                Id::PatternControllers,
+            ),
+            (pattern.color.is_some(), Id::PatternColor),
+            (pattern.length.is_some(), Id::PatternLength),
+            (pattern.looped.is_some(), Id::PatternLooped),
+            (pattern.name.is_some(), Id::PatternName),
+        ];
+        for (_, id) in fields.into_iter().filter(|(has, _)| *has) {
+            write_field(order, Id::PatternNew, id);
+        }
+    }
+
+    /// Whether the file's strings can hold `text` in event `id`: not a
+    /// character above U+00FF in a file from before 11.5.5, nor a NUL, nor
+    /// anything in a project without a writer version.
+    fn holds_string(&self, text: &str, id: Id) -> bool {
+        let mut cx = Cx::default();
+        if let Some(version) = &self.writer_version {
+            cx.set_version(version);
+        }
+        !text.contains('\0') && text.to_owned().encode(id, &cx).is_some()
+    }
+
     /// 0 `ChannelID.IsEnabled`: the LED beside the channel.
     pub fn set_channel_enabled(&mut self, channel: u16, enabled: bool) {
         if let Some(channel) = self.channel_to_edit(channel) {
@@ -925,6 +988,51 @@ mod tests {
         assert_eq!(project.free_pattern_index(), None);
         project.patterns.retain(|p| p.index != 500);
         assert_eq!(project.free_pattern_index(), Some(500));
+    }
+
+    #[test]
+    fn a_clone_has_the_notes_and_the_name_with_a_number() {
+        let mut project = project();
+        let beat = project.pattern(1).unwrap().notes.clone();
+        // A deleted note is not copied.
+        project.pattern_to_edit(1).delete_notes(&[2]);
+        let played: Vec<_> = beat.iter().filter(|n| n.channel == 0).copied().collect();
+        project.clone_pattern(1, 3);
+        let (new, gone) = changes(&project);
+        let want = [
+            (1, word(Id::PatternNew, 3)),
+            (2, text(Id::PatternName, "Beat #2")),
+            (3, notes(&played)),
+        ];
+        assert_eq!(new[..3], want);
+        assert_eq!(gone, [notes(&beat)]);
+
+        // The next clone of it is #3, and a colour comes along.
+        project.pattern_to_edit(1).color = Some(0x0050_70d0);
+        project.clone_pattern(1, 4);
+        // A pattern without notes gives a clone without a 224, and one
+        // without a name the name it shows.
+        project.clone_pattern(2, 5);
+        project.pattern_to_edit(2).name = None;
+        project.clone_pattern(2, 6);
+        let read = from_flp(&to_flp(&project).unwrap());
+        let clone = |index| read.pattern(index).unwrap();
+        assert_eq!(clone(3).notes, played);
+        assert_eq!(clone(3).color, None);
+        assert_eq!(clone(4).name.as_deref(), Some("Beat #3"));
+        assert_eq!(clone(4).color, Some(0x0050_70d0));
+        assert_eq!(clone(4).notes, played);
+        assert_eq!(clone(5).name.as_deref(), Some("Fill #2"));
+        assert_eq!(clone(6).name.as_deref(), Some("Pattern 2 #2"));
+        let empty = |index: u16| project.pattern(index).unwrap().order.len();
+        assert_eq!((empty(5), empty(6)), (2, 2));
+
+        // No pattern to clone, or one at the new index already, is no clone.
+        let before = project.clone();
+        project.clone_pattern(9, 7);
+        project.clone_pattern(1, 2);
+        project.clone_pattern(1, 0);
+        assert!(project == before);
     }
 
     #[test]

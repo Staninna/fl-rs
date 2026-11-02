@@ -4,7 +4,8 @@
 //!
 //! The pattern selector's list ends in what changes the patterns: a new
 //! empty pattern, which F4 makes too (FL's key for the next empty pattern,
-//! inferred), at the lowest index the project has free, and selected.
+//! inferred), and a clone of the selected pattern. Either goes at the
+//! lowest index the project has free, and is selected.
 //!
 //! A drag up or down on the tempo changes it, a BPM a point and a tenth of
 //! that with Ctrl held, and a double click on it opens a field to type it
@@ -206,6 +207,8 @@ fn transport(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let keys = !ui.ctx().egui_wants_keyboard_input();
     let pressed = |ui: &mut Ui, key| keys && ui.input_mut(|i| i.consume_key(Modifiers::NONE, key));
     let mut add = pressed(ui, Key::F4);
+    let mut clone = false;
+    let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")
         .width(120.0)
         .selected_text(name(state.pattern))
@@ -219,11 +222,18 @@ fn transport(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             ui.separator();
             let new = egui::Button::new("New pattern").shortcut_text("F4");
             add |= ui.add_enabled(free.is_some(), new).clicked();
+            let copy = egui::Button::new("Clone pattern");
+            clone = ui.add_enabled(free.is_some() && has, copy).clicked();
         })
         .response
         .on_hover_text("The pattern that plays in pattern mode");
-    if let Some(index) = free.filter(|_| add) {
-        let edit = Edit::AddPattern { index };
+    let from = state.pattern;
+    let made = match free {
+        Some(index) if add => Some((Edit::AddPattern { index }, index)),
+        Some(to) if clone => Some((Edit::ClonePattern { from, to }, to)),
+        _ => None,
+    };
+    if let Some((edit, index)) = made {
         out.push(Command::Edit {
             edit,
             drag_id: None,

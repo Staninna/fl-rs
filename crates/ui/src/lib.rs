@@ -380,6 +380,14 @@ pub enum Edit {
     AddPattern {
         index: u16,
     },
+    /// Copy pattern `from` to a new pattern `to`, which the project has no
+    /// pattern for: see [`model::Project::clone_pattern`] for what comes
+    /// along. The pattern selector sends a `SelectPattern` of `to` behind
+    /// this.
+    ClonePattern {
+        from: u16,
+        to: u16,
+    },
 }
 
 impl Edit {

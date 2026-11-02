@@ -269,6 +269,15 @@ fn the_pattern_edits_are_saved_reloaded_and_undone() {
     // A pattern that is there already is no step.
     edit(&mut app, Edit::AddPattern { index: 1 }, None);
     assert!(!app.is_modified());
+
+    // A clone has the notes.
+    edit(&mut app, Edit::ClonePattern { from: 1, to: 2 }, None);
+    let want = vec![(1, None, 4), (2, Some("Pattern 1 #2".to_owned()), 4)];
+    assert_eq!(patterns(app.project()), want);
+    app.apply(Command::Save);
+    assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
+    app.apply(Command::Undo);
+    assert_eq!(patterns(app.project()), [(1, None, 4)]);
 }
 
 #[test]

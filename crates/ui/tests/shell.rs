@@ -293,6 +293,33 @@ fn a_new_pattern_takes_the_lowest_free_index_and_is_selected() {
 }
 
 #[test]
+fn a_clone_of_the_selected_pattern_is_selected() {
+    let mut harness = harness(UiState {
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Clone pattern").click();
+    harness.run();
+    let clone = edit_of(Edit::ClonePattern { from: 2, to: 3 });
+    assert_eq!(harness.state(), &[clone, Command::SelectPattern(3)]);
+
+    // A pattern the project does not have has nothing to clone.
+    let mut harness = crate::harness(UiState {
+        pattern: 7,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Clone pattern").click();
+    harness.run();
+    assert!(harness.state().is_empty());
+}
+
+#[test]
 fn a_render_shows_how_far_it_is() {
     let mut harness = harness(UiState {
         playing: false,

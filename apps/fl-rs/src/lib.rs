@@ -247,6 +247,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::SetSlotMix { insert, slot, mix } => project.set_slot_mix_raw(insert, slot, mix),
         Edit::SetTempo { milli } => project.set_tempo_milli(milli),
         Edit::AddPattern { index } => project.add_pattern(index),
+        Edit::ClonePattern { from, to } => project.clone_pattern(from, to),
         Edit::MoveItems { .. }
         | Edit::ResizeItems { .. }
         | Edit::SetMuted { .. }
