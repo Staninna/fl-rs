@@ -377,7 +377,62 @@ fn wavpack(bytes: &[u8]) -> Result<Option<Sample>, wavicle::Error> {
 /// WavPack and goes to [`wavpack`], where `Ok(None)` comes from. Any other
 /// file has to decode.
 fn decode(path: &Path) -> Result<Option<Sample>, Box<dyn std::error::Error>> {
-    let mut bytes = std::fs::read(path)?;
+    let bytes = std::fs::read(path)?;
+    decode_bytes(bytes, path.extension().and_then(|e| e.to_str()))
+}
+
+/// [`decode`] of a file's bytes. `extension` is the file's, a hint for
+/// which reader to try first.
+///
+/// The readers are symphonia's and wavicle's, and they do arithmetic on
+/// header fields unchecked: symphonia 0.6.1's WAV reader multiplies the
+/// channel count by the sample width, which overflows in a debug build. A
+/// panic in them is caught here and becomes the file's decode error, so a
+/// broken file leaves its channel silent like any file that does not
+/// decode. This runs on the caller's thread, never on the audio thread.
+///
+/// What decodes is then made playable, see [`playable`].
+fn decode_bytes(
+    bytes: Vec<u8>,
+    extension: Option<&str>,
+) -> Result<Option<Sample>, Box<dyn std::error::Error>> {
+    let read = std::panic::catch_unwind(|| read_audio(bytes, extension));
+    let sample = read.unwrap_or_else(|_| Err("the decoder panicked on this file".into()))?;
+    sample.map(playable).transpose()
+}
+
+/// A decoded sample as the engine can play it, or why it cannot be.
+///
+/// - Frames at a rate of 0 have no speed to play at, and are an error.
+/// - A stream whose channel count changes between packets leaves the two
+///   sides of different lengths. Both are cut to the shorter.
+/// - A float file can hold NaN or an infinity, which would stay in every
+///   filter and reverb the sample goes through. Each becomes 0. What FL
+///   does with one is not known; this is a stand-in.
+fn playable(mut sample: Sample) -> Result<Sample, Box<dyn std::error::Error>> {
+    if let Some(right) = &mut sample.right {
+        let frames = sample.left.len().min(right.len());
+        sample.left.truncate(frames);
+        right.truncate(frames);
+    }
+    if !sample.left.is_empty() && sample.rate == 0 {
+        return Err("the file gives no sample rate".into());
+    }
+    let all = sample
+        .left
+        .iter_mut()
+        .chain(sample.right.iter_mut().flatten());
+    for x in all.filter(|x| !x.is_finite()) {
+        *x = 0.0;
+    }
+    Ok(sample)
+}
+
+/// [`decode_bytes`] without the guard.
+fn read_audio(
+    mut bytes: Vec<u8>,
+    extension: Option<&str>,
+) -> Result<Option<Sample>, Box<dyn std::error::Error>> {
     if bytes.starts_with(b"wvpk") {
         return Ok(wavpack(&bytes)?);
     }
@@ -391,7 +446,7 @@ fn decode(path: &Path) -> Result<Option<Sample>, Box<dyn std::error::Error>> {
     }
     let stream = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut hint = Hint::new();
-    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(extension) = extension {
         hint.with_extension(extension);
     }
     let mut format = symphonia::default::get_probe().probe(
@@ -445,6 +500,9 @@ fn decode(path: &Path) -> Result<Option<Sample>, Box<dyn std::error::Error>> {
     }
     Ok(Some(sample))
 }
+
+#[cfg(test)]
+mod robustness;
 
 #[cfg(test)]
 mod tests {
