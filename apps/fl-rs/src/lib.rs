@@ -229,6 +229,13 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),
         Edit::SoloInsert { insert } => project.solo_insert(insert),
+        Edit::SetInsertSeparation { insert, separation } => {
+            project.set_insert_separation_raw(insert, separation);
+        }
+        Edit::SetInsertPolarity { insert, reversed } => {
+            project.set_insert_polarity_reversed(insert, reversed);
+        }
+        Edit::SetInsertSwapped { insert, swapped } => project.set_insert_swapped(insert, swapped),
         Edit::SetInsertName { insert, ref name } => project.set_insert_name(insert, name),
         Edit::SetRoute { from, to, on } => project.set_route(from, to, on),
         Edit::SetSendLevel { from, to, level } => project.set_send_level_raw(from, to, level),

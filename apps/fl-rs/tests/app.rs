@@ -1271,6 +1271,48 @@ fn a_solo_is_one_undo_step_and_is_saved() {
 }
 
 #[test]
+fn polarity_swap_and_separation_are_saved_reloaded_and_undone() {
+    let dir = Dir::new("strip-menu");
+    let (mut app, path) = open_mixer_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    // A knob's drag is one step.
+    for separation in [-10, -40, -64] {
+        let edit = Edit::SetInsertSeparation {
+            insert: 2,
+            separation,
+        };
+        self::edit(&mut app, edit, Some(1));
+    }
+    let edits = [
+        Edit::SetInsertPolarity {
+            insert: 1,
+            reversed: true,
+        },
+        Edit::SetInsertSwapped {
+            insert: 3,
+            swapped: true,
+        },
+    ];
+    for edit in edits {
+        self::edit(&mut app, edit, None);
+    }
+    let check = |project: &Project| {
+        assert_eq!(project.insert_mix(2).separation_raw(), -64);
+        assert!(project.insert_mix(1).polarity_reversed());
+        assert!(project.insert_mix(3).swapped() && project.insert_mix(3).enabled());
+    };
+    check(app.project());
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    check(&fl_rs::read(&path).unwrap());
+    for _ in 0..3 {
+        app.apply(Command::Undo);
+    }
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+}
+
+#[test]
 fn the_meters_follow_the_inserts_that_play() {
     let dir = Dir::new("meters");
     let (mut app, _) = open_mixer_fixture(&dir);

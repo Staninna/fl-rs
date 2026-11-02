@@ -1,6 +1,7 @@
-//! What the mixer window changes: an insert's volume, pan and send levels
-//! and a slot's switch and mix level, which are 225 records, and an
-//! insert's routes, its switch and its name, which are its own events.
+//! What the mixer window changes: an insert's volume, pan, stereo
+//! separation and send levels and a slot's switch and mix level, which are
+//! 225 records, and an insert's routes, its switch, its polarity, its swap
+//! of left and right and its name, which are its own events.
 //!
 //! [`InsertMix`](crate::InsertMix) reads every value set here, and each
 //! setter leaves the project alone when the value is the one that reads
@@ -8,7 +9,7 @@
 //! slot past 9.
 
 use crate::codec::{Codec, Cx};
-use crate::mixer::ENABLED;
+use crate::mixer::{ENABLED, POLARITY, SWAP};
 use crate::rec::{LAST_INSERT, RecTarget, control};
 use crate::{Insert, Item, Placed, Project};
 use flp::event::{Id, layout};
@@ -26,6 +27,8 @@ const LEGACY_CURRENT: u16 = 126;
 /// a pan and of a slot's mix level.
 const FADER: RangeInclusive<i32> = 0..=16_000;
 const PAN: RangeInclusive<i32> = -6400..=6400;
+/// The ends of an insert's stereo separation, which the loader clamps to.
+const SEPARATION: RangeInclusive<i32> = -64..=64;
 const MIX: RangeInclusive<i32> = 0..=12_800;
 
 /// An insert's own events in the order FL writes them, by ID: every one of
@@ -184,6 +187,15 @@ impl Project {
         self.set_control((insert, None, control::PAN), pan, PAN, Some(now));
     }
 
+    /// The insert's stereo separation, record 0x1FC2: -64 is all
+    /// separated, 0 is the sound as it comes and 64 is merged to the mean
+    /// of the two sides (`docs/mixer-insert.md`).
+    pub fn set_insert_separation_raw(&mut self, insert: u16, separation: i32) {
+        let now = self.insert_mix(insert).separation_raw();
+        let control = (insert, None, control::SEPARATION);
+        self.set_control(control, separation, SEPARATION, Some(now));
+    }
+
     /// The level of the send from insert `from` to insert `to`, record
     /// 0x2000 + `to`: 0 to 16000 with 12800 at unity. The level is kept
     /// whether or not the route is there, see [`Project::set_route`].
@@ -220,6 +232,21 @@ impl Project {
     /// insert with neither stays on. No insert of the corpus is one.
     pub fn set_insert_enabled(&mut self, insert: u16, enabled: bool) {
         self.set_insert_flag(insert, ENABLED, enabled);
+    }
+
+    /// Reverse the insert's polarity or put it back: bit 0 of the same
+    /// flags as [`Project::set_insert_enabled`], where
+    /// [`InsertMix::polarity_reversed`](crate::InsertMix::polarity_reversed)
+    /// reads it.
+    pub fn set_insert_polarity_reversed(&mut self, insert: u16, reversed: bool) {
+        self.set_insert_flag(insert, POLARITY, reversed);
+    }
+
+    /// Swap the insert's left and right or put them back: bit 1 of the
+    /// same flags as [`Project::set_insert_enabled`], where
+    /// [`InsertMix::swapped`](crate::InsertMix::swapped) reads it.
+    pub fn set_insert_swapped(&mut self, insert: u16, swapped: bool) {
+        self.set_insert_flag(insert, SWAP, swapped);
     }
 
     /// Set or clear `bit` of the insert's flags: its 236's flags word, or
@@ -729,6 +756,59 @@ mod tests {
         );
         p.set_insert_enabled(0, false);
         assert_eq!(written(&p), old.events);
+    }
+
+    #[test]
+    fn polarity_and_swap_are_bits_0_and_1_beside_the_switch() {
+        let file = file(NEW, &[]);
+        let mut p = project(&file);
+        p.set_insert_polarity_reversed(2, true);
+        p.set_insert_swapped(3, true);
+        let bits = |bits: u32| [[0; 4], bits.to_le_bytes(), [0; 4]].concat();
+        let mut want = file.clone();
+        want.events = with_event(&file, Id::InsertFlags, 2, &bits(0b0100_1101));
+        want.events = with_event(&want, Id::InsertFlags, 3, &bits(0b0100_1110));
+        assert_eq!(written(&p), want.events);
+        let read = from_flp(&to_flp(&p).unwrap());
+        assert!(read.insert_mix(2).polarity_reversed() && !read.insert_mix(2).swapped());
+        assert!(read.insert_mix(3).swapped() && !read.insert_mix(3).polarity_reversed());
+        assert!(read.insert_mix(2).enabled() && read.insert_mix(3).enabled());
+        p.set_insert_polarity_reversed(2, false);
+        p.set_insert_swapped(3, false);
+        assert_eq!(written(&p), file.events);
+
+        // A 5-byte 236 leaves them to the last 27, as it does the switch.
+        let mut old = file.clone();
+        let flags = old.events.iter().position(|e| e.id == 236).unwrap();
+        old.events[flags].data = vec![0, 0, 0, 0, 1];
+        old.events.insert(flags, ev(Id::FXProperties, &[0b1000]));
+        let mut p = project(&old);
+        p.set_insert_swapped(0, true);
+        p.set_insert_polarity_reversed(0, true);
+        assert_eq!(
+            written(&p),
+            with_event(&old, Id::FXProperties, 0, &[0b1011])
+        );
+    }
+
+    #[test]
+    fn the_separation_is_record_0x1fc2() {
+        let records = [(0x4000_0000, 12_800), (id(1, 0, control::SEPARATION), 32)];
+        let file = file(NEW, &records);
+        let mut p = project(&file);
+        assert_eq!(p.insert_mix(1).separation_raw(), 32);
+        p.set_insert_separation_raw(1, -64);
+        // A value past the end stops there, and 0 needs no record.
+        p.set_insert_separation_raw(2, 99);
+        p.set_insert_separation_raw(3, 0);
+        let mut want = records.to_vec();
+        want[1].1 = -64;
+        want.push((id(2, 0, control::SEPARATION), 64));
+        assert_eq!(written(&p), with_records(&file, &want));
+        let read = from_flp(&to_flp(&p).unwrap());
+        assert_eq!(read.insert_mix(1).separation_raw(), -64);
+        assert_eq!(read.insert_mix(2).separation_raw(), 64);
+        assert_eq!(read.insert_mix(3).separation_raw(), 0);
     }
 
     #[test]

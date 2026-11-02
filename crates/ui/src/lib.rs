@@ -321,6 +321,22 @@ pub enum Edit {
     SoloInsert {
         insert: u16,
     },
+    /// The insert's stereo separation: -64 all separated, 0 as it comes,
+    /// 64 merged to mono.
+    SetInsertSeparation {
+        insert: u16,
+        separation: i32,
+    },
+    /// Reverse the insert's polarity, or put it back.
+    SetInsertPolarity {
+        insert: u16,
+        reversed: bool,
+    },
+    /// Swap the insert's left and right, or put them back.
+    SetInsertSwapped {
+        insert: u16,
+        swapped: bool,
+    },
     /// Name the insert. An empty name gives it its number back.
     SetInsertName {
         insert: u16,

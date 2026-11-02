@@ -7,6 +7,10 @@
 //! selects its insert, a click on its name renames it as well, and the
 //! left and right arrows move the selection.
 //!
+//! A right-click on a strip or on its name opens a menu with what the
+//! strip has no room for: the solo, the insert's polarity, the swap of its
+//! left and right and its stereo separation.
+//!
 //! The bottom of a strip is what the selected insert sends to it, as FL
 //! has it: an arrow that makes the route or removes it, and above a lit
 //! arrow the knob for the level of the send. The master sends nowhere, so
@@ -64,6 +68,8 @@ const FADER_TOP: i32 = 16_000;
 const UNITY: i32 = 12_800;
 /// A pan all the way to the right.
 const PAN_END: i32 = 6400;
+/// The ends of an insert's stereo separation: separated, then merged.
+const SEPARATION_END: i32 = 64;
 /// The top of a slot's mix level.
 const MIX_TOP: i32 = 12_800;
 /// The colour of a lit LED, of a lit arrow and of a knob's arc.
@@ -144,6 +150,16 @@ fn pan_hint(pan: i32) -> String {
         0 => "Pan centred".to_owned(),
         left if left < 0 => format!("Pan {}% left", -left),
         right => format!("Pan {right}% right"),
+    }
+}
+
+/// An insert's stereo separation as FL's hint words it (`FUN_006a4ac0`):
+/// a percentage separated below 0 and merged above.
+fn separation_hint(separation: i32) -> String {
+    match (separation as f32 / SEPARATION_END as f32 * 100.0).round() as i32 {
+        0 => "Original".to_owned(),
+        apart if apart < 0 => format!("{}% separated", -apart),
+        merged => format!("{merged}% merged"),
     }
 }
 
@@ -293,6 +309,7 @@ impl Strips<'_> {
         if background.clicked() {
             memory.selected = index;
         }
+        background.context_menu(|ui| self.menu(ui, index, &name, out));
         let visuals = ui.visuals();
         // FL lights the selected strip a shade, and keeps the orange for
         // what is switched on.
@@ -376,6 +393,54 @@ impl Strips<'_> {
         self.send(ui, index, &name, out);
     }
 
+    /// The menu a right-click on a strip or on its name opens: the
+    /// insert's solo, and the parts of it that the strip has no room for,
+    /// its polarity, the swap of its left and right and its stereo
+    /// separation.
+    fn menu(&self, ui: &mut Ui, index: u16, name: &str, out: &mut Vec<Command>) {
+        let mix = self.project.insert_mix(index);
+        if ui.button("Solo").clicked() {
+            out.push(edit(Edit::SoloInsert { insert: index }, None));
+        }
+        ui.separator();
+        let mut reversed = mix.polarity_reversed();
+        if ui.checkbox(&mut reversed, "Reverse polarity").clicked() {
+            let polarity = Edit::SetInsertPolarity {
+                insert: index,
+                reversed,
+            };
+            out.push(edit(polarity, None));
+        }
+        let mut swapped = mix.swapped();
+        if ui.checkbox(&mut swapped, "Swap left and right").clicked() {
+            let swap = Edit::SetInsertSwapped {
+                insert: index,
+                swapped,
+            };
+            out.push(edit(swap, None));
+        }
+        ui.horizontal(|ui| {
+            let separation = mix.separation_raw();
+            let knob = Knob {
+                label: &format!("{name} separation"),
+                value: separation,
+                range: -SEPARATION_END..=SEPARATION_END,
+                default: 0,
+                hint: separation_hint(separation),
+                colour: LIT,
+                enabled: true,
+            };
+            if let Some((separation, drag_id)) = knob.show(ui, KNOB) {
+                let separation = Edit::SetInsertSeparation {
+                    insert: index,
+                    separation,
+                };
+                out.push(edit(separation, drag_id));
+            }
+            ui.label(format!("Stereo: {}", separation_hint(separation)));
+        });
+    }
+
     /// The plate with the insert's name, which a click turns into a field
     /// to type a new name in. Enter and a click elsewhere take the name,
     /// and Escape leaves the old one.
@@ -430,6 +495,7 @@ impl Strips<'_> {
         if selected {
             painter.rect_stroke(plate, 2.0, Stroke::new(1.5, LIT), StrokeKind::Inside);
         }
+        response.context_menu(|ui| self.menu(ui, index, name, out));
         if response.on_hover_text("Click to rename").clicked() {
             // The field of a strip further right has not seen this click
             // yet, and will not be drawn to see it.
@@ -752,6 +818,9 @@ mod tests {
         assert_eq!(pan_hint(0), "Pan centred");
         assert_eq!(pan_hint(-6400), "Pan 100% left");
         assert_eq!(pan_hint(3200), "Pan 50% right");
+        assert_eq!(separation_hint(0), "Original");
+        assert_eq!(separation_hint(-64), "100% separated");
+        assert_eq!(separation_hint(16), "25% merged");
     }
 
     #[test]

@@ -258,6 +258,53 @@ fn a_ctrl_click_or_a_right_click_on_the_led_solos_the_insert() {
 }
 
 #[test]
+fn the_strip_s_menu_sets_polarity_swap_and_separation() {
+    let mut harness = harness();
+    assert!(harness.query_by_label("Reverse polarity").is_none());
+    for (strip, entry) in [
+        ("Drums strip", "Reverse polarity"),
+        ("Bass", "Swap left and right"),
+        ("Reverb strip", "Solo"),
+    ] {
+        harness.get_by_label(strip).click_secondary();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
+    assert_eq!(
+        harness.state(),
+        &[
+            edit(Edit::SetInsertPolarity {
+                insert: 1,
+                reversed: true,
+            }),
+            edit(Edit::SetInsertSwapped {
+                insert: 2,
+                swapped: true,
+            }),
+            edit(Edit::SoloInsert { insert: 4 }),
+        ]
+    );
+
+    // 150 points are the knob's whole range, from -64 to 64.
+    harness.get_by_label("Insert 3 strip").click_secondary();
+    harness.run();
+    let knob = harness.get_by_label("Insert 3 separation");
+    assert_eq!(knob.accesskit_node().numeric_value(), Some(0.0));
+    let from = knob.rect().center();
+    drag(&mut harness, from, &[egui::vec2(0.0, 37.5)]);
+    let separation = Command::Edit {
+        edit: Edit::SetInsertSeparation {
+            insert: 3,
+            separation: -32,
+        },
+        drag_id: Some(1),
+    };
+    assert_eq!(harness.state().last(), Some(&separation));
+    assert_eq!(harness.state().len(), 4);
+}
+
+#[test]
 fn a_click_and_the_arrows_select_the_insert() {
     let mut harness = harness();
     assert!(harness.query_by_label("Master slots").is_some());
