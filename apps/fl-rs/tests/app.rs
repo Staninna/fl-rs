@@ -235,6 +235,42 @@ fn a_tempo_edit_is_saved_undone_and_played() {
     assert_eq!(app.project().tempo(), Some(522.0));
 }
 
+/// The indices of the project's patterns, with each one's name and how
+/// many notes it has.
+fn patterns(project: &Project) -> Vec<(u16, Option<String>, usize)> {
+    let pattern = |p: &Pattern| (p.index, p.name.clone(), p.notes.len());
+    let mut all: Vec<_> = project.patterns.iter().map(pattern).collect();
+    all.sort();
+    all
+}
+
+#[test]
+fn the_pattern_edits_are_saved_reloaded_and_undone() {
+    let dir = Dir::new("patterns");
+    let (mut app, path) = open_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    edit(&mut app, Edit::AddPattern { index: 2 }, None);
+    app.apply(Command::SelectPattern(2));
+    assert_eq!(app.state().pattern, 2);
+    let want = vec![(1, None, 4), (2, None, 0)];
+    assert_eq!(patterns(app.project()), want);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(patterns(&fl_rs::read(&path).unwrap()), want);
+
+    // A step in the new pattern goes into it.
+    edit(&mut app, set_step(0, true), None);
+    assert_eq!(patterns(app.project())[1], (2, None, 1));
+    app.apply(Command::Undo);
+    app.apply(Command::Undo);
+    assert_eq!(patterns(app.project()), [(1, None, 4)]);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+    // A pattern that is there already is no step.
+    edit(&mut app, Edit::AddPattern { index: 1 }, None);
+    assert!(!app.is_modified());
+}
+
 #[test]
 fn a_render_reports_its_progress_up_to_the_whole() {
     let dir = Dir::new("progress");

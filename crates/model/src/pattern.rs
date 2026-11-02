@@ -1,6 +1,7 @@
 //! Patterns, and what the channel rack and the piano roll change: the steps
 //! of a pattern, which are notes, the notes themselves, and a channel's
-//! switch, volume, pan and insert.
+//! switch, volume, pan and insert. What the top bar's pattern selector
+//! changes too: a new pattern.
 
 use crate::codec::object;
 use crate::{Channel, ChannelKind, Item, Placed, Project, TimeMarker};
@@ -46,6 +47,9 @@ object!(Pattern {
     list notes = PatternNotes;
     list controller_events = PatternControllers;
 });
+
+/// The highest index the loader takes for a pattern.
+pub const LAST_PATTERN: u16 = 999;
 
 /// The key of a step: C5 as FL counts octaves, which plays a sample at its
 /// own pitch. FL's step toggle writes 60 whatever the channel's root note
@@ -460,6 +464,30 @@ impl Project {
         &mut self.patterns[at]
     }
 
+    /// The lowest pattern index, from 1, that the project has no pattern
+    /// for: where a new pattern goes. `None` when 1 to 999 are all taken.
+    ///
+    /// FL's F4 picks the next empty pattern. That this is the lowest free
+    /// index, and not the first empty one after the selected pattern, is
+    /// inferred.
+    pub fn free_pattern_index(&self) -> Option<u16> {
+        (1..=LAST_PATTERN).find(|index| self.pattern(*index).is_none())
+    }
+
+    /// Add an empty pattern with this index: a 65 and nothing else, in
+    /// front of the first 65 of the file as
+    /// [`Project::pattern_to_edit`] puts it. Its first note gets it a 224
+    /// behind the 65. An index the project has a pattern for already, 0
+    /// and one past [`LAST_PATTERN`] are skipped.
+    pub fn add_pattern(&mut self, index: u16) {
+        if !(1..=LAST_PATTERN).contains(&index) || self.pattern(index).is_some() {
+            return;
+        }
+        let pattern = self.pattern_to_edit(index);
+        let notes = Item::Field(Id::PatternNotes);
+        pattern.order.retain(|placed| placed.item != notes);
+    }
+
     /// 0 `ChannelID.IsEnabled`: the LED beside the channel.
     pub fn set_channel_enabled(&mut self, channel: u16, enabled: bool) {
         if let Some(channel) = self.channel_to_edit(channel) {
@@ -863,6 +891,40 @@ mod tests {
                 word(Id::ChannelNew, 0)
             ]
         );
+    }
+
+    #[test]
+    fn a_new_empty_pattern_is_a_65_at_the_lowest_free_index() {
+        let mut project = project();
+        assert_eq!(project.free_pattern_index(), Some(3));
+        project.add_pattern(3);
+        assert_eq!(project.free_pattern_index(), Some(4));
+        let (new, gone) = changes(&project);
+        assert_eq!(new, [(1, word(Id::PatternNew, 3))]);
+        assert!(gone.is_empty());
+        let read = from_flp(&to_flp(&project).unwrap());
+        assert!(read.pattern(3).unwrap().notes.is_empty());
+        assert_eq!(read.patterns.len(), 3);
+
+        // Its first note gets it a 224 behind the 65.
+        project.pattern_to_edit(3).set_step(0, 0, true, PPQ);
+        let (new, _) = changes(&project);
+        let want = [(1, word(Id::PatternNew, 3)), (2, notes(&[note(0, 0, 0)]))];
+        assert_eq!(new, want);
+
+        // A taken index, 0 and one past 999 add nothing.
+        let before = project.clone();
+        for index in [1, 3, 0, 1000] {
+            project.add_pattern(index);
+        }
+        assert!(project == before);
+        // With 1 to 999 taken there is no free index.
+        for index in 4..=LAST_PATTERN {
+            project.add_pattern(index);
+        }
+        assert_eq!(project.free_pattern_index(), None);
+        project.patterns.retain(|p| p.index != 500);
+        assert_eq!(project.free_pattern_index(), Some(500));
     }
 
     #[test]

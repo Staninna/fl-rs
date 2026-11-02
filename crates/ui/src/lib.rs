@@ -374,6 +374,12 @@ pub enum Edit {
     SetTempo {
         milli: u32,
     },
+    /// Add an empty pattern with this index, which the project has no
+    /// pattern for. The pattern selector sends a `SelectPattern` of it
+    /// behind this.
+    AddPattern {
+        index: u16,
+    },
 }
 
 impl Edit {

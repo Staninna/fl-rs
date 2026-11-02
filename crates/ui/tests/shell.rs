@@ -268,6 +268,30 @@ fn a_double_click_on_the_tempo_types_it() {
     assert_eq!(harness.state().last(), Some(&tempo(522_000, None)));
 }
 
+fn edit_of(edit: Edit) -> Command {
+    Command::Edit {
+        edit,
+        drag_id: None,
+    }
+}
+
+#[test]
+fn a_new_pattern_takes_the_lowest_free_index_and_is_selected() {
+    let mut harness = harness(state());
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label_contains("New pattern").click();
+    harness.run();
+    harness.key_press(egui::Key::F4);
+    harness.run();
+    let new = [
+        edit_of(Edit::AddPattern { index: 3 }),
+        Command::SelectPattern(3),
+    ];
+    assert_eq!(harness.state(), &[new.clone(), new].concat());
+}
+
 #[test]
 fn a_render_shows_how_far_it_is() {
     let mut harness = harness(UiState {
