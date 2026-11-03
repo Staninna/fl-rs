@@ -166,6 +166,37 @@ fn the_pattern_selector_lists_the_patterns() {
     assert_eq!(harness.state(), &[Command::SelectPattern(2)]);
 }
 
+#[test]
+fn the_keypad_s_minus_and_plus_step_through_the_patterns_there_are() {
+    // Patterns 1, 2 and 5, with 2 selected.
+    let mut project = fixture();
+    project.patterns.push(Pattern {
+        index: 5,
+        ..Pattern::default()
+    });
+    let mut harness = harness(UiState {
+        project: Arc::new(project),
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    for key in [egui::Key::Minus, egui::Key::Plus] {
+        harness.key_press(key);
+        harness.run();
+    }
+    let want = [Command::SelectPattern(1), Command::SelectPattern(5)];
+    assert_eq!(harness.state(), &want);
+
+    // There is no pattern before the first.
+    let mut harness = crate::harness(state());
+    harness.run();
+    harness.key_press(egui::Key::Minus);
+    harness.run();
+    harness.key_press(egui::Key::Plus);
+    harness.run();
+    assert_eq!(harness.state(), &[Command::SelectPattern(2)]);
+}
+
 /// The shell in frames short enough that two clicks make a double click:
 /// the harness runs a frame for every event, and a click is four events.
 fn quick_harness(state: UiState) -> Harness<'static, Vec<Command>> {
@@ -342,6 +373,34 @@ fn a_clone_of_the_selected_pattern_is_selected() {
 }
 
 #[test]
+fn a_deleted_pattern_hands_the_selection_to_its_neighbour() {
+    // Pattern 2 hands it to pattern 1 before it, and pattern 1, the first,
+    // to pattern 2 after it.
+    for (pattern, next) in [(2, 1), (1, 2)] {
+        let mut harness = harness(UiState { pattern, ..state() });
+        harness.run();
+        harness.get_by_role(Role::ComboBox).click();
+        harness.run();
+        harness.get_by_label("Delete pattern").click();
+        harness.run();
+        let deleted = edit_of(Edit::DeletePattern { pattern });
+        assert_eq!(harness.state(), &[deleted, Command::SelectPattern(next)]);
+    }
+
+    // A pattern the project does not have has nothing to delete.
+    let mut harness = harness(UiState {
+        pattern: 7,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Delete pattern").click();
+    harness.run();
+    assert!(harness.state().is_empty());
+}
+
+#[test]
 fn f2_or_the_list_renames_the_selected_pattern() {
     let mut harness = harness(state());
     harness.run();
@@ -412,6 +471,7 @@ fn a_render_shows_how_far_it_is() {
 fn the_menu_asks_for_paths_and_quits() {
     let mut harness = harness(state());
     for (entry, command) in [
+        ("New", Command::New),
         ("Open…", Command::Choose(Dialog::Open)),
         ("Save", Command::Save),
         ("Save As…", Command::Choose(Dialog::SaveAs)),
@@ -424,7 +484,7 @@ fn the_menu_asks_for_paths_and_quits() {
         harness.run();
         assert_eq!(harness.state().last(), Some(&command));
     }
-    assert_eq!(harness.state().len(), 5);
+    assert_eq!(harness.state().len(), 6);
 }
 
 #[test]
@@ -621,4 +681,101 @@ fn the_window_keys_show_and_hide_their_windows() {
     // With every window closed, the welcome screen lists their keys.
     assert!(harness.query_by_label("No window is open").is_some());
     assert!(harness.state().is_empty());
+}
+
+/// The fixture with a 238 for its track 2, switched on or off.
+fn with_track_switch(on: bool) -> UiState {
+    let mut bytes = vec![0; 70];
+    bytes[..4].copy_from_slice(&2u32.to_le_bytes());
+    bytes[12] = u8::from(on);
+    let mut project = fixture();
+    project.arrangements[0].tracks[0].data = flp::event::layout::Track::from_bytes(&bytes);
+    UiState {
+        project: Arc::new(project),
+        ..state()
+    }
+}
+
+/// A right click at `pos`.
+fn right_click(harness: &mut Harness<'_, Vec<Command>>, pos: egui::Pos2) {
+    harness.hover_at(pos);
+    button(harness, pos, true);
+    button(harness, pos, false);
+    harness.run();
+}
+
+#[test]
+fn a_right_click_on_a_track_s_name_mutes_and_unmutes_the_track() {
+    for (on, entry) in [(true, "Mute track"), (false, "Unmute track")] {
+        let mut harness = harness(with_track_switch(on));
+        harness.run();
+        let name = egui::pos2(40.0, at(&harness, 0.0, 2).y);
+        right_click(&mut harness, name);
+        harness.get_by_label(entry).click();
+        harness.run();
+        let switched = Edit::SetTrackEnabled {
+            track: 2,
+            enabled: !on,
+        };
+        // The right click on the name mutes no item.
+        assert_eq!(harness.state(), &[edit(switched)]);
+    }
+
+    // Track 1 has no 238, so there is no switch to set.
+    let mut harness = harness(with_track_switch(true));
+    harness.run();
+    let name = egui::pos2(40.0, at(&harness, 0.0, 1).y);
+    right_click(&mut harness, name);
+    harness.get_by_label("Mute track").click();
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+}
+
+#[test]
+fn a_cloned_channel_is_the_selected_one_once_it_is_made() {
+    // Channels with events, which the model clones.
+    let mut project = fixture();
+    for (pos, channel) in project.channels.iter_mut().enumerate() {
+        channel.order = vec![model::Placed {
+            pos,
+            item: model::Item::Field(flp::event::Id::ChannelNew),
+        }];
+    }
+    // The state the harness draws, which the test changes as the app
+    // would.
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(UiState {
+        project: Arc::new(project.clone()),
+        playing: false,
+        ..state()
+    }));
+    let drawn = std::rc::Rc::clone(&shown);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 360.0))
+        .with_theme(egui::Theme::Dark)
+        .build_ui_state(
+            move |ui, out| ui::shell(ui, &drawn.borrow(), out),
+            Vec::new(),
+        );
+    harness.run();
+    harness.key_press(egui::Key::F5);
+    harness.key_press(egui::Key::F6);
+    harness.run();
+    // The graph names the selected channel.
+    harness.get_by_label("Graph").click();
+    harness.run();
+    assert!(harness.query_by_label("Kick velocity").is_some());
+    let name = harness.get_by_label("Kick").rect().center();
+    harness.hover_at(name);
+    button(&harness, name, true);
+    button(&harness, name, false);
+    harness.run();
+    // The app applies the edit before it draws the next frame.
+    harness.get_by_label("Clone").click();
+    harness.step();
+    assert_eq!(harness.state(), &[edit(Edit::CloneChannel { channel: 0 })]);
+    assert_eq!(project.clone_channel(0), Some(2));
+    shown.borrow_mut().project = Arc::new(project);
+    harness.run();
+    assert!(harness.query_by_label("Kick #2 velocity").is_some());
+    assert!(harness.query_by_label("Kick velocity").is_none());
 }

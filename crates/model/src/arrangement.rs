@@ -129,6 +129,38 @@ impl Arrangement {
         self.items.extend(copies);
     }
 
+    /// Add copies of these items to the end of the list, in their order,
+    /// with every field kept: their places, their tracks and their trims.
+    /// They become the selection, in place of the items that were
+    /// selected: what a paste and a duplicate do.
+    ///
+    /// An item that places nothing is left out, and so is one of another
+    /// size than the items the list has, since a playlist's items are all
+    /// of one size ([`PlaylistItem::size_for`](layout::PlaylistItem::size_for)).
+    /// That keeps out an item copied from a project of another writer,
+    /// whose track word may count from another top too.
+    pub fn paste_items(&mut self, items: &[layout::PlaylistItem]) {
+        let size = self.items.first().map(|item| item.len);
+        let fits = |item: &&layout::PlaylistItem| {
+            item.source().is_some() && size.is_none_or(|size| item.len == size)
+        };
+        let mut copies: Vec<layout::PlaylistItem> = items.iter().filter(fits).copied().collect();
+        if copies.is_empty() {
+            return;
+        }
+        for item in &mut self.items {
+            set_selected(item, false);
+        }
+        for copy in &mut copies {
+            set_selected(copy, true);
+            // FL numbers an item when it is inserted, see duplicate_items.
+            if copy.len > 32 {
+                copy.id = -1;
+            }
+        }
+        self.items.extend(copies);
+    }
+
     /// Cut each item that tick `at` falls inside of in two at `at`. The
     /// first part keeps the item's place in the list and ends at `at`. The
     /// second is a copy that goes to the end of the list, in the order of
@@ -182,6 +214,31 @@ impl Arrangement {
             pieces.push(piece);
         }
         self.items.extend(pieces);
+    }
+
+    /// Whether the track with this number, where the first is 1, plays:
+    /// see [`Track::enabled`]. A track the arrangement has no record for
+    /// plays.
+    pub fn track_enabled(&self, track: i32) -> bool {
+        let found = self
+            .tracks
+            .iter()
+            .find(|t| i64::from(t.index) == i64::from(track));
+        found.is_none_or(Track::enabled)
+    }
+
+    /// Switch the track with this number, where the first is 1, on or
+    /// off, in its 238's byte at @12. A track without a 238 is skipped:
+    /// every track of a file from FL 12.9 on has one, and no event of an
+    /// older file holds the switch.
+    pub fn set_track_enabled(&mut self, track: i32, enabled: bool) {
+        let found = self
+            .tracks
+            .iter_mut()
+            .find(|t| i64::from(t.index) == i64::from(track));
+        if let Some(data) = found.and_then(|t| t.data.as_mut()) {
+            data.unknown_12 = [u8::from(enabled)];
+        }
     }
 
     /// Select the items, on top of the selection when `add` is set and in
@@ -365,6 +422,18 @@ object!(Track {
     one color_is_custom = TrackColorIsCustom;
 });
 
+impl Track {
+    /// Whether the track plays: the byte at @12 of its 238, which the
+    /// loader keeps at `trk+0x3c` (`docs/event-dictionary.md`, "238") and
+    /// PyFLP reads as the track's `enabled` flag. That it is the switch
+    /// in front of the track's name, and that FL plays none of a track's
+    /// items while it is 0, are PyFLP's name and inferred. A track without
+    /// a 238 plays.
+    pub fn enabled(&self) -> bool {
+        self.data.is_none_or(|data| data.unknown_12 != [0])
+    }
+}
+
 /// One time marker. 205 `TimeMarkerID.Name` closes it and takes along the
 /// marker events since the previous 205.
 ///
@@ -514,6 +583,71 @@ mod tests {
         let before = arrangement.clone();
         arrangement.move_items(&[1, 7], 96, 1, VERSION);
         arrangement.mute_items(&[1, 7], true);
+        assert_eq!(arrangement, before);
+    }
+
+    /// A 238 of 70 bytes for track `index`, switched on.
+    fn track(index: u32) -> Track {
+        let mut bytes = vec![0; 70];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        bytes[12] = 1;
+        Track {
+            index,
+            data: layout::Track::from_bytes(&bytes),
+            ..Track::default()
+        }
+    }
+
+    #[test]
+    fn a_track_s_switch_is_the_byte_at_12_of_its_238() {
+        let mut arrangement = arrangement(Vec::new());
+        let named = Track {
+            index: 3,
+            name: Some("Vox".to_owned()),
+            ..Track::default()
+        };
+        arrangement.tracks = vec![track(1), track(2), named];
+        arrangement.set_track_enabled(2, false);
+        assert_eq!(arrangement.tracks[1].data.unwrap().unknown_12, [0]);
+        let on: Vec<bool> = (1..=4).map(|t| arrangement.track_enabled(t)).collect();
+        assert_eq!(on, [true, false, true, true]);
+        arrangement.set_track_enabled(2, true);
+        assert_eq!(arrangement.tracks[1].data.unwrap().unknown_12, [1]);
+
+        // A track without a 238 has no byte to switch, and neither has one
+        // the arrangement does not have.
+        let before = arrangement.clone();
+        arrangement.set_track_enabled(3, false);
+        arrangement.set_track_enabled(9, false);
+        assert_eq!(arrangement, before);
+    }
+
+    #[test]
+    fn a_paste_adds_selected_copies_at_the_end_of_the_list() {
+        let mut first = item(1, 0);
+        first.flags |= PlaylistItem::SELECTED;
+        first.id = 3;
+        let mut arrangement = arrangement(vec![first, item(2, 96)]);
+        let mut copy = item(4, 768);
+        copy.id = 3;
+        let mut deleted = item(1, 0);
+        deleted.source_id = u32::MAX;
+        let short = item(5, 0).shortened(32).unwrap();
+        arrangement.paste_items(&[copy, deleted, short]);
+        // The copy keeps its place and its track, and gets FL's "no number
+        // yet". A deleted record and an item of another size stay out.
+        assert_eq!(places(&arrangement), [(0, 1), (96, 2), (768, 4)]);
+        assert_eq!(arrangement.items[2].id, -1);
+        let selected: Vec<bool> = arrangement
+            .items
+            .iter()
+            .map(PlaylistItem::selected)
+            .collect();
+        assert_eq!(selected, [false, false, true]);
+
+        // Nothing to paste leaves the selection as it was.
+        let before = arrangement.clone();
+        arrangement.paste_items(&[deleted]);
         assert_eq!(arrangement, before);
     }
 

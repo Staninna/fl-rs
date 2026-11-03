@@ -29,7 +29,7 @@ mod windows;
 pub use model::NoteField;
 pub use windows::Window;
 
-use model::{Note, Project};
+use model::{Note, PlaylistItem, Project};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,6 +43,10 @@ pub enum Command {
     /// Open the project in this file. Like `Quit` it asks first when the
     /// open project has changes that are not saved.
     Open(PathBuf),
+    /// Start a new project, as File > New does: see
+    /// [`model::Project::blank`]. It asks first as `Open` does, and it has
+    /// no file until it is saved, so a `Save` of it asks for one.
+    New,
     /// Write the project to the file it came from, or was last saved to.
     Save,
     /// Write the project to this file.
@@ -491,7 +495,42 @@ pub enum Edit {
         pattern: u16,
         name: String,
     },
+    /// Add copies of these items to the playlist of the arrangement FL
+    /// shows, at the end of its list in this order, with every field kept:
+    /// what a paste and a duplicate do. They become the selection, in
+    /// place of the items that were selected. See
+    /// [`model::Arrangement::paste_items`] for the items left out.
+    PasteItems {
+        items: Vec<CopiedItem>,
+    },
+    /// Switch the playlist track with this number, where the first is 1,
+    /// on or off, in the arrangement FL shows: see
+    /// [`model::Track::enabled`]. A track the file has no 238 for is
+    /// skipped.
+    SetTrackEnabled {
+        track: u32,
+        enabled: bool,
+    },
+    /// Delete the pattern and every playlist item of it in every
+    /// arrangement: see [`model::Project::delete_pattern`].
+    DeletePattern {
+        pattern: u16,
+    },
 }
+
+/// A playlist item as it was copied: its whole record. Two are the same
+/// when their bytes are, so that an [`Edit`] that carries one compares as
+/// a whole, a gain that is NaN included.
+#[derive(Debug, Clone, Copy)]
+pub struct CopiedItem(pub PlaylistItem);
+
+impl PartialEq for CopiedItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bytes() == other.0.to_bytes()
+    }
+}
+
+impl Eq for CopiedItem {}
 
 impl Edit {
     /// Whether, in a drag, this edit takes the place of the edit of its
@@ -569,7 +608,41 @@ pub fn shell(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
     shortcuts(ui, state, out);
     egui::Panel::top("top bar").show(ui, |ui| top_bar::show(ui, state, out));
     egui::Panel::bottom("status").show(ui, |ui| status(ui, state));
+    let sent = out.len();
     egui::CentralPanel::no_frame().show(ui, |ui| windows::show(ui, state, out));
+    select_clone(ui.ctx(), &state.project, &out[sent..]);
+}
+
+/// Select the channel that a "Clone" of the channel rack's menu makes, in
+/// the rack and so in the piano roll: the one after the last, where
+/// [`model::Project::clone_channel`] puts it. This runs after the rack has
+/// kept its selection for the frame, and only for a clone the model makes:
+/// of a channel that is not an automation clip, in a project whose
+/// channels have events.
+fn select_clone(ctx: &egui::Context, project: &Project, sent: &[Command]) {
+    for command in sent {
+        let Command::Edit {
+            edit: Edit::CloneChannel { channel },
+            ..
+        } = command
+        else {
+            continue;
+        };
+        let clones = project
+            .channel(*channel)
+            .is_some_and(|channel| channel.kind != Some(model::ChannelKind::Automation));
+        let placed = project
+            .channels
+            .iter()
+            .any(|channel| !channel.order.is_empty());
+        let last = project.channels.iter().map(|channel| channel.index).max();
+        if let Some(index) = last.and_then(|last| last.checked_add(1))
+            && clones
+            && placed
+        {
+            channel_rack::select_channel(ctx, index);
+        }
+    }
 }
 
 /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo, Ctrl+S saves. On a Mac
