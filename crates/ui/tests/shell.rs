@@ -166,6 +166,37 @@ fn the_pattern_selector_lists_the_patterns() {
     assert_eq!(harness.state(), &[Command::SelectPattern(2)]);
 }
 
+#[test]
+fn the_keypad_s_minus_and_plus_step_through_the_patterns_there_are() {
+    // Patterns 1, 2 and 5, with 2 selected.
+    let mut project = fixture();
+    project.patterns.push(Pattern {
+        index: 5,
+        ..Pattern::default()
+    });
+    let mut harness = harness(UiState {
+        project: Arc::new(project),
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    for key in [egui::Key::Minus, egui::Key::Plus] {
+        harness.key_press(key);
+        harness.run();
+    }
+    let want = [Command::SelectPattern(1), Command::SelectPattern(5)];
+    assert_eq!(harness.state(), &want);
+
+    // There is no pattern before the first.
+    let mut harness = crate::harness(state());
+    harness.run();
+    harness.key_press(egui::Key::Minus);
+    harness.run();
+    harness.key_press(egui::Key::Plus);
+    harness.run();
+    assert_eq!(harness.state(), &[Command::SelectPattern(2)]);
+}
+
 /// The shell in frames short enough that two clicks make a double click:
 /// the harness runs a frame for every event, and a click is four events.
 fn quick_harness(state: UiState) -> Harness<'static, Vec<Command>> {

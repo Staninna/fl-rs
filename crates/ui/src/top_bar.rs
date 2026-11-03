@@ -12,6 +12,11 @@
 //! items from every arrangement, in one undo step, and selects the
 //! pattern before it, or the one after it when it was the first.
 //!
+//! The numeric keypad's minus and plus select the pattern before the
+//! selected one and the one after it that the project has, as FL's do
+//! (inferred). egui does not tell the keypad's keys from the others, so
+//! the minus key and a plus typed on the main keyboard do the same.
+//!
 //! A drag up or down on the tempo changes it, a BPM a point and a tenth of
 //! that with Ctrl held, and a double click on it opens a field to type it
 //! in. Enter and a click elsewhere take what was typed, and Escape leaves
@@ -256,6 +261,15 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     // is shown.
     let rack = crate::windows::shown(ui.ctx(), crate::windows::Window::ChannelRack);
     let mut rename = !rack && pressed(ui, Key::F2);
+    let earlier = patterns.iter().rev().find(|index| **index < state.pattern);
+    let later = patterns.iter().find(|index| **index > state.pattern);
+    for (key, next) in [(Key::Minus, earlier), (Key::Plus, later)] {
+        if pressed(ui, key)
+            && let Some(next) = next
+        {
+            out.push(Command::SelectPattern(*next));
+        }
+    }
     let (mut clone, mut delete) = (false, false);
     let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")
