@@ -12,7 +12,7 @@
 //!
 //! A right-click on a strip or on its name opens a menu with what the
 //! strip has no room for: the solo, the insert's polarity, the swap of its
-//! left and right and its stereo separation.
+//! left and right, its stereo separation and its colour.
 //!
 //! The bottom of a strip is what the selected insert sends to it, as FL
 //! has it: an arrow that makes the route or removes it, and above a lit
@@ -33,7 +33,7 @@
 
 use crate::playlist::{rgb, text_on};
 use crate::top_bar::meter_fraction;
-use crate::widgets::{Knob, drag_value};
+use crate::widgets::{Knob, colour_menu, drag_value};
 use crate::{Command, Edit, UiState};
 use egui::{
     Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, Response, Sense, Shape, Stroke,
@@ -432,8 +432,8 @@ impl Strips<'_> {
 
     /// The menu a right-click on a strip or on its name opens: the
     /// insert's solo, and the parts of it that the strip has no room for,
-    /// its polarity, the swap of its left and right and its stereo
-    /// separation.
+    /// its polarity, the swap of its left and right, its stereo
+    /// separation and its colour.
     fn menu(&self, ui: &mut Ui, index: u16, name: &str, out: &mut Vec<Command>) {
         let mix = self.project.insert_mix(index);
         if ui.button("Solo").clicked() {
@@ -476,6 +476,15 @@ impl Strips<'_> {
             }
             ui.label(format!("Stereo: {}", separation_hint(separation)));
         });
+        ui.separator();
+        let colour = mix.insert().and_then(|insert| insert.color);
+        if let Some(color) = colour_menu(ui, colour) {
+            let colour = Edit::SetInsertColor {
+                insert: index,
+                color,
+            };
+            out.push(edit(colour, None));
+        }
     }
 
     /// The plate with the insert's name, which a click turns into a field

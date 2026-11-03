@@ -1,6 +1,7 @@
-//! Widgets that more than one window draws: the knob, and the drag that
-//! turns it.
+//! Widgets that more than one window draws: the knob, the drag that
+//! turns it, and the menu of colours.
 
+use crate::playlist::text_on;
 use egui::{
     Color32, Context, PointerButton, Pos2, Response, Sense, Shape, Stroke, Ui, Vec2, WidgetInfo,
     pos2,
@@ -15,6 +16,46 @@ const FINE: f32 = 0.1;
 /// Where a knob's pointer is at the low end of the range and how far it
 /// turns to the high end, in radians clockwise from straight up.
 const SWEEP: (f32, f32) = (-0.75 * PI, 1.5 * PI);
+
+/// The colours a channel's menu and a strip's menu offer, as red, green
+/// and blue. FL has a picker with palettes of its own, which were not
+/// read: these are ours.
+const PALETTE: [(&str, [u8; 3]); 8] = [
+    ("Red", [208, 60, 60]),
+    ("Orange", [224, 128, 48]),
+    ("Yellow", [220, 200, 70]),
+    ("Green", [90, 180, 90]),
+    ("Teal", [60, 170, 170]),
+    ("Blue", [70, 110, 210]),
+    ("Purple", [150, 90, 200]),
+    ("Pink", [220, 100, 160]),
+];
+
+/// A colour of [`PALETTE`] as `model` keeps one: an RGBA u32 with red in
+/// the low byte.
+fn palette_color([red, green, blue]: [u8; 3]) -> u32 {
+    u32::from_le_bytes([red, green, blue, 0])
+}
+
+/// A "Colour" entry in a menu, with a button in each colour of
+/// [`PALETTE`] under it, the one of `current` lit. Gives the colour that
+/// was clicked, and closes the menu then.
+pub(crate) fn colour_menu(ui: &mut Ui, current: Option<u32>) -> Option<u32> {
+    let mut picked = None;
+    ui.menu_button("Colour", |ui| {
+        for (label, colour) in PALETTE {
+            let fill = Color32::from_rgb(colour[0], colour[1], colour[2]);
+            let text = egui::RichText::new(label).color(text_on(fill));
+            let color = palette_color(colour);
+            let button = egui::Button::new(text).fill(fill);
+            if ui.add(button.selected(current == Some(color))).clicked() {
+                picked = Some(color);
+                ui.close();
+            }
+        }
+    });
+    picked
+}
 
 /// A number for a drag that starts now, for the `drag_id` of its edits.
 /// The windows share the count, so that two drags never have one number.
@@ -213,6 +254,15 @@ mod tests {
         assert!(near(arc[0], pos2(10.0, 5.0)) && near(arc[13], pos2(15.0, 10.0)));
         // An arc from an angle to itself is still a line to draw.
         assert_eq!(super::arc(centre, 5.0, 1.0, 1.0).len(), 2);
+    }
+
+    #[test]
+    fn a_palette_colour_has_red_in_the_low_byte() {
+        assert_eq!(palette_color([0x46, 0x6e, 0xd2]), 0x00d2_6e46);
+        assert_eq!(crate::playlist::rgb(palette_color(PALETTE[0].1)), {
+            let [red, green, blue] = PALETTE[0].1;
+            Color32::from_rgb(red, green, blue)
+        });
     }
 
     #[test]

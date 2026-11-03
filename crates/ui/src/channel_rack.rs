@@ -31,7 +31,7 @@
 
 use crate::browser::SampleDrag;
 use crate::playlist::{rgb, text_on};
-use crate::widgets::{Knob, drag_value, next_drag_id};
+use crate::widgets::{Knob, colour_menu, drag_value, next_drag_id};
 use crate::{Command, Edit, Grid, UiState};
 use egui::{
     Align2, Color32, Context, FontId, Key, Modifiers, PointerButton, Rect, Response, Sense, Stroke,
@@ -63,24 +63,6 @@ const LEVEL_TOP: i32 = 12_800;
 const VELOCITY_TOP: f32 = 128.0;
 /// The colour of an enabled channel's LED and of a knob's arc.
 const LIT: Color32 = Color32::from_rgb(120, 220, 110);
-/// The colours the channel's menu offers, as red, green and blue. FL has
-/// a picker with its own palette, which was not read: these are ours.
-const PALETTE: [(&str, [u8; 3]); 8] = [
-    ("Red", [208, 60, 60]),
-    ("Orange", [224, 128, 48]),
-    ("Yellow", [220, 200, 70]),
-    ("Green", [90, 180, 90]),
-    ("Teal", [60, 170, 170]),
-    ("Blue", [70, 110, 210]),
-    ("Purple", [150, 90, 200]),
-    ("Pink", [220, 100, 160]),
-];
-
-/// A colour of [`PALETTE`] as `model` keeps one: red in the low byte.
-fn palette_color([red, green, blue]: [u8; 3]) -> u32 {
-    u32::from_le_bytes([red, green, blue, 0])
-}
-
 /// What the rack keeps from one frame to the next.
 #[derive(Clone, Default)]
 struct Memory {
@@ -654,25 +636,13 @@ impl Rack<'_> {
             out.push(edit(Edit::CloneChannel { channel: index }, None));
             ui.close();
         }
-        ui.menu_button("Colour", |ui| {
-            for (label, colour) in PALETTE {
-                let fill = Color32::from_rgb(colour[0], colour[1], colour[2]);
-                let text = egui::RichText::new(label).color(text_on(fill));
-                let button = egui::Button::new(text).fill(fill);
-                let color = palette_color(colour);
-                let chosen = channel.color == Some(color);
-                if ui.add(button.selected(chosen)).clicked() {
-                    out.push(edit(
-                        Edit::SetChannelColor {
-                            channel: index,
-                            color,
-                        },
-                        None,
-                    ));
-                    ui.close();
-                }
-            }
-        });
+        if let Some(color) = colour_menu(ui, channel.color) {
+            let colour = Edit::SetChannelColor {
+                channel: index,
+                color,
+            };
+            out.push(edit(colour, None));
+        }
         ui.separator();
         let steps = takes_notes(channel) && !has_long_notes(self.pattern, index);
         for (label, by) in [("Shift steps left", -1), ("Shift steps right", 1)] {

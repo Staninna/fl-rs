@@ -1,7 +1,7 @@
 //! What the mixer window changes: an insert's volume, pan, stereo
 //! separation and send levels and a slot's switch and mix level, which are
 //! 225 records, and an insert's routes, its switch, its polarity, its swap
-//! of left and right and its name, which are its own events.
+//! of left and right, its name and its colour, which are its own events.
 //!
 //! [`InsertMix`](crate::InsertMix) reads every value set here, and each
 //! setter leaves the project alone when the value is the one that reads
@@ -392,6 +392,46 @@ impl Project {
         }
         routing[byte] = u8::from(on);
         write_field(&mut insert.order, Id::InsertRouting);
+    }
+
+    /// Give the insert a colour, an RGBA u32 with red in the low byte, in
+    /// its 149 `InsertID.Color`, which an insert without one gets in front
+    /// of the first of its events that FL writes after it.
+    ///
+    /// The loader brightens a colour from before 11.5.9 by 36 in each byte
+    /// (`docs/event-dictionary.md`, row 149), so such a file gets the
+    /// colour less 36 in each byte, or 0 where that is below. One from
+    /// before 4.0.1 has every insert in the default colour and is not
+    /// changed. The 149 marks the colour the insert's own unless it is the
+    /// default 0x716c63, and a 42 `InsertColorIsCustom` behind it says the
+    /// last word, so an insert with a 42 has it set.
+    pub fn set_insert_color(&mut self, insert: u16, color: u32) {
+        let version = self.version();
+        if version < 4_000_001 {
+            return;
+        }
+        let stored = if version < 11_005_009 {
+            u32::from_le_bytes(color.to_le_bytes().map(|byte| byte.saturating_sub(36)))
+        } else {
+            color
+        };
+        let Some(insert) = self.insert_to_edit(insert) else {
+            return;
+        };
+        if insert.color == Some(stored) && insert.color_is_custom != Some(false) {
+            return;
+        }
+        insert.color = Some(stored);
+        write_field(&mut insert.order, Id::InsertColor);
+        let custom = Id::InsertColorIsCustom;
+        let has = |placed: &Placed| match &placed.item {
+            Item::Field(id) => *id == custom,
+            Item::Raw(e) => e.id == custom.0,
+        };
+        if insert.order.iter().any(has) {
+            insert.color_is_custom = Some(true);
+            write_field(&mut insert.order, custom);
+        }
     }
 
     /// Name the insert, in its 204, which an insert without one gets in
@@ -969,6 +1009,58 @@ mod tests {
         want.remove(name);
         assert_eq!(written(&p), want);
         assert_eq!(p.inserts[2].name, None);
+    }
+
+    #[test]
+    fn a_colour_is_the_149_in_front_of_the_name_and_the_236() {
+        let file = file(NEW, &[]);
+        let mut p = project(&file);
+        p.set_insert_color(1, 0x00d2_6e46);
+        p.set_insert_color(2, 0x0040_60d0);
+        p.set_insert_color(9, 0x0040_60d0);
+        let colour = |value: u32| ev(Id::InsertColor, &value.to_le_bytes());
+        // Insert 2's 204 comes after its 149, and insert 1 has no 204.
+        let mut want = file.events.clone();
+        let name = place(&file.events, Id::InsertName);
+        want.insert(name, colour(0x0040_60d0));
+        let flags = file.events.iter().position(|e| e.id == 147).unwrap() + 1;
+        want.insert(flags, colour(0x00d2_6e46));
+        assert_eq!(written(&p), want);
+        let read = from_flp(&to_flp(&p).unwrap());
+        let colours: Vec<_> = read.inserts.iter().map(|i| i.color).collect();
+        assert_eq!(
+            colours,
+            [None, Some(0x00d2_6e46), Some(0x0040_60d0), None, None]
+        );
+
+        // An insert with a 149 and a 42 that says the colour is not its
+        // own gets both, and the same colour again changes nothing.
+        let mut file = self::file(NEW, &[]);
+        let at = file.events.iter().position(|e| e.id == 147).unwrap() + 1;
+        let custom = |on: u8| ev(Id::InsertColorIsCustom, &[on]);
+        file.events.splice(at..at, [colour(0x0071_6c63), custom(0)]);
+        let mut p = project(&file);
+        p.set_insert_color(1, 0x00d2_6e46);
+        let mut want = file.events.clone();
+        want[at] = colour(0x00d2_6e46);
+        want[at + 1] = custom(1);
+        assert_eq!(written(&p), want);
+        let before = p.clone();
+        p.set_insert_color(1, 0x00d2_6e46);
+        assert!(p == before);
+    }
+
+    #[test]
+    fn an_old_file_gets_the_colour_its_loader_brightens() {
+        // Before 11.5.9 the loader adds 36 to each byte.
+        let mut p = project(&file("11.0.3", &[]));
+        p.set_insert_color(1, 0x00d2_6e20);
+        assert_eq!(p.inserts[1].color, Some(0x00ae_4a00));
+        // Before 4.0.1 it has the default colour whatever the file says.
+        let mut p = project(&file("4.0.0", &[]));
+        let before = p.clone();
+        p.set_insert_color(1, 0x00d2_6e46);
+        assert!(p == before);
     }
 
     #[test]

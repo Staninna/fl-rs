@@ -415,6 +415,12 @@ pub enum Edit {
         insert: u16,
         name: String,
     },
+    /// Give the insert a colour: an RGBA u32 with red in the low byte, as
+    /// `model` keeps a colour.
+    SetInsertColor {
+        insert: u16,
+        color: u32,
+    },
     /// Make or remove the route from insert `from` to insert `to`. A route
     /// from the master, or one that would lead an insert back into itself,
     /// is not made.

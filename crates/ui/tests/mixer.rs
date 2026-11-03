@@ -367,6 +367,23 @@ fn the_strip_s_menu_sets_polarity_swap_and_separation() {
 }
 
 #[test]
+fn the_strip_s_menu_colours_the_insert() {
+    let mut harness = harness();
+    harness.get_by_label("Reverb strip").click_secondary();
+    harness.run();
+    harness.get_by_label_contains("Colour").click();
+    harness.run();
+    harness.get_by_label("Teal").click();
+    harness.run();
+    let teal = edit(Edit::SetInsertColor {
+        insert: 4,
+        color: 0x00aa_aa3c,
+    });
+    assert_eq!(harness.state(), &[teal]);
+    assert!(harness.query_by_label("Teal").is_none());
+}
+
+#[test]
 fn a_click_and_the_arrows_select_the_insert() {
     let mut harness = harness();
     assert!(harness.query_by_label("Master slots").is_some());

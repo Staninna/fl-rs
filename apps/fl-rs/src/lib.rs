@@ -275,6 +275,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         }
         Edit::SetInsertSwapped { insert, swapped } => project.set_insert_swapped(insert, swapped),
         Edit::SetInsertName { insert, ref name } => project.set_insert_name(insert, name),
+        Edit::SetInsertColor { insert, color } => project.set_insert_color(insert, color),
         Edit::SetRoute { from, to, on } => project.set_route(from, to, on),
         Edit::SetSendLevel { from, to, level } => project.set_send_level_raw(from, to, level),
         Edit::SetSlotEnabled {
