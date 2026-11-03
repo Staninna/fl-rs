@@ -18,6 +18,13 @@ use crate::Pattern;
 use flp::event::layout::Note;
 use std::collections::BTreeMap;
 
+/// The most notes one call of [`Pattern::chop_notes`] or
+/// [`Pattern::arpeggiate_notes`] makes: 2^16, as many as the step
+/// sequencer shows steps. A note from a file can be 2^31 ticks long, and
+/// cut a tick at a time it would ask for billions of notes, so a call that
+/// would make more is turned down whole. FL's own limit is not known.
+const MOST_PIECES: u64 = 1 << 16;
+
 impl Pattern {
     /// Add notes of this channel, each `length` ticks long, at the
     /// positions and on the keys given, as [`Pattern::add_note`] adds one.
@@ -149,10 +156,21 @@ impl Pattern {
     /// Cut each note into pieces `step` ticks long from its start, the
     /// last piece being what is left. FL's Chop, at its default of the
     /// snap's length. A step, and a note no longer than `step`, stay whole.
+    /// A chop into more than [`MOST_PIECES`] pieces changes nothing.
     pub fn chop_notes(&mut self, notes: &[usize], step: u64) {
         let Ok(step) = i32::try_from(step.max(1)) else {
             return;
         };
+        let pieces = self.live(notes).into_iter().map(|id| {
+            let note = &self.notes[id];
+            match note.length > step {
+                true => (note.length as u64).div_ceil(step as u64),
+                false => 0,
+            }
+        });
+        if pieces.sum::<u64>() > MOST_PIECES {
+            return;
+        }
         let mut pieces = Vec::new();
         self.each_live(notes, |note| {
             if note.length <= step {
@@ -180,22 +198,32 @@ impl Pattern {
     /// longest note. A run note is a copy of the chord note on its key.
     /// This is FL's Arpeggiator at its default pattern, up, over the
     /// chord's own keys, with each note as long as the time between them.
-    /// A chord of steps lasts one `step` per note.
+    /// A chord of steps lasts one `step` per note. Runs of more than
+    /// [`MOST_PIECES`] notes in all change nothing.
     pub fn arpeggiate_notes(&mut self, notes: &[usize], step: u64) {
         let Ok(step) = i32::try_from(step.max(1)) else {
             return;
         };
+        let chords = self.chords(notes);
+        let span = |chord: &[usize]| {
+            let longest = chord.iter().map(|id| self.notes[*id].length).max();
+            match longest.unwrap_or(0) {
+                longest if longest > 0 => longest,
+                _ => step.saturating_mul(i32::try_from(chord.len()).unwrap_or(i32::MAX)),
+            }
+        };
+        let notes = chords
+            .iter()
+            .map(|chord| (span(chord) as u64).div_ceil(step as u64));
+        if notes.sum::<u64>() > MOST_PIECES {
+            return;
+        }
         let mut runs = Vec::new();
         let mut gone = Vec::new();
-        for chord in self.chords(notes) {
+        for chord in chords {
+            let span = span(&chord);
             let keys: Vec<Note> = chord.iter().map(|id| self.notes[*id]).collect();
             let start = keys[0].position;
-            let longest = keys.iter().map(|note| note.length).max().unwrap_or(0);
-            let span = if longest > 0 {
-                longest
-            } else {
-                step.saturating_mul(keys.len() as i32)
-            };
             let mut offset = 0;
             let mut turn = 0;
             while offset < span {
@@ -225,7 +253,8 @@ impl Pattern {
             for (nth, id) in chord.into_iter().enumerate() {
                 let note = &mut self.notes[id];
                 let by = delay.saturating_mul(nth as i64);
-                let position = (i64::from(note.position) + by).min(i64::from(i32::MAX));
+                let position = i64::from(note.position).saturating_add(by);
+                let position = position.min(i64::from(i32::MAX));
                 let shift = position - i64::from(note.position);
                 if note.length > 0 {
                     note.length = (i64::from(note.length) - shift).max(1) as i32;
@@ -248,12 +277,14 @@ impl Pattern {
         if keys == 0 {
             return;
         }
-        let top = Self::TOP_KEY;
-        let fits = |key: i16| (0..=top).contains(&key) && keys & (1 << key.rem_euclid(12)) != 0;
+        let top = i32::from(Self::TOP_KEY);
+        let fits = |key: i32| (0..=top).contains(&key) && keys & (1 << key.rem_euclid(12)) != 0;
         self.each_live(notes, |note| {
-            let near = (0..12).flat_map(|by| [note.key - by, note.key + by]);
+            // In i32: a key from a file can be either end of an i16.
+            let key = i32::from(note.key);
+            let near = (0..12).flat_map(|by| [key - by, key + by]);
             if let Some(key) = near.into_iter().find(|key| fits(*key)) {
-                note.key = key;
+                note.key = key as i16;
             }
         });
     }
@@ -388,12 +419,28 @@ impl Pattern {
         }
     }
 
-    /// Put each note behind the notes that start where it does or before.
-    fn insert_all(&mut self, notes: Vec<Note>) {
-        for note in notes {
-            let at = self.notes.partition_point(|n| n.position <= note.position);
-            self.notes.insert(at, note);
+    /// Put each note behind the notes that start where it does or before,
+    /// and the new notes that start together in the order they come.
+    ///
+    /// One merge of the two lists, not an insert per note: a chop can
+    /// make [`MOST_PIECES`] notes, and inserts would move every note
+    /// behind each of them.
+    fn insert_all(&mut self, mut notes: Vec<Note>) {
+        if notes.is_empty() {
+            return;
         }
+        // Stable, so notes that start together keep their order.
+        notes.sort_by_key(|note| note.position);
+        let mut new = notes.into_iter().peekable();
+        let old = std::mem::take(&mut self.notes);
+        self.notes.reserve(old.len() + new.len());
+        for note in old {
+            while let Some(earlier) = new.next_if(|new| new.position < note.position) {
+                self.notes.push(earlier);
+            }
+            self.notes.push(note);
+        }
+        self.notes.extend(new);
     }
 }
 
@@ -410,7 +457,9 @@ pub fn slice_line_at(from: (u64, i32), to: (u64, i32), key: i32, step: u64) -> O
     let tick = if k0 == k1 {
         t0 as f64
     } else {
-        let along = f64::from(key - k0) / f64::from(k1 - k0);
+        // In f64: keys this is given can be any i32, and their difference
+        // overflows one.
+        let along = (f64::from(key) - f64::from(k0)) / (f64::from(k1) - f64::from(k0));
         t0 as f64 + (t1 as f64 - t0 as f64) * along
     };
     let step = step.max(1) as f64;
@@ -726,5 +775,39 @@ mod tests {
         assert_eq!(notes.notes[5].key, 130);
         notes.snap_notes_to_scale(&[0, 1, 2, 3], 0);
         assert_eq!(notes.notes[3].key, 65);
+    }
+
+    #[test]
+    fn snap_to_scale_leaves_keys_at_the_ends_of_their_type_alone() {
+        let mut notes = pattern(&[note(0, 24, i16::MAX), note(0, 24, i16::MIN)]);
+        notes.snap_notes_to_scale(&[0, 1], 0b1010_1011_0101);
+        assert_eq!(placed(&notes), [(0, 24, i16::MAX), (0, 24, i16::MIN)]);
+    }
+
+    #[test]
+    fn a_strum_of_the_longest_delay_stops_at_the_end_of_time() {
+        let mut notes = pattern(&[note(10, 96, 60), note(10, 96, 64)]);
+        notes.strum_notes(&[0, 1], u64::MAX);
+        assert_eq!(placed(&notes), [(10, 96, 60), (i32::MAX, 1, 64)]);
+    }
+
+    #[test]
+    fn a_chop_or_an_arpeggio_into_billions_of_notes_changes_nothing() {
+        let long = [note(0, i32::MAX, 60), note(0, i32::MAX, 64)];
+        let mut notes = pattern(&long);
+        notes.chop_notes(&[0, 1], 1);
+        assert_eq!(notes.notes, long);
+        notes.arpeggiate_notes(&[0, 1], 1);
+        assert_eq!(notes.notes, long);
+        // As many as the step sequencer shows is still made.
+        let mut notes = pattern(&[note(0, 1 << 16, 60)]);
+        notes.chop_notes(&[0], 1);
+        assert_eq!(notes.notes.len(), 1 << 16);
+    }
+
+    #[test]
+    fn a_slanted_line_between_keys_at_the_ends_of_an_i32_crosses_the_middle() {
+        let at = slice_line_at((0, i32::MIN), (100, i32::MAX), 0, 1);
+        assert_eq!(at, Some(50));
     }
 }

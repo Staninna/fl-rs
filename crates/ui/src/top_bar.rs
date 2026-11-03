@@ -398,14 +398,17 @@ fn tempo(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let response = ui.interact(plate.rect, id.with("drag"), Sense::click_and_drag());
     response.widget_info(|| WidgetInfo::slider(true, bpm, "Tempo"));
     let range = *TEMPO_MILLI.start() as i32..=*TEMPO_MILLI.end() as i32;
+    // A drag starts from the tempo held to FL's range: a file can hold
+    // any u32, and one past i32's range would wrap to below the range's
+    // start.
+    let milli = milli.clamp(*TEMPO_MILLI.start(), *TEMPO_MILLI.end()) as i32;
     if response.double_clicked() {
         let field = TypedTempo {
             text: format!("{bpm:.3}"),
             focused: false,
         };
         ui.data_mut(|data| data.insert_temp(id, field));
-    } else if let Some((milli, drag)) = drag_value(ui, &response, milli as i32, range, TEMPO_TRAVEL)
-    {
+    } else if let Some((milli, drag)) = drag_value(ui, &response, milli, range, TEMPO_TRAVEL) {
         out.push(set(milli as u32, Some(drag)));
     }
     let hint = "Tempo: drag up or down, with Ctrl for fine steps, or double-click to type it";

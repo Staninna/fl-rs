@@ -452,6 +452,9 @@ enum Gesture {
 impl Gesture {
     /// The edit that takes the notes to where the pointer is, snapped to
     /// `step` ticks, for the gestures that say one thing over and over.
+    ///
+    /// The sums saturate: a pointer far off a view zoomed out to a note at
+    /// the end of time is at a tick past what an i64 holds.
     fn edit(&self, tick: f32, key: i32, step: u64) -> Option<Edit> {
         match self {
             Gesture::Move {
@@ -461,8 +464,8 @@ impl Gesture {
                 key: from_key,
             } => Some(Edit::MoveNotes {
                 ids: ids.clone(),
-                delta_ticks: snap(*start as f32 + tick - from, step) - start,
-                delta_keys: key - from_key,
+                delta_ticks: snap(*start as f32 + tick - from, step).saturating_sub(*start),
+                delta_keys: key.saturating_sub(*from_key),
             }),
             Gesture::Resize {
                 ids,
@@ -471,12 +474,12 @@ impl Gesture {
                 length,
                 tick: from,
             } => {
-                let new = snap(*end as f32 + tick - from, step) - start;
+                let new = snap(*end as f32 + tick - from, step).saturating_sub(*start);
                 // An end dragged to the start or past it leaves one step.
                 let new = if new < 1 { step as i64 } else { new };
                 Some(Edit::ResizeNotes {
                     ids: ids.clone(),
-                    delta_ticks: new - length,
+                    delta_ticks: new.saturating_sub(*length),
                 })
             }
             Gesture::Draw {
@@ -484,7 +487,8 @@ impl Gesture {
                 position,
                 key,
             } => {
-                let length = snap(tick, step) - *position as i64;
+                let from = i64::try_from(*position).unwrap_or(i64::MAX);
+                let length = snap(tick, step).saturating_sub(from);
                 Some(Edit::AddNote {
                     channel: *channel,
                     position: *position,
@@ -587,9 +591,11 @@ impl View {
     }
 }
 
-/// The start of the grid's step that a tick is in.
+/// The start of the grid's step that a tick is in. A tick past what a
+/// u64 holds, which a view scrolled out to a note at the end of time can
+/// be at, gives the last step there is.
 fn floor(tick: f32, step: u64) -> u64 {
-    (tick.max(0.0) / step as f32).floor() as u64 * step
+    ((tick.max(0.0) / step as f32).floor() as u64).saturating_mul(step)
 }
 
 fn is_black(key: i32) -> bool {
@@ -689,7 +695,7 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         let first = memory.clipboard.iter().map(|note| note.position);
         let first = i64::from(first.min().unwrap_or(0));
         let shift = if state.playing && !state.song_mode {
-            snap(state.position as f32, step) - first
+            snap(state.position as f32, step).saturating_sub(first)
         } else {
             after(&memory.clipboard, step, sixteenth)
         };
@@ -811,10 +817,12 @@ fn after(notes: &[Note], step: u64, sixteenth: i64) -> i64 {
     (span.max(1) + step - 1) / step * step
 }
 
-/// Copies of the notes `shift` ticks later, for this channel.
+/// Copies of the notes `shift` ticks later, for this channel, each at
+/// the end of time at most.
 fn shifted(notes: &[Note], shift: i64, channel: u16) -> Vec<Note> {
     let moved = notes.iter().map(|note| {
-        let position = (i64::from(note.position) + shift).clamp(0, i64::from(i32::MAX));
+        let position = i64::from(note.position).saturating_add(shift);
+        let position = position.clamp(0, i64::from(i32::MAX));
         Note {
             position: position as i32,
             channel,
@@ -1898,11 +1906,21 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_at_a_far_shift_lands_at_the_end_of_time() {
+        let notes = [note(10, 24, 60), note(i32::MAX, 24, 62)];
+        let pasted = shifted(&notes, i64::MAX, 3);
+        let places: Vec<(i32, u16)> = pasted.iter().map(|n| (n.position, n.channel)).collect();
+        assert_eq!(places, [(i32::MAX, 3), (i32::MAX, 3)]);
+        assert_eq!(shifted(&notes, i64::MIN, 3)[1].position, 0);
+    }
+
+    #[test]
     fn a_click_starts_a_note_at_the_step_it_is_in() {
         assert_eq!(floor(47.9, 24), 24);
         assert_eq!(floor(48.0, 24), 48);
         assert_eq!(floor(-5.0, 24), 0);
         assert_eq!(floor(47.9, 1), 47);
+        assert_eq!(floor(f32::MAX, 24), u64::MAX);
     }
 
     #[test]
