@@ -118,6 +118,42 @@ impl Project {
         }
     }
 
+    /// A new project, for File > New: PPQ 96, a 199 of FL 24.2.99, 120 BPM
+    /// in a 156, and one sampler channel named "Sampler" that plays no
+    /// sample yet, with the events of the one channel in FL's own
+    /// `Empty.flp` ([`Channel::new_sampler`]), playing into the master.
+    ///
+    /// The rest of that template is not known here, so this has no mixer,
+    /// no arrangement and no pattern: FL's 103, its inserts, its 99 and its
+    /// tracks are left out, and the mixer window shows none. The edits put
+    /// a pattern, a step, a note and a channel in as they do in a file,
+    /// and the playlist stays empty. That FL starts its empty project at
+    /// 120 BPM and PPQ 96 is inferred.
+    pub fn blank() -> Self {
+        let mut project = Project::new(flp::Header {
+            format: 0,
+            channel_count: 1,
+            ppq: 96,
+        });
+        project.writer_version = Some("24.2.99.4720".to_owned());
+        project.tempo_milli = Some(120_000);
+        project.order = [Id::FLVersion, Id::Tempo]
+            .into_iter()
+            .enumerate()
+            .map(|(pos, id)| Placed {
+                pos,
+                item: Item::Field(id),
+            })
+            .collect();
+        let mut channel = Channel::new_sampler(0, "Sampler", "", false, 2);
+        // The template's channel has no 196.
+        channel.sample_path = None;
+        let path = Item::Field(Id::SamplePath);
+        channel.order.retain(|placed| placed.item != path);
+        project.channels.push(channel);
+        project
+    }
+
     /// Tempo in BPM: 156 divided by 1000, or for a file that only has the
     /// old pair, 66 plus 93 thousandths.
     pub fn tempo(&self) -> Option<f64> {
@@ -323,6 +359,35 @@ mod tests {
 
     fn item(position: i32, length: i32) -> PlaylistItem {
         PlaylistItem::new(ItemSource::Pattern(1), position, length)
+    }
+
+    #[test]
+    fn a_blank_project_reads_back_as_itself_and_takes_the_edits() {
+        let blank = Project::blank();
+        let file = to_flp(&blank).unwrap();
+        let read = crate::from_flp(&file);
+        assert_eq!(to_flp(&read), Ok(file.clone()));
+        assert_eq!(read.tempo(), Some(120.0));
+        assert_eq!(read.header.channel_count, 1);
+        let channel = &read.channels[..];
+        assert_eq!(channel.len(), 1);
+        assert_eq!(channel[0].kind, Some(crate::ChannelKind::Sampler));
+        assert_eq!(channel[0].name.as_deref(), Some("Sampler"));
+        assert_eq!(
+            (channel[0].sample_path.as_deref(), channel[0].insert()),
+            (None, Some(0))
+        );
+        assert!(read.patterns.is_empty() && read.arrangements.is_empty());
+
+        // A step makes pattern 1, and a sample makes a second channel.
+        let mut edited = read;
+        edited.pattern_to_edit(1).set_step(0, 0, true, 96);
+        assert_eq!(edited.add_sampler_channel("kick.wav"), Some(1));
+        let again = crate::from_flp(&to_flp(&edited).unwrap());
+        assert!(again.pattern(1).unwrap().steps(0, 96)[0]);
+        let names: Vec<_> = again.channels.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names, [Some("Sampler".to_owned()), Some("kick".to_owned())]);
+        assert_eq!(again.header.channel_count, 2);
     }
 
     fn project(items: &[PlaylistItem]) -> Project {

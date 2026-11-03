@@ -403,6 +403,56 @@ fn what_goes_wrong_is_kept_for_the_window() {
 }
 
 #[test]
+fn file_new_opens_a_blank_project_to_edit_save_and_play() {
+    let dir = Dir::new("new");
+    let mut app = App::new(None);
+    app.apply(Command::New);
+    // A new project is open with no file, and has nothing to save yet.
+    assert!(app.path().is_none() && !app.is_modified());
+    if let Some(error) = app.error() {
+        assert!(error.starts_with("no sound: "), "{error}");
+    }
+    let names: Vec<_> = app
+        .project()
+        .channels
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(names, [Some("Sampler".to_owned())]);
+    assert_eq!(app.project().tempo(), Some(120.0));
+
+    // It takes an edit, which undoes, and plays it from the stream.
+    edit(&mut app, set_step(4, true), None);
+    assert!(app.is_modified());
+    assert_eq!(lit(app.project()), [4]);
+    if app.has_audio() {
+        assert_eq!(app.error(), None);
+        app.apply(Command::Play);
+        assert_eq!(app.error(), None);
+        app.apply(Command::Stop);
+    }
+    app.apply(Command::Undo);
+    assert!(!app.is_modified() && lit(app.project()).is_empty());
+    app.apply(Command::Redo);
+
+    // Saved, it has the file, and reads back with the step.
+    let path = dir.0.join("new.flp");
+    app.apply(Command::SaveAs(path.clone()));
+    assert_eq!(app.error(), None);
+    assert_eq!(app.path(), Some(path.as_path()));
+    assert!(!app.is_modified());
+    let saved = fl_rs::read(&path).unwrap();
+    assert_eq!(lit(&saved), [4]);
+    // The sampler has no sample, so the step is silent.
+    assert_eq!(rendered(&saved, &dir.0).0, 0.0);
+
+    // With nothing to save, the next New replaces it at once.
+    app.apply(Command::New);
+    assert!(app.path().is_none());
+    assert!(lit(app.project()).is_empty());
+}
+
+#[test]
 fn play_moves_the_clock_and_stop_takes_it_back() {
     let dir = Dir::new("play");
     let path = write_fixture(&dir.0);

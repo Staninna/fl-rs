@@ -449,6 +449,7 @@ fn a_render_shows_how_far_it_is() {
 fn the_menu_asks_for_paths_and_quits() {
     let mut harness = harness(state());
     for (entry, command) in [
+        ("New", Command::New),
         ("Open…", Command::Choose(Dialog::Open)),
         ("Save", Command::Save),
         ("Save As…", Command::Choose(Dialog::SaveAs)),
@@ -461,7 +462,7 @@ fn the_menu_asks_for_paths_and_quits() {
         harness.run();
         assert_eq!(harness.state().last(), Some(&command));
     }
-    assert_eq!(harness.state().len(), 5);
+    assert_eq!(harness.state().len(), 6);
 }
 
 #[test]

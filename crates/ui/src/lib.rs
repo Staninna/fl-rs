@@ -43,6 +43,10 @@ pub enum Command {
     /// Open the project in this file. Like `Quit` it asks first when the
     /// open project has changes that are not saved.
     Open(PathBuf),
+    /// Start a new project, as File > New does: see
+    /// [`model::Project::blank`]. It asks first as `Open` does, and it has
+    /// no file until it is saved, so a `Save` of it asks for one.
+    New,
     /// Write the project to the file it came from, or was last saved to.
     Save,
     /// Write the project to this file.

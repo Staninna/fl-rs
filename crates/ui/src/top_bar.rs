@@ -46,6 +46,9 @@ struct TypedTempo {
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     ui.horizontal(|ui| {
         ui.menu_button("File", |ui| {
+            if ui.button("New").clicked() {
+                out.push(Command::New);
+            }
             if ui.button("Open…").clicked() {
                 out.push(Command::Choose(Dialog::Open));
             }
