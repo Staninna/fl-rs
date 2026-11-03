@@ -1,6 +1,7 @@
 //! Arrangements, their playlist tracks, and time markers.
 
 use crate::codec::object;
+use crate::rec::RecTarget;
 use crate::{ChannelKind, Placed, Project};
 use flp::event::layout;
 
@@ -210,6 +211,12 @@ impl Arrangement {
 
 /// The trims of the two parts [`Arrangement::split_items`] cuts an item
 /// into, `cut` ticks from its start, which is inside it.
+///
+/// A clip item's second part starts where playback is at the cut: its
+/// trim's start, or 0, plus `cut` ticks at the rate `clip_rate` gives,
+/// since the engine plays a clip from its start alone and at that rate
+/// (`crates/engine/src/sequence.rs`). Its share of the trim would be wrong
+/// whenever the trim's span was set at another tempo.
 fn split_trim(
     item: &layout::PlaylistItem,
     cut: i32,
@@ -223,22 +230,20 @@ fn split_trim(
             Trim::Ticks { start: middle, end },
         ))
     };
-    let clip = |start: f32, middle: f32, end: f32| {
-        Some((
-            Trim::Clip { start, end: middle },
-            Trim::Clip { start: middle, end },
-        ))
-    };
     match item.trim() {
         Some(Trim::Ticks { start, end }) => ticks(start, end),
         None if matches!(item.source(), Some(ItemSource::Pattern(_))) => ticks(0, item.length),
-        Some(Trim::Clip { start, end }) => {
-            let share = cut as f32 / item.length as f32;
-            clip(start, start + (end - start) * share, end)
-        }
-        None => {
+        trim => {
             let rate = clip_rate(item)?;
-            clip(0.0, cut as f32 * rate, item.length as f32 * rate)
+            let (start, end) = match trim {
+                Some(Trim::Clip { start, end }) => (start, end),
+                _ => (0.0, item.length as f32 * rate),
+            };
+            let middle = start + cut as f32 * rate;
+            Some((
+                Trim::Clip { start, end: middle },
+                Trim::Clip { start: middle, end },
+            ))
         }
     }
 }
@@ -246,31 +251,51 @@ fn split_trim(
 impl Project {
     /// [`Arrangement::split_items`] on the arrangement FL shows.
     ///
-    /// A clip item without a trim counts beats when its channel is an
-    /// automation clip, and milliseconds of the sample at the project's
-    /// tempo when it is an audio clip that is not stretched or pitched,
-    /// which is what `end - start` of most corpus audio items with a trim
-    /// comes to ([`Trim::Clip`](layout::Trim::Clip)). Any other such item,
-    /// and an audio item in a project without a tempo, is left whole.
+    /// A clip item counts beats when its channel is an automation clip, and
+    /// milliseconds of the sample at the project's tempo when it is an audio
+    /// clip that plays at its own speed: not stretched, pitched or reversed,
+    /// on a channel whose pitch knob and fine tune are at 0, in a project
+    /// where no link drives the tempo or that channel, which is what
+    /// `end - start` of most corpus audio items with a trim comes to
+    /// ([`Trim::Clip`](layout::Trim::Clip)). Any other clip item, and an
+    /// audio item in a project without a tempo, is left whole, since where
+    /// its sample is at the cut depends on more than the tempo.
     pub fn split_items(&mut self, ids: &[usize], at: i32) {
         let ppq = f32::from(self.header.ppq.max(1));
         let tempo = self.tempo().filter(|tempo| *tempo > 0.0);
-        let kinds: Vec<(u16, Option<ChannelKind>)> = self
+        let targets: Vec<RecTarget> = (self.controller_links.iter())
+            .filter_map(|link| link.link)
+            .map(|link| self.link_target(link.target))
+            .collect();
+        let tempo_moves = targets
+            .iter()
+            .any(|t| matches!(t, RecTarget::Global { .. }));
+        let moves = |channel: u16| {
+            let own =
+                |t: &RecTarget| matches!(t, RecTarget::Channel { index, .. } if *index == channel);
+            tempo_moves || targets.iter().any(own)
+        };
+        let channels: Vec<(u16, Option<ChannelKind>, bool)> = self
             .channels
             .iter()
-            .map(|channel| (channel.index, channel.kind))
+            .map(|channel| {
+                let knob = channel
+                    .levels
+                    .map_or(0, |l| i32::from_le_bytes(l.unknown_8));
+                let tuned = knob != 0 || channel.fine_tune.unwrap_or(0) != 0;
+                (channel.index, channel.kind, tuned || moves(channel.index))
+            })
             .collect();
         let clip_rate = |item: &layout::PlaylistItem| {
             let Some(layout::ItemSource::Channel(index)) = item.source() else {
                 return None;
             };
-            let (_, kind) = kinds.iter().find(|(at, _)| *at == index)?;
+            let (_, kind, varies) = channels.iter().find(|(at, ..)| *at == index)?;
             let settings = item.clip();
+            let plain = settings.stretch == 1.0 && settings.pitch == 0.0 && !settings.reversed;
             match kind {
                 Some(ChannelKind::Automation) => Some(1.0 / ppq),
-                Some(ChannelKind::AudioClip)
-                    if settings.stretch == 1.0 && settings.pitch == 0.0 =>
-                {
+                Some(ChannelKind::AudioClip) if plain && !varies => {
                     Some((60_000.0 / tempo?) as f32 / ppq)
                 }
                 _ => None,
@@ -510,10 +535,13 @@ mod tests {
         let mut deleted = item(4, 0);
         deleted.source_id = u32::MAX;
         let mut arrangement = arrangement(vec![item(1, 0), trimmed, clip, untrimmed_clip, deleted]);
-        // Channel 4's clip counts a unit a tick, and the deleted record and
-        // an ID given twice are skipped.
-        let rate =
-            |item: &PlaylistItem| (item.source() == Some(ItemSource::Channel(4))).then_some(1.0);
+        // Channel 4's clip counts a unit a tick and channel 3's a beat at
+        // PPQ 96, and the deleted record and an ID given twice are skipped.
+        let rate = |item: &PlaylistItem| match item.source() {
+            Some(ItemSource::Channel(4)) => Some(1.0),
+            Some(ItemSource::Channel(3)) => Some(1.0 / 96.0),
+            _ => None,
+        };
         arrangement.split_items(&[2, 1, 0, 4, 0, 3, 9], 480, rate);
 
         let items = &arrangement.items;
@@ -555,8 +583,8 @@ mod tests {
         assert_eq!((items[1].id, items[5].id), (7, -1));
 
         // Cut inside every item: a pattern without a trim starts its second
-        // part as far into the pattern as the cut, a trimmed clip is cut at
-        // its share, and an untrimmed one at its rate.
+        // part as far into the pattern as the cut, and a clip's second part
+        // starts the cut's ticks at its rate past its trim's start, or 0.
         let mut arrangement = arrangement.clone();
         arrangement.items.truncate(5);
         arrangement.split_items(&[0, 2, 3], 96, rate);
@@ -672,6 +700,67 @@ mod tests {
         project.arrangements[0].items = vec![clip(1)];
         project.split_items(&[0], 192);
         assert_eq!(project.arrangements[0].items.len(), 1);
+    }
+
+    #[test]
+    fn a_trimmed_audio_clip_is_cut_where_it_plays_and_one_that_varies_stays_whole() {
+        use crate::{Channel, ControllerLink};
+        let mut project = Project::new(flp::Header {
+            format: 0,
+            channel_count: 2,
+            ppq: 96,
+        });
+        // Trimmed to two seconds at 120 BPM, and played at 60: a beat in,
+        // the sample is a second in, not a quarter of the trim.
+        project.tempo_milli = Some(60_000);
+        project.channels = vec![Channel {
+            index: 1,
+            kind: Some(ChannelKind::AudioClip),
+            ..Channel::default()
+        }];
+        let mut clip = PlaylistItem::new(ItemSource::Channel(1), 0, 384);
+        clip.set_trim(Some(Trim::Clip {
+            start: 0.0,
+            end: 2000.0,
+        }));
+        project.arrangements.push(arrangement(vec![clip]));
+        let before = project.clone();
+        project.split_items(&[0], 96);
+        let items = &project.arrangements[0].items;
+        assert_eq!(
+            items[1].trim(),
+            Some(Trim::Clip {
+                start: 1000.0,
+                end: 2000.0
+            })
+        );
+
+        // Reversed, tuned on its channel, or with a link to the tempo, the
+        // clip's place at the cut is not the tempo's alone.
+        let whole = |change: &dyn Fn(&mut Project)| {
+            let mut project = before.clone();
+            change(&mut project);
+            project.split_items(&[0], 96);
+            project.arrangements[0].items.len() == 1
+        };
+        assert!(whole(
+            &|p| p.arrangements[0].items[0].clip_flags |= PlaylistItem::REVERSED
+        ));
+        assert!(whole(&|p| p.channels[0].fine_tune = Some(50)));
+        assert!(whole(&|p| {
+            let link = layout::ControllerLink {
+                source: 0,
+                unknown_4: [0; 4],
+                target: 0x4000_0000 | 5,
+                flags: 8,
+                unknown_16: [0; 4],
+            };
+            p.controller_links.push(ControllerLink {
+                link: Some(link),
+                ..ControllerLink::default()
+            });
+        }));
+        assert!(!whole(&|_| ()));
     }
 
     #[test]
