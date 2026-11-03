@@ -477,6 +477,11 @@ pub enum Edit {
         track: u32,
         enabled: bool,
     },
+    /// Delete the pattern and every playlist item of it in every
+    /// arrangement: see [`model::Project::delete_pattern`].
+    DeletePattern {
+        pattern: u16,
+    },
 }
 
 /// A playlist item as it was copied: its whole record. Two are the same

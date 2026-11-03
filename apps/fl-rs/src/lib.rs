@@ -286,6 +286,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::AddPattern { index } => project.add_pattern(index),
         Edit::ClonePattern { from, to } => project.clone_pattern(from, to),
         Edit::SetPatternName { pattern, ref name } => project.set_pattern_name(pattern, name),
+        Edit::DeletePattern { pattern } => project.delete_pattern(pattern),
         Edit::SplitItems { ref ids, at } => {
             if let Ok(at) = i32::try_from(at) {
                 project.split_items(ids, at);

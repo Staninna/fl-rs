@@ -8,7 +8,9 @@
 //! lowest index the project has free, and is selected. The last entry, and
 //! F2 (inferred too), give the selected pattern a new name: a field takes
 //! the selector's place, Enter and a click elsewhere take the name, and
-//! Escape leaves it.
+//! Escape leaves it. "Delete pattern" removes the selected pattern and its
+//! items from every arrangement, in one undo step, and selects the
+//! pattern before it, or the one after it when it was the first.
 //!
 //! A drag up or down on the tempo changes it, a BPM a point and a tenth of
 //! that with Ctrl held, and a double click on it opens a field to type it
@@ -245,6 +247,7 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
 
     let mut patterns: Vec<u16> = state.project.patterns.iter().map(|p| p.index).collect();
     patterns.sort_unstable();
+    let listed = patterns.clone();
     let free = state.project.free_pattern_index();
     let keys = !ui.ctx().egui_wants_keyboard_input();
     let pressed = |ui: &mut Ui, key| keys && ui.input_mut(|i| i.consume_key(Modifiers::NONE, key));
@@ -253,13 +256,13 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     // is shown.
     let rack = crate::windows::shown(ui.ctx(), crate::windows::Window::ChannelRack);
     let mut rename = !rack && pressed(ui, Key::F2);
-    let mut clone = false;
+    let (mut clone, mut delete) = (false, false);
     let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")
         .width(120.0)
         .selected_text(name(state.pattern))
         .show_ui(ui, |ui| {
-            for index in patterns {
+            for index in listed {
                 let chosen = index == state.pattern;
                 if ui.selectable_label(chosen, name(index)).clicked() && !chosen {
                     out.push(Command::SelectPattern(index));
@@ -272,6 +275,9 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             clone = ui.add_enabled(free.is_some() && has, copy).clicked();
             let name = egui::Button::new("Rename pattern…").shortcut_text("F2");
             rename |= ui.add(name).clicked();
+            delete = ui
+                .add_enabled(has, egui::Button::new("Delete pattern"))
+                .clicked();
         })
         .response
         .on_hover_text("The pattern that plays in pattern mode");
@@ -284,6 +290,13 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     if let Some((made, index)) = made {
         out.push(edit(made));
         out.push(Command::SelectPattern(index));
+    } else if delete {
+        out.push(edit(Edit::DeletePattern { pattern: from }));
+        let before = patterns.iter().rev().find(|index| **index < from);
+        let after = patterns.iter().find(|index| **index > from);
+        if let Some(next) = before.or(after) {
+            out.push(Command::SelectPattern(*next));
+        }
     } else if rename {
         let field = TypedName {
             pattern: from,

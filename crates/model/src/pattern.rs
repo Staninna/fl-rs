@@ -644,6 +644,37 @@ impl Project {
         }
     }
 
+    /// Delete the pattern and every playlist item of it, in every
+    /// arrangement.
+    ///
+    /// The pattern's events all go: every 65 that selects it and every
+    /// event the file has behind one of them before the next 65 or 99,
+    /// which is what [`Pattern::order`] holds, its time markers among
+    /// them. An event of another object keeps its owner when the file is
+    /// read back, since what follows the pattern's 65s was the pattern's.
+    /// An item of it becomes the record FL leaves of a deleted item, as
+    /// [`Arrangement::delete_items`](crate::Arrangement::delete_items)
+    /// makes one, so the other items keep their IDs.
+    ///
+    /// The other patterns keep their numbers, which leaves a gap that FL's
+    /// loader takes (inferred: that FL does not renumber them on its own
+    /// delete was not looked up). A 67 `PatternsCurrentlySelected` that
+    /// names the pattern stays as it is.
+    pub fn delete_pattern(&mut self, index: u16) {
+        let Some(at) = self.patterns.iter().position(|p| p.index == index) else {
+            return;
+        };
+        self.patterns.remove(at);
+        for arrangement in &mut self.arrangements {
+            let items = arrangement.items.iter().enumerate();
+            let of = |(_, item): &(usize, &layout::PlaylistItem)| {
+                item.source() == Some(layout::ItemSource::Pattern(index))
+            };
+            let ids: Vec<usize> = items.filter(of).map(|(id, _)| id).collect();
+            arrangement.delete_items(&ids);
+        }
+    }
+
     /// Whether the file's strings can hold `text` in event `id`: not a
     /// character above U+00FF in a file from before 11.5.5, nor a NUL, nor
     /// anything in a project without a writer version.
@@ -1237,6 +1268,68 @@ mod tests {
         project.clone_pattern(9, 7);
         project.clone_pattern(1, 2);
         project.clone_pattern(1, 0);
+        assert!(project == before);
+    }
+
+    #[test]
+    fn a_deleted_pattern_takes_its_events_and_its_items_along() {
+        use layout::{ItemSource, PlaylistItem};
+        let mut project = project();
+        let item = |source| PlaylistItem::new(source, 0, 384);
+        let (one, two) = (ItemSource::Pattern(1), ItemSource::Pattern(2));
+        let lists = [
+            vec![
+                item(one),
+                item(two),
+                item(one),
+                item(ItemSource::Channel(2)),
+            ],
+            vec![item(one), item(two)],
+        ];
+        for (index, items) in (0..).zip(lists) {
+            project.arrangements.push(crate::Arrangement {
+                index,
+                items,
+                ..crate::Arrangement::default()
+            });
+        }
+        project.delete_pattern(1);
+        // Both of pattern 1's blocks go, its notes and its name, and the
+        // rest of the file stays as it was.
+        let (new, gone) = changes(&project);
+        assert_eq!(new, []);
+        let beat = file().events[2].clone();
+        assert_eq!(
+            gone,
+            [
+                word(Id::PatternNew, 1),
+                beat,
+                word(Id::PatternNew, 1),
+                text(Id::PatternName, "Beat"),
+            ]
+        );
+        let read = from_flp(&to_flp(&project).unwrap());
+        let indices: Vec<u16> = read.patterns.iter().map(|p| p.index).collect();
+        assert_eq!(indices, [2]);
+        assert_eq!(read.pattern(2).unwrap().name.as_deref(), Some("Fill"));
+
+        // Its items are deleted records in every arrangement, in their
+        // places, and the others stay.
+        let sources = |arrangement: &crate::Arrangement| -> Vec<Option<ItemSource>> {
+            arrangement.items.iter().map(|item| item.source()).collect()
+        };
+        let pattern = |p| Some(ItemSource::Pattern(p));
+        let clip = Some(ItemSource::Channel(2));
+        assert_eq!(
+            sources(&project.arrangements[0]),
+            [None, pattern(2), None, clip]
+        );
+        assert_eq!(sources(&project.arrangements[1]), [None, pattern(2)]);
+
+        // A pattern the project does not have is no change.
+        let before = project.clone();
+        project.delete_pattern(1);
+        project.delete_pattern(7);
         assert!(project == before);
     }
 

@@ -294,6 +294,35 @@ fn the_pattern_edits_are_saved_reloaded_and_undone() {
 }
 
 #[test]
+fn a_deleted_pattern_is_saved_reloaded_and_undone_in_one_step() {
+    let dir = Dir::new("delete-pattern");
+    let (mut app, path) = open_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    edit(&mut app, Edit::ClonePattern { from: 1, to: 2 }, None);
+    edit(&mut app, Edit::DeletePattern { pattern: 1 }, None);
+    let item = |project: &Project| project.current_arrangement().unwrap().items[0];
+    assert!(item(app.project()).is_deleted());
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    let want = vec![(2, Some("Pattern 1 #2".to_owned()), 4)];
+    assert_eq!(patterns(&saved), want);
+    assert!(item(&saved).is_deleted());
+    // Nothing is left to play.
+    assert_eq!(rendered(&saved, &dir.0), (0.0, 0));
+
+    app.apply(Command::Undo);
+    assert_eq!(patterns(app.project()).len(), 2);
+    assert_eq!(item(app.project()).source(), Some(ItemSource::Pattern(1)));
+    app.apply(Command::Undo);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+    // A pattern that is not there is no step.
+    edit(&mut app, Edit::DeletePattern { pattern: 5 }, None);
+    assert!(!app.is_modified());
+}
+
+#[test]
 fn a_render_reports_its_progress_up_to_the_whole() {
     let dir = Dir::new("progress");
     let path = write_fixture(&dir.0);

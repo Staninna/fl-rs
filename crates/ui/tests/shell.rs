@@ -320,6 +320,34 @@ fn a_clone_of_the_selected_pattern_is_selected() {
 }
 
 #[test]
+fn a_deleted_pattern_hands_the_selection_to_its_neighbour() {
+    // Pattern 2 hands it to pattern 1 before it, and pattern 1, the first,
+    // to pattern 2 after it.
+    for (pattern, next) in [(2, 1), (1, 2)] {
+        let mut harness = harness(UiState { pattern, ..state() });
+        harness.run();
+        harness.get_by_role(Role::ComboBox).click();
+        harness.run();
+        harness.get_by_label("Delete pattern").click();
+        harness.run();
+        let deleted = edit_of(Edit::DeletePattern { pattern });
+        assert_eq!(harness.state(), &[deleted, Command::SelectPattern(next)]);
+    }
+
+    // A pattern the project does not have has nothing to delete.
+    let mut harness = harness(UiState {
+        pattern: 7,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Delete pattern").click();
+    harness.run();
+    assert!(harness.state().is_empty());
+}
+
+#[test]
 fn f2_or_the_list_renames_the_selected_pattern() {
     let mut harness = harness(state());
     harness.run();
