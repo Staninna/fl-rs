@@ -1127,6 +1127,130 @@ fn a_note_is_saved_reloaded_and_undone() {
     assert_eq!(notes(app.project()), steps);
 }
 
+/// The notes of pattern 1 that are not deleted: position, length, key and
+/// whether each is selected.
+fn live_notes(project: &Project) -> Vec<(i32, i32, i16, bool)> {
+    let notes = project.pattern(1).map_or(&[][..], |p| &p.notes);
+    let live = notes.iter().filter(|note| !note.is_deleted());
+    let place = |note: &Note| (note.position, note.length, note.key, note.selected());
+    live.map(place).collect()
+}
+
+#[test]
+fn a_cut_and_a_paste_of_notes_are_saved_and_undone_one_step_each() {
+    let dir = Dir::new("cut-paste");
+    let (mut app, path) = open_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    let steps = live_notes(app.project());
+    // The piano roll's Ctrl+X: the selection goes to its clipboard, and
+    // the notes are deleted.
+    let (ids, add) = (vec![1, 2], false);
+    edit(&mut app, Edit::SelectNotes { ids, add }, None);
+    let copied: Vec<Note> = app.project().pattern(1).unwrap().notes[1..3].to_vec();
+    edit(&mut app, Edit::DeleteNotes { ids: vec![1, 2] }, None);
+    let cut = vec![(0, 0, 60, false), (288, 0, 60, false)];
+    assert_eq!(live_notes(app.project()), cut);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(live_notes(&fl_rs::read(&path).unwrap()), cut);
+
+    // Ctrl+V: the copies a bar on, selected.
+    let pasted: Vec<Note> = copied
+        .iter()
+        .map(|note| Note {
+            position: note.position + 384,
+            ..*note
+        })
+        .collect();
+    edit(&mut app, Edit::PasteNotes { notes: pasted }, None);
+    let mut both = cut.clone();
+    both.extend([(480, 0, 60, true), (576, 0, 60, true)]);
+    assert_eq!(live_notes(app.project()), both);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let mut saved = live_notes(&fl_rs::read(&path).unwrap());
+    saved.sort();
+    assert_eq!(saved, both);
+
+    // Each comes back off in one undo.
+    app.apply(Command::Undo);
+    assert_eq!(live_notes(app.project()), cut);
+    app.apply(Command::Undo);
+    // The two that were cut are selected again.
+    let selected = steps.iter().enumerate();
+    let want: Vec<_> = selected
+        .map(|(at, &(position, length, key, _))| (position, length, key, at == 1 || at == 2))
+        .collect();
+    assert_eq!(live_notes(app.project()), want);
+    // With the selection let go of, the file is as it was.
+    let (ids, add) = (Vec::new(), false);
+    edit(&mut app, Edit::SelectNotes { ids, add }, None);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+}
+
+#[test]
+fn reverse_flip_and_legato_are_saved_and_undone_one_step_each() {
+    let dir = Dir::new("reverse-flip-legato");
+    let (mut app, path) = open_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    // Three notes of the second bar, ids 4 to 6: C5, E5 and G5, each
+    // shorter than the gap to the next.
+    let chord = [(384, 24, 60), (432, 48, 64), (528, 24, 67)];
+    let chord = chord.map(|(position, length, key)| Note {
+        position,
+        length,
+        key,
+        ..Note::default()
+    });
+    let pasted = Edit::PasteNotes {
+        notes: chord.to_vec(),
+    };
+    edit(&mut app, pasted, None);
+    let ids = vec![4, 5, 6];
+    let tools = [
+        Edit::ReverseNotes { ids: ids.clone() },
+        Edit::FlipNotes { ids: ids.clone() },
+        Edit::LegatoNotes { ids: ids.clone() },
+    ];
+    let mut before = Vec::new();
+    for tool in tools {
+        // What the model's tool makes of the notes, which the app saves.
+        let mut want = (**app.project()).clone();
+        let pattern = want.patterns.iter_mut().find(|p| p.index == 1).unwrap();
+        match &tool {
+            Edit::ReverseNotes { ids } => pattern.reverse_notes(ids),
+            Edit::FlipNotes { ids } => pattern.flip_notes(ids),
+            _ => pattern.legato_notes(&ids),
+        }
+        before.push(notes(app.project()));
+        edit(&mut app, tool, None);
+        assert_eq!(notes(app.project()), notes(&want));
+        assert_ne!(notes(app.project()), *before.last().unwrap());
+        app.apply(Command::Save);
+        assert_eq!(app.error(), None);
+        let mut saved = notes(&fl_rs::read(&path).unwrap());
+        let mut want = notes(&want);
+        saved.sort();
+        want.sort();
+        assert_eq!(saved, want);
+    }
+    // Reversed, the G5 starts the bar and the C5 ends it; flipped, they
+    // swap keys and E5 goes to D#5; legato, the first two reach the next.
+    let made = [(384, 72, 60), (456, 72, 63), (528, 24, 67)];
+    assert_eq!(notes(app.project())[4..], made);
+
+    for was in before.iter().rev() {
+        app.apply(Command::Undo);
+        assert_eq!(notes(app.project()), *was);
+    }
+    // And the paste in one more.
+    app.apply(Command::Undo);
+    assert_eq!(notes(app.project()).len(), 4);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+}
+
 #[test]
 fn the_piano_roll_s_drags_are_one_undo_step_each() {
     let dir = Dir::new("notes");
