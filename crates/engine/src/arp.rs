@@ -884,11 +884,13 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
         };
         // In i64, as a range and a repeat from a file can be anything.
         let notes = i64::from(notes);
-        let per = notes * i64::from(settings.repeat);
-        let up = i64::from(settings.range.max(1)) * per;
+        // Saturating, since even an i64 overflows at i32's ends with a few
+        // notes held; the bound below cuts what saturates anyway.
+        let per = notes.saturating_mul(i64::from(settings.repeat));
+        let up = i64::from(settings.range.max(1)).saturating_mul(per);
         let len = match settings.direction {
-            3 if up > 1 => 2 * up - 2,
-            4 if up > 1 => 2 * up,
+            3 if up > 1 => up.saturating_mul(2) - 2,
+            4 if up > 1 => up.saturating_mul(2),
             _ => up,
         };
         // A range and a repeat at the ends of an i32 ask for 2^63 entries,
@@ -1036,6 +1038,20 @@ mod tests {
     fn down_starts_at_the_top_of_the_range() {
         let out = run(settings(2, 2), &chord());
         assert_eq!(keys(&out[..7]), [79, 76, 72, 67, 64, 60, 79]);
+    }
+
+    #[test]
+    fn a_range_and_a_repeat_at_the_ends_of_an_i32_play_with_a_chord_held() {
+        // Three notes at i32::MAX twice overflow an i64, and up and down
+        // double it again.
+        for direction in 1..=4 {
+            let settings = Settings {
+                repeat: i32::MAX,
+                ..settings(direction, i32::MAX)
+            };
+            let out = run(settings, &chord());
+            assert_eq!(out.len(), 16, "direction {direction}");
+        }
     }
 
     #[test]
