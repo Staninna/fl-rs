@@ -453,6 +453,12 @@ pub enum Edit {
     SetTempo {
         milli: u32,
     },
+    /// The song's time signature: `numerator` beats a bar, from 1 to 16,
+    /// of a `denominator`th note, one of 2, 4, 8 and 16.
+    SetTimeSignature {
+        numerator: u8,
+        denominator: u8,
+    },
     /// Add an empty pattern with this index, which the project has no
     /// pattern for. The pattern selector sends a `SelectPattern` of it
     /// behind this.

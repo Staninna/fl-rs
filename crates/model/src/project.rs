@@ -11,6 +11,11 @@ use std::ops::RangeInclusive;
 /// tempo control maps automation onto (`docs/automation-234.md`).
 pub const TEMPO_MILLI: RangeInclusive<u32> = 10_000..=522_000;
 
+/// The beats a bar can have in FL's time signature, and the notes a beat
+/// can be (inferred from FL's song settings, not read from its code).
+pub const TIME_SIG_NUMERATORS: RangeInclusive<u8> = 1..=16;
+pub const TIME_SIG_DENOMINATORS: [u8; 4] = [2, 4, 8, 16];
+
 /// A whole project.
 ///
 /// The fields up to `initial_values` come from project-scope events, and
@@ -170,6 +175,58 @@ impl Project {
     /// or is a numerator depends on 35 `TimeSigMode`, which stays raw.
     pub fn time_signature(&self) -> Option<(u8, u8)> {
         Some((self.time_sig_num?, self.time_sig_beat?))
+    }
+
+    /// Set the time signature: 17 to `numerator` beats a bar, 1 to 16,
+    /// and 18 to `denominator`, one of [`TIME_SIG_DENOMINATORS`]. Anything
+    /// else is skipped.
+    ///
+    /// A project without a 17 gets one behind its 199, and one without an
+    /// 18 gets it behind the 17, so that an 18 is read after the 17 it
+    /// goes with, as FL writes the two. The 35 `TimeSigMode` decides
+    /// whether FL reads 17 and 18 as a time signature, so it is set to 1,
+    /// and a project without a 35 gets one behind the 18: the loader sets
+    /// it to 1 itself only for 4/4 (`docs/event-dictionary.md`, row 35;
+    /// that 1 is the time signature's mode is inferred). A loader older
+    /// than 12.0.0 caps the steps of a bar at 64, which this leaves to it.
+    pub fn set_time_signature(&mut self, numerator: u8, denominator: u8) {
+        if !TIME_SIG_NUMERATORS.contains(&numerator)
+            || !TIME_SIG_DENOMINATORS.contains(&denominator)
+        {
+            return;
+        }
+        if self.time_signature() == Some((numerator, denominator)) {
+            return;
+        }
+        let (num, beat) = (Id::ArrangementsTimeSigNum, Id::ArrangementsTimeSigBeat);
+        self.time_sig_num = Some(numerator);
+        write_field(&mut self.order, Id::FLVersion, num);
+        self.time_sig_beat = Some(denominator);
+        write_field(&mut self.order, num, beat);
+        let mode = Id::from(35);
+        let order = &mut self.order;
+        let set = order
+            .iter_mut()
+            .rev()
+            .find_map(|placed| match &mut placed.item {
+                Item::Raw(e) if e.id == mode.0 => Some(&mut e.data),
+                _ => None,
+            });
+        if let Some(data) = set {
+            *data = vec![1];
+        } else if let Some(at) = order.iter().position(|p| p.item == Item::Field(beat)) {
+            let item = Item::Raw(flp::RawEvent {
+                id: mode.0,
+                data: vec![1],
+            });
+            order.insert(
+                at + 1,
+                Placed {
+                    pos: order[at].pos,
+                    item,
+                },
+            );
+        }
     }
 
     /// The channel a 64 with this index opened.
@@ -434,6 +491,43 @@ mod tests {
         ];
         assert_eq!(written, want);
         assert_eq!(read.tempo(), Some(75.25));
+    }
+
+    #[test]
+    fn a_time_signature_is_17_and_18_with_35_set() {
+        let byte = |id: u32, value: u8| ev(Id::from(id), &[value]);
+        let title = ev(Id::Title, b"Song\0");
+        // A file as FL writes one, in 4/4 with the mode clear.
+        let events = [byte(17, 4), byte(18, 4), byte(35, 0), title.clone()];
+        let (read, written) = edited(&events, |p| p.set_time_signature(7, 8));
+        assert_eq!(
+            written,
+            [byte(17, 7), byte(18, 8), byte(35, 1), title.clone()]
+        );
+        assert_eq!(read.time_signature(), Some((7, 8)));
+
+        // A file with none of them gets all three behind its 199.
+        let (read, written) = edited(std::slice::from_ref(&title), |p| p.set_time_signature(3, 4));
+        assert_eq!(
+            written,
+            [byte(17, 3), byte(18, 4), byte(35, 1), title.clone()]
+        );
+        assert_eq!(read.time_signature(), Some((3, 4)));
+        // And one with a 17 alone gets the 18 behind it.
+        let (_, written) = edited(&[title.clone(), byte(17, 4)], |p| {
+            p.set_time_signature(5, 16)
+        });
+        assert_eq!(
+            written,
+            [title.clone(), byte(17, 5), byte(18, 16), byte(35, 1)]
+        );
+
+        // What FL does not offer is skipped, and so is the signature the
+        // file has.
+        for (numerator, denominator) in [(0, 4), (17, 4), (4, 3), (4, 32), (4, 4)] {
+            let (_, written) = edited(&events, |p| p.set_time_signature(numerator, denominator));
+            assert_eq!(written, events[..]);
+        }
     }
 
     #[test]

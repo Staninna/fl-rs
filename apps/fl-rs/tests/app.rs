@@ -235,6 +235,26 @@ fn a_tempo_edit_is_saved_undone_and_played() {
     assert_eq!(app.project().tempo(), Some(522.0));
 }
 
+#[test]
+fn a_time_signature_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("signature");
+    let (mut app, path) = open_fixture(&dir);
+    assert_eq!(app.project().time_signature(), None);
+    let set = Edit::SetTimeSignature {
+        numerator: 3,
+        denominator: 4,
+    };
+    edit(&mut app, set, None);
+    assert_eq!(app.project().time_signature(), Some((3, 4)));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    assert_eq!(saved.time_signature(), Some((3, 4)));
+    assert_eq!(saved.tempo(), Some(120.0));
+    app.apply(Command::Undo);
+    assert_eq!(app.project().time_signature(), None);
+}
+
 /// The indices of the project's patterns, with each one's name and how
 /// many notes it has.
 fn patterns(project: &Project) -> Vec<(u16, Option<String>, usize)> {

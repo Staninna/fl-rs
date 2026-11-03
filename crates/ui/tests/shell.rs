@@ -219,6 +219,28 @@ fn a_drag_on_the_tempo_changes_it_a_bpm_a_point() {
 }
 
 #[test]
+fn the_position_s_menu_sets_the_time_signature() {
+    let mut harness = harness(state());
+    harness.run();
+    let signature = |numerator, denominator| {
+        edit_of(Edit::SetTimeSignature {
+            numerator,
+            denominator,
+        })
+    };
+    for (menu, entry) in [("Beats per bar", "3/4"), ("Beat value", "4/8")] {
+        harness.get_by_label("Song position").click_secondary();
+        harness.run();
+        harness.get_by_label_contains(menu).click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+        assert!(harness.query_by_label(entry).is_none());
+    }
+    assert_eq!(harness.state(), &[signature(3, 4), signature(4, 8)]);
+}
+
+#[test]
 fn a_double_click_on_the_tempo_types_it() {
     let mut harness = quick_harness(state());
     harness.run();

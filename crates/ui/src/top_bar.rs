@@ -14,7 +14,10 @@
 //! A drag up or down on the tempo changes it, a BPM a point and a tenth of
 //! that with Ctrl held, and a double click on it opens a field to type it
 //! in. Enter and a click elsewhere take what was typed, and Escape leaves
-//! the tempo as it was.
+//! the tempo as it was. A right-click on the position opens a menu that
+//! sets the time signature: 1 to 16 beats a bar, of a half, a quarter, an
+//! eighth or a sixteenth note (FL's choices, inferred). The grid of the
+//! windows follows it.
 
 use crate::widgets::drag_value;
 use crate::{Command, Dialog, Edit, Grid, UiState};
@@ -23,7 +26,7 @@ use egui::{
     Align, Color32, FontId, Key, Layout, Modifiers, Rect, Response, RichText, Sense, Shape, Stroke,
     Ui, Vec2, WidgetInfo, pos2, vec2,
 };
-use model::TEMPO_MILLI;
+use model::{TEMPO_MILLI, TIME_SIG_DENOMINATORS, TIME_SIG_NUMERATORS};
 
 /// How many points of drag take the tempo through FL's whole 10 to 522
 /// BPM: a BPM a point.
@@ -62,8 +65,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         ui.separator();
 
         tempo(ui, state, out);
-        let (bar, beat, tick) = Grid::of(&state.project).bar_beat_tick(state.position);
-        readout(ui, &format!("{bar:03}:{beat:02}:{tick:03}"), "B:B:T");
+        position(ui, state, out);
         ui.separator();
         meter(ui, state.peaks);
         ui.separator();
@@ -377,6 +379,51 @@ fn tempo(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     }
     let hint = "Tempo: drag up or down, with Ctrl for fine steps, or double-click to type it";
     response.on_hover_text(hint);
+}
+
+/// The position's readout, in bars, beats and ticks, whose right-click
+/// menu sets the time signature, as FL's song settings do: the beats a
+/// bar has, and the note that is a beat. The readout shows no signature,
+/// so it looks as it did; its hint names the one there is.
+fn position(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    let project = &state.project;
+    let (bar, beat, tick) = Grid::of(project).bar_beat_tick(state.position);
+    let plate = readout(ui, &format!("{bar:03}:{beat:02}:{tick:03}"), "B:B:T");
+    let id = egui::Id::new("fl-rs position");
+    let response = ui.interact(plate.rect, id, Sense::click());
+    let (numerator, denominator) = project.time_signature().unwrap_or((4, 4));
+    response.widget_info(|| WidgetInfo::labeled(egui::WidgetType::Button, true, "Song position"));
+    let set = |numerator: u8, denominator: u8| Command::Edit {
+        edit: Edit::SetTimeSignature {
+            numerator,
+            denominator,
+        },
+        drag_id: None,
+    };
+    response
+        .on_hover_text(format!(
+            "Bar, beat and tick in {numerator}/{denominator}. Right-click for the time signature"
+        ))
+        .context_menu(|ui| {
+            ui.menu_button("Beats per bar", |ui| {
+                for beats in TIME_SIG_NUMERATORS {
+                    let label = format!("{beats}/{denominator}");
+                    if ui.selectable_label(beats == numerator, label).clicked() {
+                        out.push(set(beats, denominator));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("Beat value", |ui| {
+                for note in TIME_SIG_DENOMINATORS {
+                    let label = format!("{numerator}/{note}");
+                    if ui.selectable_label(note == denominator, label).clicked() {
+                        out.push(set(numerator, note));
+                        ui.close();
+                    }
+                }
+            });
+        });
 }
 
 /// A typed tempo in thousandths of a BPM, held to FL's range. `None` for
