@@ -1626,6 +1626,69 @@ fn polarity_swap_and_separation_are_saved_reloaded_and_undone() {
 }
 
 #[test]
+fn bypassing_every_effect_is_one_undo_step_and_a_colour_is_saved() {
+    let dir = Dir::new("effects");
+    let path = write_fixture(&dir.0);
+    let mut project = mixer_fixture();
+    // Two plugins on insert 1, in slots 0 and 2: a 201 and a 212 each,
+    // the 212 naming the insert and the slot as FL's does.
+    for slot in [0u8, 2] {
+        let pos = project.inserts[1].order[0].pos;
+        let mut data = vec![0; 52];
+        data[0] = 1;
+        data[4] = slot;
+        let wrapper = flp::RawEvent {
+            id: Id::PluginWrapper.0,
+            data,
+        };
+        let name = Placed {
+            pos,
+            item: Item::Field(Id::PluginInternalName),
+        };
+        let wrapper = Placed {
+            pos,
+            item: Item::Raw(wrapper),
+        };
+        project.inserts[1].slots.push(model::Slot {
+            index: i32::from(slot),
+            plugin_name: Some("Fruity Limiter".to_owned()),
+            order: vec![name, wrapper],
+            ..model::Slot::default()
+        });
+    }
+    fl_rs::save(&project, &path).unwrap();
+    let mut app = App::new(None);
+    app.apply(Command::Open(path.clone()));
+    settle(&mut app);
+    assert_eq!(app.project().inserts[1].slots.len(), 2);
+
+    let slots = |project: &Project| {
+        let mix = project.insert_mix(1);
+        [0, 1, 2].map(|slot| mix.slot_enabled(slot) == Some(true))
+    };
+    let all = |enabled| Edit::SetInsertEffectsEnabled { insert: 1, enabled };
+    edit(&mut app, all(false), None);
+    assert_eq!(slots(app.project()), [false, true, false]);
+    let colour = Edit::SetInsertColor {
+        insert: 1,
+        color: 0x00aa_aa3c,
+    };
+    edit(&mut app, colour, None);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    assert_eq!(slots(&saved), [false, true, false]);
+    assert_eq!(saved.inserts[1].color, Some(0x00aa_aa3c));
+    // One undo for the colour, and one for both switches.
+    app.apply(Command::Undo);
+    assert_eq!(app.project().inserts[1].color, None);
+    app.apply(Command::Undo);
+    assert_eq!(slots(app.project()), [true; 3]);
+    app.apply(Command::Redo);
+    assert_eq!(slots(app.project()), [false, true, false]);
+}
+
+#[test]
 fn the_meters_follow_the_inserts_that_play() {
     let dir = Dir::new("meters");
     let (mut app, _) = open_mixer_fixture(&dir);

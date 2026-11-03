@@ -367,6 +367,25 @@ fn the_strip_s_menu_sets_polarity_swap_and_separation() {
 }
 
 #[test]
+fn the_strip_s_menu_switches_all_its_effects_at_once() {
+    let mut harness = harness();
+    for entry in ["Bypass all effects", "Enable all effects"] {
+        harness.get_by_label("Bass strip").click_secondary();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
+    let all = |enabled| edit(Edit::SetInsertEffectsEnabled { insert: 2, enabled });
+    assert_eq!(harness.state(), &[all(false), all(true)]);
+    // The drums have no plugin to switch.
+    harness.get_by_label("Drums strip").click_secondary();
+    harness.run();
+    harness.get_by_label("Bypass all effects").click();
+    harness.run();
+    assert_eq!(harness.state().len(), 2);
+}
+
+#[test]
 fn the_strip_s_menu_colours_the_insert() {
     let mut harness = harness();
     harness.get_by_label("Reverb strip").click_secondary();

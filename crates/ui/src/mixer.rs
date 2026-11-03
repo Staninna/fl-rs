@@ -12,7 +12,8 @@
 //!
 //! A right-click on a strip or on its name opens a menu with what the
 //! strip has no room for: the solo, the insert's polarity, the swap of its
-//! left and right, its stereo separation and its colour.
+//! left and right, its stereo separation, the switch of all its effects at
+//! once and its colour.
 //!
 //! The bottom of a strip is what the selected insert sends to it, as FL
 //! has it: an arrow that makes the route or removes it, and above a lit
@@ -433,7 +434,7 @@ impl Strips<'_> {
     /// The menu a right-click on a strip or on its name opens: the
     /// insert's solo, and the parts of it that the strip has no room for,
     /// its polarity, the swap of its left and right, its stereo
-    /// separation and its colour.
+    /// separation, the switch of all its effects and its colour.
     fn menu(&self, ui: &mut Ui, index: u16, name: &str, out: &mut Vec<Command>) {
         let mix = self.project.insert_mix(index);
         if ui.button("Solo").clicked() {
@@ -476,6 +477,26 @@ impl Strips<'_> {
             }
             ui.label(format!("Stereo: {}", separation_hint(separation)));
         });
+        ui.separator();
+        // FL's "Bypass all effects" and "Enable all effects" (inferred
+        // from its mixer menu), for the slots that hold a plugin.
+        let held = mix.insert().is_some_and(|insert| {
+            let plugins = insert
+                .slots
+                .iter()
+                .filter_map(|slot| slot.plugin_name.as_deref());
+            plugins.into_iter().any(|name| !name.is_empty())
+        });
+        for (label, enabled) in [("Bypass all effects", false), ("Enable all effects", true)] {
+            if ui.add_enabled(held, egui::Button::new(label)).clicked() {
+                let all = Edit::SetInsertEffectsEnabled {
+                    insert: index,
+                    enabled,
+                };
+                out.push(edit(all, None));
+                ui.close();
+            }
+        }
         ui.separator();
         let colour = mix.insert().and_then(|insert| insert.color);
         if let Some(color) = colour_menu(ui, colour) {

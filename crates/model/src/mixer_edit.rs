@@ -221,6 +221,27 @@ impl Project {
         self.set_control(switch, i32::from(enabled), 0..=1, now);
     }
 
+    /// Switch every slot of the insert that holds a plugin on or off, as
+    /// FL's "Bypass all effects" and "Enable all effects" do (inferred
+    /// from FL's mixer menu): record 0x1F00 of each, as
+    /// [`Project::set_slot_enabled`] sets it. An empty slot has nothing to
+    /// switch and gets no record.
+    pub fn set_insert_effects_enabled(&mut self, insert: u16, enabled: bool) {
+        let held = self.insert_mix(insert).insert().map(|insert| {
+            let filled = insert.slots.iter().filter(|slot| {
+                let plugin = slot.plugin_name.as_deref();
+                plugin.is_some_and(|name| !name.is_empty())
+            });
+            filled
+                .filter_map(|slot| u8::try_from(slot.index).ok())
+                .collect()
+        });
+        let held: Vec<u8> = held.unwrap_or_default();
+        for slot in held {
+            self.set_slot_enabled(insert, slot, enabled);
+        }
+    }
+
     fn insert_to_edit(&mut self, index: u16) -> Option<&mut Insert> {
         let position = self.insert_position(index)?;
         self.inserts.get_mut(position)
@@ -628,6 +649,39 @@ mod tests {
         p.set_slot_mix_raw(1, 9, 99_999);
         (want[4].1, want[5].1) = (12_800, 1);
         assert_eq!(written(&p), with_records(&file, &want));
+    }
+
+    #[test]
+    fn every_slot_with_a_plugin_is_bypassed_and_enabled_at_once() {
+        let records = [(id(1, 3, control::SLOT_ENABLED), 0)];
+        let file = file(NEW, &records);
+        let mut p = project(&file);
+        let slot = |index: i32, plugin: &str| crate::Slot {
+            index,
+            plugin_name: Some(plugin.to_owned()),
+            ..crate::Slot::default()
+        };
+        p.inserts[1].slots = vec![
+            slot(0, "Fruity Limiter"),
+            slot(3, "Fruity Delay 3"),
+            slot(5, ""),
+        ];
+        p.set_insert_effects_enabled(1, false);
+        // Slot 3 is off already, and slot 5 is empty.
+        let mut want = records.to_vec();
+        want.push((id(1, 0, control::SLOT_ENABLED), 0));
+        assert_eq!(written(&p), with_records(&file, &want));
+        // Enabling them all sets the two records, and adds none.
+        p.set_insert_effects_enabled(1, true);
+        (want[0].1, want[1].1) = (1, 1);
+        assert_eq!(written(&p), with_records(&file, &want));
+        let mix = p.insert_mix(1);
+        assert!((0..10).all(|slot| mix.slot_enabled(slot) == Some(true)));
+        // An insert the project lacks, or one without plugins, is no change.
+        let before = p.clone();
+        p.set_insert_effects_enabled(9, false);
+        p.set_insert_effects_enabled(2, false);
+        assert!(p == before);
     }
 
     #[test]

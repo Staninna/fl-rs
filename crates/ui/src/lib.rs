@@ -448,6 +448,12 @@ pub enum Edit {
         slot: u8,
         enabled: bool,
     },
+    /// Switch every slot of the insert that holds a plugin on or off at
+    /// once: one step for `Undo`.
+    SetInsertEffectsEnabled {
+        insert: u16,
+        enabled: bool,
+    },
     /// How much of a slot's output is its plugin's: 0 to 12800.
     SetSlotMix {
         insert: u16,
