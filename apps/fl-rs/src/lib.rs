@@ -240,6 +240,7 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::CloneChannel { channel } => {
             project.clone_channel(channel);
         }
+        Edit::SetChannelColor { channel, color } => project.set_channel_color(channel, color),
         Edit::FillSteps {
             channel,
             every,

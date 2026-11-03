@@ -545,3 +545,21 @@ fn the_menu_of_a_name_clones_the_channel() {
     pick(&mut harness, "Bass", "Clone");
     assert_eq!(harness.state(), &[edit(Edit::CloneChannel { channel: 2 })]);
 }
+
+#[test]
+fn the_menu_of_a_name_colours_the_channel() {
+    let mut harness = harness();
+    let name = harness.get_by_label("Snare").rect().center();
+    right_click(&mut harness, name);
+    harness.get_by_label_contains("Colour").click();
+    harness.run();
+    harness.get_by_label("Blue").click();
+    harness.run();
+    // Red in the low byte, as the model keeps a colour.
+    let blue = Edit::SetChannelColor {
+        channel: 1,
+        color: 0x00d2_6e46,
+    };
+    assert_eq!(harness.state(), &[edit(blue)]);
+    assert!(harness.query_by_label("Blue").is_none());
+}

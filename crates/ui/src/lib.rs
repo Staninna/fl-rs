@@ -246,6 +246,12 @@ pub enum Edit {
     CloneChannel {
         channel: u16,
     },
+    /// Give the channel a colour: an RGBA u32 with red in the low byte,
+    /// as `model` keeps a colour.
+    SetChannelColor {
+        channel: u16,
+        color: u32,
+    },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
     /// 60 is C5, and 131 is the highest. A `length` of 0 is a step, which

@@ -1,5 +1,5 @@
 //! The channel rack's edits of whole channels: a channel's name, its
-//! solo, and a clone of it.
+//! colour, its solo, and a clone of it.
 //!
 //! Like the edits in `pattern.rs`, each sets a field and sees to it that
 //! the field has an event to be written in, see "Changing a project" in
@@ -15,6 +15,18 @@ fn is(placed: &Placed, id: Id) -> bool {
         Item::Field(field) => *field == id,
         Item::Raw(e) => e.id == id.0,
     }
+}
+
+/// The place of the channel's event `id` that its field writes: the typed
+/// entry, or the last raw one, which becomes the field's so that the
+/// channel does not end up with two. `None` when it has neither.
+fn find_field(order: &mut [Placed], id: Id) -> Option<usize> {
+    if let Some(at) = order.iter().position(|p| p.item == Item::Field(id)) {
+        return Some(at);
+    }
+    let at = order.iter().rposition(|p| is(p, id))?;
+    order[at].item = Item::Field(id);
+    Some(at)
 }
 
 impl Project {
@@ -75,6 +87,74 @@ impl Project {
         if let Some(at) = behind {
             let (pos, item) = (order[at].pos, Item::Field(Id::PluginName));
             order.insert(at + 1, Placed { pos, item });
+        }
+    }
+
+    /// Give the channel a colour, an RGBA u32 as
+    /// [`Channel::color`](crate::Channel::color) holds it, in its 128
+    /// `PluginID.Color`.
+    ///
+    /// The loader hands a 128 to the plugin the last 212 opened, and a 64
+    /// leaves none open, so the channel's 128 has to come after its 212.
+    /// A channel with a 128 gets the colour in it. One without gets a 128
+    /// behind its 212 and the 203 and 155 that FL writes behind that,
+    /// which is where a new sampler of FL's has it (`NEW_SAMPLER`).
+    ///
+    /// The 128's handler works out from the colour whether it is the
+    /// channel's own, and after the load FL gives a channel whose colour
+    /// is not its own the default of its kind. A colour of the default
+    /// palette would count as not its own, so the channel's 41
+    /// `PluginColorIsCustom`, which comes after the 128 and has the last
+    /// word, is set, and a channel without one gets one right behind the
+    /// 128, as FL writes it.
+    ///
+    /// A channel without a 212 has no plugin to take the colour, and a
+    /// file from 3.5.3 or before has every channel in its kind's colour
+    /// (`docs/event-dictionary.md`, row 128), so neither is changed.
+    pub fn set_channel_color(&mut self, channel: u16, color: u32) {
+        if self.version() <= 3_005_003 {
+            return;
+        }
+        let Some(channel) = self.channels.iter_mut().find(|c| c.index == channel) else {
+            return;
+        };
+        let order = &mut channel.order;
+        let Some(wrapper) = order.iter().rposition(|p| is(p, Id::PluginWrapper)) else {
+            return;
+        };
+        if channel.color == Some(color) && channel.color_is_custom != Some(false) {
+            return;
+        }
+        channel.color = Some(color);
+        let after = |id: Id, order: &mut Vec<Placed>, at: usize| {
+            let pos = order[at].pos;
+            order.insert(
+                at + 1,
+                Placed {
+                    pos,
+                    item: Item::Field(id),
+                },
+            );
+            at + 1
+        };
+        let colour = match find_field(order, Id::PluginColor) {
+            Some(at) => at,
+            None => {
+                // Behind the 212, and the 203 and 155 that follow it.
+                let tail = [Id::PluginName, Id::ChannelName, Id::PluginIcon];
+                let mut at = wrapper;
+                while order
+                    .get(at + 1)
+                    .is_some_and(|p| tail.iter().any(|id| is(p, *id)))
+                {
+                    at += 1;
+                }
+                after(Id::PluginColor, order, at)
+            }
+        };
+        channel.color_is_custom = Some(true);
+        if find_field(order, Id::PluginColorIsCustom).is_none() {
+            after(Id::PluginColorIsCustom, order, colour);
         }
     }
 
@@ -273,6 +353,62 @@ mod tests {
         assert_eq!(project.channels[0].name, None);
         project.set_channel_name(0, "Kick");
         assert_eq!(to_flp(&project).unwrap().events, self::file().events);
+    }
+
+    fn colour(value: u32) -> RawEvent {
+        ev(Id::PluginColor, &value.to_le_bytes())
+    }
+
+    #[test]
+    fn a_colour_goes_behind_the_212_with_a_41_that_says_it_is_its_own() {
+        let mut project = project();
+        for channel in 0..4 {
+            project.set_channel_color(channel, 0x0050_70d0);
+        }
+        // Channel 0 has a 203 behind its 212, and channel 2 has none.
+        // Channels 1 and 3 have no 212, so no plugin to take a colour.
+        let mut want = file();
+        let custom = ev(Id::PluginColorIsCustom, &[1]);
+        want.events
+            .splice(12..12, [colour(0x0050_70d0), custom.clone()]);
+        want.events.splice(6..6, [colour(0x0050_70d0), custom]);
+        let written = to_flp(&project).unwrap();
+        assert_eq!(written, want);
+        let read = from_flp(&written);
+        let colours: Vec<_> = read.channels.iter().map(|c| c.color).collect();
+        assert_eq!(colours, [Some(0x0050_70d0), None, Some(0x0050_70d0), None]);
+        assert_eq!(read.channels[0].color_is_custom, Some(true));
+        assert_eq!(read.channels[2].plugin_name.as_deref(), Some("Fruity DX10"));
+
+        // A second colour goes into the same events.
+        let mut project = read;
+        project.set_channel_color(0, 0x00d0_9050);
+        want.events[6] = colour(0x00d0_9050);
+        assert_eq!(to_flp(&project), Ok(want));
+    }
+
+    #[test]
+    fn a_colour_takes_the_128_and_the_41_the_channel_has() {
+        // A channel as FL writes one: the grey of its kind, not its own.
+        let mut file = file();
+        let custom = |on: u8| ev(Id::PluginColorIsCustom, &[on]);
+        file.events.splice(6..6, [colour(0x006a_655c), custom(0)]);
+        let mut project = from_flp(&file);
+        project.set_channel_color(0, 0x0040_60d0);
+        let mut want = file.clone();
+        want.events[6] = colour(0x0040_60d0);
+        want.events[7] = custom(1);
+        assert_eq!(to_flp(&project), Ok(want));
+
+        // Its own colour again makes no change, and a file from 3.5.3
+        // takes none.
+        let mut project = from_flp(&to_flp(&project).unwrap());
+        let before = project.clone();
+        project.set_channel_color(0, 0x0040_60d0);
+        assert_eq!(project, before);
+        project.writer_version = Some("3.5.3".to_owned());
+        project.set_channel_color(0, 0x0050_70d0);
+        assert_eq!(project.channels[0].color, Some(0x0040_60d0));
     }
 
     fn enabled(project: &Project) -> Vec<Option<bool>> {

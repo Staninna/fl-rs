@@ -712,6 +712,52 @@ fn a_clone_is_saved_reloaded_and_undone() {
     assert_eq!(app.project().channels.len(), 1);
 }
 
+/// The fixture with a generator's 212 on its channel, as every channel
+/// FL writes has, open in an app.
+fn open_fixture_with_wrapper(dir: &Dir) -> (App, PathBuf) {
+    let path = write_fixture(&dir.0);
+    let mut project = fixture();
+    let order = &mut project.channels[0].order;
+    let mut data = vec![0; 52];
+    data[16] = 0x50;
+    let wrapper = flp::RawEvent {
+        id: Id::PluginWrapper.0,
+        data,
+    };
+    order.insert(
+        2,
+        Placed {
+            pos: order[1].pos,
+            item: Item::Raw(wrapper),
+        },
+    );
+    fl_rs::save(&project, &path).unwrap();
+    let mut app = App::new(None);
+    app.apply(Command::Open(path.clone()));
+    settle(&mut app);
+    (app, path)
+}
+
+#[test]
+fn a_channel_s_colour_is_saved_reloaded_and_undone() {
+    let dir = Dir::new("colour");
+    let (mut app, path) = open_fixture_with_wrapper(&dir);
+    let colour = |project: &Project| project.channels[0].color;
+    let set = Edit::SetChannelColor {
+        channel: 0,
+        color: 0x00d2_6e46,
+    };
+    edit(&mut app, set, None);
+    assert_eq!(colour(app.project()), Some(0x00d2_6e46));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    assert_eq!(colour(&saved), Some(0x00d2_6e46));
+    assert_eq!(saved.channels[0].color_is_custom, Some(true));
+    app.apply(Command::Undo);
+    assert_eq!(colour(app.project()), None);
+}
+
 /// The steps of pattern 1 that are lit for channel 0.
 fn lit(project: &Project) -> Vec<usize> {
     let Some(pattern) = project.pattern(1) else {
