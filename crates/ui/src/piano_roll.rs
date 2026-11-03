@@ -42,14 +42,35 @@
 //!   pattern; its range and gate are left at the chord and at a full step.
 //! - Strum (Alt+S) starts each note of a chord a 64th note after the one
 //!   under it and keeps its end. FL's strummer has a time knob and a
-//!   tension; this is a fixed time with no tension.
+//!   tension; this is a time with no tension.
+//! - Reverse plays the notes backwards: each one's start and end are
+//!   mirrored in the span the notes cover, and its length is kept.
+//! - Flip (Alt+Y) turns the notes upside down: each key is mirrored around
+//!   the middle of the notes' range of keys. FL's shortcut, inferred.
+//! - Legato (Ctrl+L) ends each note where the next one starts, longer or
+//!   shorter, and the last ones keep their lengths: FL's quick legato.
+//!
+//! At the foot of the menu, a 32nd to a quarter note can be chosen for
+//! Chop's and Arpeggiate's step in place of the grid's, and a 128th to a
+//! 16th note for Strum's delay. The piano roll keeps the choice.
 //!
 //! With the pointer over the piano roll, Delete removes the selection,
 //! Alt+M mutes it or unmutes it, the arrows move it by a step of the grid
-//! or by a key, Ctrl+Up and Ctrl+Down by an octave, Ctrl+A selects every
-//! note of the channel and Ctrl+D none. Ctrl+wheel zooms around the
-//! pointer, the wheel scrolls through the keys and Shift+wheel along the
-//! pattern.
+//! or by a key, Ctrl+Up and Ctrl+Down by an octave, Shift+Left and
+//! Shift+Right shorten and lengthen it by a step, to a tick at the
+//! shortest, Ctrl+A selects every note of the channel and Ctrl+D none.
+//! Ctrl+wheel zooms around the pointer, the wheel scrolls through the keys
+//! and Shift+wheel along the pattern.
+//!
+//! Ctrl+C copies the selection and Ctrl+X cuts it, in one undo step, and
+//! Ctrl+V pastes what they took and selects it: at the play cursor,
+//! snapped, while the pattern plays in pattern mode, and otherwise right
+//! after the span the notes cover, moved by its length rounded up to a
+//! step of the grid. The next paste goes after that one. The notes are
+//! kept in the piano roll, and the system's clipboard gets a line that
+//! says how many. Ctrl+B duplicates the selection, as FL's does: the
+//! copies go right after it, where a paste would go, and become the
+//! selection. That FL rounds the shift up to the snap's step is inferred.
 //!
 //! The snap menu has FL's choices, which [`Snap`] explains, and every
 //! drag, click, arrow key and tool goes by it. The scale menu takes a
@@ -79,10 +100,10 @@ use crate::playlist::{Lane as Timeline, bar_step, rgb, snap, text_on};
 use crate::widgets::next_drag_id;
 use crate::{Command, Edit, Grid, NoteField, NoteId, UiState};
 use egui::{
-    Align2, Color32, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
-    StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, CursorIcon, Event, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
+    Stroke, StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
-use model::{Channel, Note, Pattern};
+use model::{Channel, Note, Pattern, Project};
 use snap::{Scale, Snap};
 use std::ops::RangeInclusive;
 
@@ -174,10 +195,13 @@ enum Action {
     Arpeggiate,
     Strum,
     SnapToScale,
+    Reverse,
+    Flip,
+    Legato,
 }
 
 impl Action {
-    const ALL: [Action; 7] = [
+    const ALL: [Action; 10] = [
         Action::Glue,
         Action::Quantize,
         Action::QuantizeStarts,
@@ -185,6 +209,9 @@ impl Action {
         Action::Arpeggiate,
         Action::Strum,
         Action::SnapToScale,
+        Action::Reverse,
+        Action::Flip,
+        Action::Legato,
     ];
 
     fn name(self) -> &'static str {
@@ -196,6 +223,9 @@ impl Action {
             Action::Arpeggiate => "Arpeggiate",
             Action::Strum => "Strum",
             Action::SnapToScale => "Snap to scale",
+            Action::Reverse => "Reverse",
+            Action::Flip => "Flip",
+            Action::Legato => "Legato",
         }
     }
 
@@ -204,33 +234,46 @@ impl Action {
     /// held.
     fn shortcut(self) -> Option<(Modifiers, Key)> {
         match self {
-            Action::Glue | Action::SnapToScale => None,
+            Action::Glue | Action::SnapToScale | Action::Reverse => None,
             Action::Quantize => Some((Modifiers::COMMAND, Key::Q)),
             Action::QuantizeStarts => Some((Modifiers::SHIFT, Key::Q)),
             Action::Chop => Some((Modifiers::ALT, Key::U)),
             Action::Arpeggiate => Some((Modifiers::ALT, Key::A)),
             Action::Strum => Some((Modifiers::ALT, Key::S)),
+            // Inferred from what is known of FL's piano roll.
+            Action::Flip => Some((Modifiers::ALT, Key::Y)),
+            Action::Legato => Some((Modifiers::COMMAND, Key::L)),
         }
     }
 
-    /// The edit, with `step` the snap's step in ticks, `ppq` the
-    /// project's and `keys` the keys of the scale, as
-    /// [`Edit::SnapNotesToScale`] has them.
-    fn edit(self, ids: Vec<NoteId>, step: u64, ppq: u16, keys: u16) -> Edit {
+    /// The edit, with the steps and the scale the piano roll's memory
+    /// has for the project.
+    fn edit(self, ids: Vec<NoteId>, memory: &Memory, project: &Project) -> Edit {
+        let (grid, ppq) = (Grid::of(project), project.header.ppq);
+        let step = memory.step(grid);
+        let keys = memory.keys();
         match self {
             Action::SnapToScale => Edit::SnapNotesToScale { ids, keys },
             Action::Glue => Edit::GlueNotes { ids },
+            Action::Reverse => Edit::ReverseNotes { ids },
+            Action::Flip => Edit::FlipNotes { ids },
+            Action::Legato => Edit::LegatoNotes { ids },
             Action::Quantize | Action::QuantizeStarts => Edit::QuantizeNotes {
                 ids,
                 step,
                 lengths: self == Action::Quantize,
             },
-            Action::Chop => Edit::ChopNotes { ids, step },
-            Action::Arpeggiate => Edit::ArpeggiateNotes { ids, step },
-            // A 64th note.
+            Action::Chop => Edit::ChopNotes {
+                ids,
+                step: memory.tool_step(grid, ppq),
+            },
+            Action::Arpeggiate => Edit::ArpeggiateNotes {
+                ids,
+                step: memory.tool_step(grid, ppq),
+            },
             Action::Strum => Edit::StrumNotes {
                 ids,
-                delay: u64::from(ppq / 16).max(1),
+                delay: of_whole(ppq, memory.strum),
             },
         }
     }
@@ -285,6 +328,14 @@ struct Memory {
     heard: bool,
     /// The tick a drag along the ruler began on.
     range: Option<u64>,
+    /// The notes Ctrl+C or Ctrl+X took, where the next paste puts them
+    /// before it moves them.
+    clipboard: Vec<Note>,
+    /// Chop's and Arpeggiate's step as a fraction of a whole note, one of
+    /// [`TOOL_STEPS`], or the snap's step when `None`.
+    tool_step: Option<u16>,
+    /// Strum's delay as a fraction of a whole note, one of [`STRUMS`].
+    strum: u16,
 }
 
 impl Default for Memory {
@@ -307,6 +358,9 @@ impl Default for Memory {
             pressed: None,
             heard: false,
             range: None,
+            clipboard: Vec::new(),
+            tool_step: None,
+            strum: 64,
         }
     }
 }
@@ -319,6 +373,13 @@ impl Memory {
     /// How many ticks the snap's step is at the zoom.
     fn step(&self, grid: Grid) -> u64 {
         self.snap.ticks(grid, self.beat / grid.beat as f32)
+    }
+
+    /// Chop's and Arpeggiate's step in ticks: the snap's, unless the
+    /// Tools menu's settings chose another.
+    fn tool_step(&self, grid: Grid, ppq: u16) -> u64 {
+        self.tool_step
+            .map_or_else(|| self.step(grid), |part| of_whole(ppq, part))
     }
 
     /// The keys of the scale, as [`Scale::keys`] has them. None without a
@@ -391,6 +452,9 @@ enum Gesture {
 impl Gesture {
     /// The edit that takes the notes to where the pointer is, snapped to
     /// `step` ticks, for the gestures that say one thing over and over.
+    ///
+    /// The sums saturate: a pointer far off a view zoomed out to a note at
+    /// the end of time is at a tick past what an i64 holds.
     fn edit(&self, tick: f32, key: i32, step: u64) -> Option<Edit> {
         match self {
             Gesture::Move {
@@ -400,8 +464,8 @@ impl Gesture {
                 key: from_key,
             } => Some(Edit::MoveNotes {
                 ids: ids.clone(),
-                delta_ticks: snap(*start as f32 + tick - from, step) - start,
-                delta_keys: key - from_key,
+                delta_ticks: snap(*start as f32 + tick - from, step).saturating_sub(*start),
+                delta_keys: key.saturating_sub(*from_key),
             }),
             Gesture::Resize {
                 ids,
@@ -410,12 +474,12 @@ impl Gesture {
                 length,
                 tick: from,
             } => {
-                let new = snap(*end as f32 + tick - from, step) - start;
+                let new = snap(*end as f32 + tick - from, step).saturating_sub(*start);
                 // An end dragged to the start or past it leaves one step.
                 let new = if new < 1 { step as i64 } else { new };
                 Some(Edit::ResizeNotes {
                     ids: ids.clone(),
-                    delta_ticks: new - length,
+                    delta_ticks: new.saturating_sub(*length),
                 })
             }
             Gesture::Draw {
@@ -423,7 +487,8 @@ impl Gesture {
                 position,
                 key,
             } => {
-                let length = snap(tick, step) - *position as i64;
+                let from = i64::try_from(*position).unwrap_or(i64::MAX);
+                let length = snap(tick, step).saturating_sub(from);
                 Some(Edit::AddNote {
                     channel: *channel,
                     position: *position,
@@ -526,9 +591,11 @@ impl View {
     }
 }
 
-/// The start of the grid's step that a tick is in.
+/// The start of the grid's step that a tick is in. A tick past what a
+/// u64 holds, which a view scrolled out to a note at the end of time can
+/// be at, gives the last step there is.
 fn floor(tick: f32, step: u64) -> u64 {
-    (tick.max(0.0) / step as f32).floor() as u64 * step
+    ((tick.max(0.0) / step as f32).floor() as u64).saturating_mul(step)
 }
 
 fn is_black(key: i32) -> bool {
@@ -586,7 +653,7 @@ fn targets(own: &[(NoteId, &Note)]) -> Vec<NoteId> {
 /// The keys the piano roll takes when the pointer is over it. This runs
 /// before the windows are drawn, and what it takes no other window sees.
 pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
-    let memory: Memory = ui
+    let mut memory: Memory = ui
         .data(|data| data.get_temp(memory_id()))
         .unwrap_or_default();
     let Some((area, frame)) = memory.area else {
@@ -617,16 +684,60 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
             if let Some((modifiers, key)) = action.shortcut()
                 && pressed(modifiers, key)
             {
-                let ppq = project.header.ppq;
-                let tool = action.edit(targets(&own), step, ppq, memory.keys());
+                let tool = action.edit(targets(&own), &memory, project);
                 out.push(edit(tool, None));
             }
         }
+    }
+    let sixteenth = i64::from((project.header.ppq / 4).max(1));
+    if !memory.clipboard.is_empty() && clipboard_key(ui, Key::V) {
+        // While the pattern plays the notes go to the play cursor.
+        let first = memory.clipboard.iter().map(|note| note.position);
+        let first = i64::from(first.min().unwrap_or(0));
+        let shift = if state.playing && !state.song_mode {
+            snap(state.position as f32, step).saturating_sub(first)
+        } else {
+            after(&memory.clipboard, step, sixteenth)
+        };
+        let notes = shifted(&memory.clipboard, shift, channel.index);
+        out.push(edit(
+            Edit::PasteNotes {
+                notes: notes.clone(),
+            },
+            None,
+        ));
+        memory.clipboard = notes;
+        ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
     }
     // Without a selection the other keys are another window's.
     let ids = selected(&own);
     if ids.is_empty() {
         return;
+    }
+    let chosen: Vec<Note> = own
+        .iter()
+        .map(|(_, note)| **note)
+        .filter(Note::selected)
+        .collect();
+    let copy = clipboard_key(ui, Key::C);
+    let cut = clipboard_key(ui, Key::X);
+    if copy || cut {
+        // On the system's clipboard too, so that Ctrl+V comes back as a
+        // paste, which egui's integration sends only when the clipboard
+        // has something.
+        ui.ctx()
+            .copy_text(format!("{} notes of the fl-rs piano roll", chosen.len()));
+        memory.clipboard.clone_from(&chosen);
+        ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
+    }
+    if cut {
+        out.push(edit(Edit::DeleteNotes { ids: ids.clone() }, None));
+    }
+    // FL's Ctrl+B: the copies go where a paste of the selection would go
+    // when the pattern is not playing.
+    if pressed(ctrl, Key::B) {
+        let notes = shifted(&chosen, after(&chosen, step, sixteenth), channel.index);
+        out.push(edit(Edit::PasteNotes { notes }, None));
     }
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();
@@ -642,6 +753,15 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         out.push(edit(Edit::SetNotesMuted { ids, muted }, None));
     }
     let step = step as i64;
+    // A shortcut without Shift matches with it held, so Shift+Left and
+    // Shift+Right go before the arrows that move. They shorten and
+    // lengthen the notes, and a note keeps a tick at least.
+    for (key, delta_ticks) in [(Key::ArrowLeft, -step), (Key::ArrowRight, step)] {
+        if pressed(Modifiers::SHIFT, key) {
+            let ids = ids.clone();
+            out.push(edit(Edit::ResizeNotes { ids, delta_ticks }, None));
+        }
+    }
     // Ctrl does not match a shortcut without it, so the order is free.
     for (modifiers, key, delta_ticks, delta_keys) in [
         (ctrl, Key::ArrowUp, 0, 12),
@@ -660,6 +780,56 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
             out.push(edit(moved, None));
         }
     }
+}
+
+/// Whether Ctrl+C, Ctrl+X or Ctrl+V, by `key`, was pressed: as the copy,
+/// cut or paste that egui's integration makes of it, or as the key itself.
+/// Either is taken.
+pub(crate) fn clipboard_key(ui: &Ui, key: Key) -> bool {
+    ui.input_mut(|input| {
+        let before = input.events.len();
+        input.events.retain(|event| {
+            !matches!(
+                (event, key),
+                (Event::Copy, Key::C) | (Event::Cut, Key::X) | (Event::Paste(_), Key::V)
+            )
+        });
+        let event = input.events.len() < before;
+        input.consume_key(Modifiers::COMMAND, key) | event
+    })
+}
+
+/// How far notes move to go right after the span they cover: its length,
+/// rounded up to a whole `step`. A step without a length counts as the
+/// `sixteenth` it is drawn as.
+fn after(notes: &[Note], step: u64, sixteenth: i64) -> i64 {
+    let starts = notes.iter().map(|note| i64::from(note.position));
+    let ends = notes.iter().map(|note| {
+        let length = if note.length > 0 {
+            i64::from(note.length)
+        } else {
+            sixteenth
+        };
+        i64::from(note.position) + length
+    });
+    let span = ends.max().unwrap_or(0) - starts.min().unwrap_or(0);
+    let step = step.max(1) as i64;
+    (span.max(1) + step - 1) / step * step
+}
+
+/// Copies of the notes `shift` ticks later, for this channel, each at
+/// the end of time at most.
+fn shifted(notes: &[Note], shift: i64, channel: u16) -> Vec<Note> {
+    let moved = notes.iter().map(|note| {
+        let position = i64::from(note.position).saturating_add(shift);
+        let position = position.clamp(0, i64::from(i32::MAX));
+        Note {
+            position: position as i32,
+            channel,
+            ..*note
+        }
+    });
+    moved.collect()
 }
 
 /// The row above the notes: the channel, the tools, the Tools menu, what
@@ -700,19 +870,18 @@ fn toolbar(
         });
         ui.add_enabled_ui(!own.is_empty(), |ui| {
             ui.menu_button("Tools", |ui| {
-                let step = memory.step(Grid::of(project));
-                let keys = memory.keys();
                 for action in Action::ALL {
-                    let usable = action != Action::SnapToScale || keys != 0;
+                    let usable = action != Action::SnapToScale || memory.keys() != 0;
                     if ui
                         .add_enabled(usable, egui::Button::new(action.name()))
                         .clicked()
                     {
-                        let ppq = project.header.ppq;
-                        let tool = action.edit(targets(&own), step, ppq, keys);
+                        let tool = action.edit(targets(&own), memory, project);
                         out.push(edit(tool, None));
                     }
                 }
+                ui.separator();
+                tool_settings(ui, memory);
             })
             .response
             .on_hover_text("Edit the selected notes, or all of them when none is selected");
@@ -753,6 +922,35 @@ fn toolbar(
             .clicked()
         {
             memory.colours = !memory.colours;
+        }
+    });
+}
+
+/// The steps the Tools menu's settings offer Chop and Arpeggiate besides
+/// the snap's, and the delays they offer Strum, each as a fraction of a
+/// whole note: 1/32 of a whole note is a 32nd note. FL's chopper and
+/// strummer have dialogs of their own, so these choices are not FL's.
+const TOOL_STEPS: [u16; 4] = [32, 16, 8, 4];
+const STRUMS: [u16; 4] = [128, 64, 32, 16];
+
+/// How many ticks this fraction of a whole note is, a tick at least.
+fn of_whole(ppq: u16, part: u16) -> u64 {
+    (u64::from(ppq) * 4 / u64::from(part.max(1))).max(1)
+}
+
+/// The settings at the foot of the Tools menu: a submenu for the step of
+/// Chop and Arpeggiate and one for Strum's delay.
+fn tool_settings(ui: &mut Ui, memory: &mut Memory) {
+    let note = |part: u16| format!("1/{part} note");
+    ui.menu_button("Chop and arpeggiate step", |ui| {
+        ui.selectable_value(&mut memory.tool_step, None, "Snap");
+        for part in TOOL_STEPS {
+            ui.selectable_value(&mut memory.tool_step, Some(part), note(part));
+        }
+    });
+    ui.menu_button("Strum delay", |ui| {
+        for part in STRUMS {
+            ui.selectable_value(&mut memory.strum, part, note(part));
         }
     });
 }
@@ -1708,11 +1906,21 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_at_a_far_shift_lands_at_the_end_of_time() {
+        let notes = [note(10, 24, 60), note(i32::MAX, 24, 62)];
+        let pasted = shifted(&notes, i64::MAX, 3);
+        let places: Vec<(i32, u16)> = pasted.iter().map(|n| (n.position, n.channel)).collect();
+        assert_eq!(places, [(i32::MAX, 3), (i32::MAX, 3)]);
+        assert_eq!(shifted(&notes, i64::MIN, 3)[1].position, 0);
+    }
+
+    #[test]
     fn a_click_starts_a_note_at_the_step_it_is_in() {
         assert_eq!(floor(47.9, 24), 24);
         assert_eq!(floor(48.0, 24), 48);
         assert_eq!(floor(-5.0, 24), 0);
         assert_eq!(floor(47.9, 1), 47);
+        assert_eq!(floor(f32::MAX, 24), u64::MAX);
     }
 
     #[test]

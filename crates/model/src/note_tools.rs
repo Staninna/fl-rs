@@ -1,7 +1,7 @@
 //! The piano roll's tools that make notes of notes: paint, slice, glue,
-//! quantize, chop, arpeggiate, strum and snap to scale. Each one is a
-//! single change to a pattern, so the app's undo takes the whole of it
-//! back in one step.
+//! quantize, chop, arpeggiate, strum, snap to scale, reverse, flip and
+//! legato, and the paste. Each one is a single change to a pattern, so the
+//! app's undo takes the whole of it back in one step.
 //!
 //! A note goes by its place in [`Pattern::notes`], as for the other note
 //! edits, and a place that has no note, or a record FL deleted, is
@@ -17,6 +17,13 @@
 use crate::Pattern;
 use flp::event::layout::Note;
 use std::collections::BTreeMap;
+
+/// The most notes one call of [`Pattern::chop_notes`] or
+/// [`Pattern::arpeggiate_notes`] makes: 2^16, as many as the step
+/// sequencer shows steps. A note from a file can be 2^31 ticks long, and
+/// cut a tick at a time it would ask for billions of notes, so a call that
+/// would make more is turned down whole. FL's own limit is not known.
+const MOST_PIECES: u64 = 1 << 16;
 
 impl Pattern {
     /// Add notes of this channel, each `length` ticks long, at the
@@ -149,10 +156,21 @@ impl Pattern {
     /// Cut each note into pieces `step` ticks long from its start, the
     /// last piece being what is left. FL's Chop, at its default of the
     /// snap's length. A step, and a note no longer than `step`, stay whole.
+    /// A chop into more than [`MOST_PIECES`] pieces changes nothing.
     pub fn chop_notes(&mut self, notes: &[usize], step: u64) {
         let Ok(step) = i32::try_from(step.max(1)) else {
             return;
         };
+        let pieces = self.live(notes).into_iter().map(|id| {
+            let note = &self.notes[id];
+            match note.length > step {
+                true => (note.length as u64).div_ceil(step as u64),
+                false => 0,
+            }
+        });
+        if pieces.sum::<u64>() > MOST_PIECES {
+            return;
+        }
         let mut pieces = Vec::new();
         self.each_live(notes, |note| {
             if note.length <= step {
@@ -180,22 +198,32 @@ impl Pattern {
     /// longest note. A run note is a copy of the chord note on its key.
     /// This is FL's Arpeggiator at its default pattern, up, over the
     /// chord's own keys, with each note as long as the time between them.
-    /// A chord of steps lasts one `step` per note.
+    /// A chord of steps lasts one `step` per note. Runs of more than
+    /// [`MOST_PIECES`] notes in all change nothing.
     pub fn arpeggiate_notes(&mut self, notes: &[usize], step: u64) {
         let Ok(step) = i32::try_from(step.max(1)) else {
             return;
         };
+        let chords = self.chords(notes);
+        let span = |chord: &[usize]| {
+            let longest = chord.iter().map(|id| self.notes[*id].length).max();
+            match longest.unwrap_or(0) {
+                longest if longest > 0 => longest,
+                _ => step.saturating_mul(i32::try_from(chord.len()).unwrap_or(i32::MAX)),
+            }
+        };
+        let notes = chords
+            .iter()
+            .map(|chord| (span(chord) as u64).div_ceil(step as u64));
+        if notes.sum::<u64>() > MOST_PIECES {
+            return;
+        }
         let mut runs = Vec::new();
         let mut gone = Vec::new();
-        for chord in self.chords(notes) {
+        for chord in chords {
+            let span = span(&chord);
             let keys: Vec<Note> = chord.iter().map(|id| self.notes[*id]).collect();
             let start = keys[0].position;
-            let longest = keys.iter().map(|note| note.length).max().unwrap_or(0);
-            let span = if longest > 0 {
-                longest
-            } else {
-                step.saturating_mul(keys.len() as i32)
-            };
             let mut offset = 0;
             let mut turn = 0;
             while offset < span {
@@ -225,7 +253,8 @@ impl Pattern {
             for (nth, id) in chord.into_iter().enumerate() {
                 let note = &mut self.notes[id];
                 let by = delay.saturating_mul(nth as i64);
-                let position = (i64::from(note.position) + by).min(i64::from(i32::MAX));
+                let position = i64::from(note.position).saturating_add(by);
+                let position = position.min(i64::from(i32::MAX));
                 let shift = position - i64::from(note.position);
                 if note.length > 0 {
                     note.length = (i64::from(note.length) - shift).max(1) as i32;
@@ -248,14 +277,111 @@ impl Pattern {
         if keys == 0 {
             return;
         }
-        let top = Self::TOP_KEY;
-        let fits = |key: i16| (0..=top).contains(&key) && keys & (1 << key.rem_euclid(12)) != 0;
+        let top = i32::from(Self::TOP_KEY);
+        let fits = |key: i32| (0..=top).contains(&key) && keys & (1 << key.rem_euclid(12)) != 0;
         self.each_live(notes, |note| {
-            let near = (0..12).flat_map(|by| [note.key - by, note.key + by]);
+            // In i32: a key from a file can be either end of an i16.
+            let key = i32::from(note.key);
+            let near = (0..12).flat_map(|by| [key - by, key + by]);
             if let Some(key) = near.into_iter().find(|key| fits(*key)) {
-                note.key = key;
+                note.key = key as i16;
             }
         });
+    }
+
+    /// Play the notes backwards: each note's start and end are mirrored in
+    /// the span from the first start to the last end, so the note that
+    /// ends last starts first, and every length is kept. A step, which has
+    /// no end, is mirrored at its start. FL's Tools menu flips notes in
+    /// time too; that this is what it does to them is inferred.
+    pub fn reverse_notes(&mut self, notes: &[usize]) {
+        let ids = self.live(notes);
+        let end = |note: &Note| i64::from(note.position) + i64::from(note.length.max(0));
+        let starts = ids.iter().map(|id| i64::from(self.notes[*id].position));
+        let Some(first) = starts.min() else {
+            return;
+        };
+        let last = ids.iter().map(|id| end(&self.notes[*id])).max();
+        let last = last.unwrap_or(first);
+        for id in ids {
+            let note = &mut self.notes[id];
+            let position = first + last - end(note);
+            note.position = position.clamp(0, i64::from(i32::MAX)) as i32;
+        }
+        self.notes.sort_by_key(|note| note.position);
+    }
+
+    /// Turn the notes upside down: each key is mirrored around the middle
+    /// of the notes' range of keys, so the highest becomes the lowest and
+    /// the range stays where it is. FL's Flip, as it does it to keys; the
+    /// mirror is inferred.
+    pub fn flip_notes(&mut self, notes: &[usize]) {
+        let ids = self.live(notes);
+        let keys = ids.iter().map(|id| self.notes[*id].key);
+        let (Some(low), Some(high)) = (keys.clone().min(), keys.max()) else {
+            return;
+        };
+        for id in ids {
+            let note = &mut self.notes[id];
+            // In i32: a key from a file can be any i16, and two near the
+            // top overflow the sum though their mirrors fit.
+            let key = i32::from(low) + i32::from(high) - i32::from(note.key);
+            note.key = key as i16;
+        }
+    }
+
+    /// Make each note end where the next of the notes starts, of its
+    /// channel and starting later than it: longer to close a gap, shorter
+    /// to end an overlap. The notes that start last keep their lengths, and
+    /// so does a step, which has no end. FL's quick legato, as far as is
+    /// known of it.
+    pub fn legato_notes(&mut self, notes: &[usize]) {
+        let ids = self.live(notes);
+        let mut starts: BTreeMap<u16, Vec<i32>> = BTreeMap::new();
+        for id in &ids {
+            let note = &self.notes[*id];
+            starts.entry(note.channel).or_default().push(note.position);
+        }
+        starts
+            .values_mut()
+            .for_each(|starts| starts.sort_unstable());
+        for id in ids {
+            let note = &mut self.notes[id];
+            let starts = &starts[&note.channel];
+            let next = starts.get(starts.partition_point(|at| *at <= note.position));
+            if let Some(next) = next.filter(|_| note.length > 0) {
+                // In i64: positions from a file can be the ends of an i32.
+                let length = i64::from(*next) - i64::from(note.position);
+                note.length = length.min(i64::from(i32::MAX)) as i32;
+            }
+        }
+    }
+
+    /// Add copies of these notes, with every field kept, and make them the
+    /// selection in place of the notes that were selected: what a paste
+    /// and a duplicate do. Each goes behind the notes that start where it
+    /// does, its position and length 0 at least and its key one the piano
+    /// roll has. A deleted record among them is left out.
+    ///
+    /// A pattern whose 224 the model could not read is left as it is, as
+    /// [`Pattern::add_note`] leaves it.
+    pub fn paste_notes(&mut self, notes: &[Note]) {
+        let pasted: Vec<Note> = notes
+            .iter()
+            .filter(|note| !note.is_deleted())
+            .map(|note| Note {
+                position: note.position.max(0),
+                length: note.length.max(0),
+                key: note.key.clamp(0, Self::TOP_KEY),
+                flags: note.flags | Note::SELECTED,
+                ..*note
+            })
+            .collect();
+        if pasted.is_empty() || !self.writes_notes() {
+            return;
+        }
+        self.select_notes(&[], false);
+        self.insert_all(pasted);
     }
 
     /// The chords among the notes: two or more of one channel that start
@@ -293,12 +419,28 @@ impl Pattern {
         }
     }
 
-    /// Put each note behind the notes that start where it does or before.
-    fn insert_all(&mut self, notes: Vec<Note>) {
-        for note in notes {
-            let at = self.notes.partition_point(|n| n.position <= note.position);
-            self.notes.insert(at, note);
+    /// Put each note behind the notes that start where it does or before,
+    /// and the new notes that start together in the order they come.
+    ///
+    /// One merge of the two lists, not an insert per note: a chop can
+    /// make [`MOST_PIECES`] notes, and inserts would move every note
+    /// behind each of them.
+    fn insert_all(&mut self, mut notes: Vec<Note>) {
+        if notes.is_empty() {
+            return;
         }
+        // Stable, so notes that start together keep their order.
+        notes.sort_by_key(|note| note.position);
+        let mut new = notes.into_iter().peekable();
+        let old = std::mem::take(&mut self.notes);
+        self.notes.reserve(old.len() + new.len());
+        for note in old {
+            while let Some(earlier) = new.next_if(|new| new.position < note.position) {
+                self.notes.push(earlier);
+            }
+            self.notes.push(note);
+        }
+        self.notes.extend(new);
     }
 }
 
@@ -315,7 +457,9 @@ pub fn slice_line_at(from: (u64, i32), to: (u64, i32), key: i32, step: u64) -> O
     let tick = if k0 == k1 {
         t0 as f64
     } else {
-        let along = f64::from(key - k0) / f64::from(k1 - k0);
+        // In f64: keys this is given can be any i32, and their difference
+        // overflows one.
+        let along = (f64::from(key) - f64::from(k0)) / (f64::from(k1) - f64::from(k0));
         t0 as f64 + (t1 as f64 - t0 as f64) * along
     };
     let step = step.max(1) as f64;
@@ -504,6 +648,110 @@ mod tests {
     }
 
     #[test]
+    fn flip_and_legato_take_keys_and_positions_at_the_ends_of_their_types() {
+        let mut notes = pattern(&[note(0, 10, 30_000), note(5, 10, 30_001)]);
+        notes.flip_notes(&[0, 1]);
+        assert_eq!(placed(&notes), [(0, 10, 30_001), (5, 10, 30_000)]);
+        let mut notes = pattern(&[note(i32::MIN, 10, 60), note(i32::MAX, 10, 62)]);
+        notes.legato_notes(&[0, 1]);
+        assert_eq!(placed(&notes)[0], (i32::MIN, i32::MAX, 60));
+    }
+
+    #[test]
+    fn reverse_mirrors_the_notes_in_their_span_and_keeps_their_lengths() {
+        let mut first = note(10, 30, 60);
+        first.velocity = 40;
+        let mut notes = pattern(&[first, note(40, 0, 62), note(50, 60, 64), note(300, 5, 65)]);
+        // The span is from 10 to 110: the note from 10 to 40 goes to 80 to
+        // 110, the step at 40 to 80 and the note that ends at 110 to 10.
+        notes.reverse_notes(&[0, 1, 2, 9]);
+        assert_eq!(
+            placed(&notes),
+            [(10, 60, 64), (80, 30, 60), (80, 0, 62), (300, 5, 65)]
+        );
+        assert_eq!(notes.notes[1].velocity, 40);
+        // Twice is where they were.
+        notes.reverse_notes(&[0, 1, 2]);
+        assert_eq!(
+            placed(&notes),
+            [(10, 30, 60), (40, 0, 62), (50, 60, 64), (300, 5, 65)]
+        );
+        notes.reverse_notes(&[]);
+        assert_eq!(placed(&notes).len(), 4);
+    }
+
+    #[test]
+    fn flip_mirrors_the_keys_around_the_middle_of_their_range() {
+        let mut notes = pattern(&[
+            note(0, 24, 60),
+            note(24, 24, 64),
+            note(48, 24, 67),
+            note(0, 24, 90),
+        ]);
+        notes.flip_notes(&[0, 1, 2, 9]);
+        assert_eq!(
+            placed(&notes),
+            [(0, 24, 67), (24, 24, 63), (48, 24, 60), (0, 24, 90)]
+        );
+        notes.flip_notes(&[0, 1, 2]);
+        assert_eq!(
+            placed(&notes)[..3],
+            [(0, 24, 60), (24, 24, 64), (48, 24, 67)]
+        );
+        notes.flip_notes(&[]);
+    }
+
+    #[test]
+    fn legato_ends_each_note_where_the_next_one_starts() {
+        let mut other = note(30, 10, 70);
+        other.channel = 2;
+        let mut notes = pattern(&[
+            note(0, 10, 60),
+            note(0, 200, 64),
+            other,
+            note(48, 0, 62),
+            note(96, 24, 60),
+            note(96, 12, 67),
+        ]);
+        notes.legato_notes(&[0, 1, 2, 3, 4, 5]);
+        // The chord at 0 ends at the step, which keeps no length, and the
+        // chord at 96 is last. Channel 2's note has none after it.
+        assert_eq!(
+            placed(&notes),
+            [
+                (0, 48, 60),
+                (0, 48, 64),
+                (30, 10, 70),
+                (48, 0, 62),
+                (96, 24, 60),
+                (96, 12, 67)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_adds_copies_that_become_the_selection() {
+        let mut chosen = note(0, 24, 60);
+        chosen.flags |= Note::SELECTED;
+        let mut notes = pattern(&[chosen, note(96, 24, 62)]);
+        let mut copied = note(96, 48, 64);
+        (copied.velocity, copied.flags) = (30, Note::MUTED);
+        let mut gone = note(0, 1, 1);
+        (gone.tag, gone.channel) = (u16::MAX, u16::MAX);
+        notes.paste_notes(&[copied, note(-5, 12, 200), gone]);
+        assert_eq!(
+            placed(&notes),
+            [(0, 24, 60), (0, 12, 131), (96, 24, 62), (96, 48, 64)]
+        );
+        let flags: Vec<u8> = notes.notes.iter().map(|note| note.flags).collect();
+        let (on, muted) = (Note::SELECTED, Note::MUTED | Note::SELECTED);
+        assert_eq!(flags, [0, on, 0, muted]);
+        assert_eq!(notes.notes[3].velocity, 30);
+        notes.paste_notes(&[]);
+        assert_eq!(placed(&notes).len(), 4);
+    }
+
+    #[test]
     fn paint_adds_notes_of_one_length() {
         let mut notes = pattern(&[note(48, 24, 60)]);
         notes.add_notes(1, 24, &[(0, 60), (24, 62), (72, 64)]);
@@ -527,5 +775,39 @@ mod tests {
         assert_eq!(notes.notes[5].key, 130);
         notes.snap_notes_to_scale(&[0, 1, 2, 3], 0);
         assert_eq!(notes.notes[3].key, 65);
+    }
+
+    #[test]
+    fn snap_to_scale_leaves_keys_at_the_ends_of_their_type_alone() {
+        let mut notes = pattern(&[note(0, 24, i16::MAX), note(0, 24, i16::MIN)]);
+        notes.snap_notes_to_scale(&[0, 1], 0b1010_1011_0101);
+        assert_eq!(placed(&notes), [(0, 24, i16::MAX), (0, 24, i16::MIN)]);
+    }
+
+    #[test]
+    fn a_strum_of_the_longest_delay_stops_at_the_end_of_time() {
+        let mut notes = pattern(&[note(10, 96, 60), note(10, 96, 64)]);
+        notes.strum_notes(&[0, 1], u64::MAX);
+        assert_eq!(placed(&notes), [(10, 96, 60), (i32::MAX, 1, 64)]);
+    }
+
+    #[test]
+    fn a_chop_or_an_arpeggio_into_billions_of_notes_changes_nothing() {
+        let long = [note(0, i32::MAX, 60), note(0, i32::MAX, 64)];
+        let mut notes = pattern(&long);
+        notes.chop_notes(&[0, 1], 1);
+        assert_eq!(notes.notes, long);
+        notes.arpeggiate_notes(&[0, 1], 1);
+        assert_eq!(notes.notes, long);
+        // As many as the step sequencer shows is still made.
+        let mut notes = pattern(&[note(0, 1 << 16, 60)]);
+        notes.chop_notes(&[0], 1);
+        assert_eq!(notes.notes.len(), 1 << 16);
+    }
+
+    #[test]
+    fn a_slanted_line_between_keys_at_the_ends_of_an_i32_crosses_the_middle() {
+        let at = slice_line_at((0, i32::MIN), (100, i32::MAX), 0, 1);
+        assert_eq!(at, Some(50));
     }
 }

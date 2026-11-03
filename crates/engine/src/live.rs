@@ -24,6 +24,13 @@ const KEYS: usize = Pattern::TOP_KEY as usize + 1;
 /// The voices of a sampler channel that sound at once.
 const VOICES: usize = 16;
 
+/// How long a sampler's voice fades out for when its key is let go of, in
+/// milliseconds. The engine plays a sampler note without the channel's
+/// volume envelope, so its voice has no release of its own, and stopping
+/// it on the spot clicks. This short fade is a stand-in for that release,
+/// not FL's.
+const RELEASE_MS: u32 = 5;
+
 /// What a note on of a key starts.
 enum Start {
     Voice(Box<Voice>),
@@ -34,6 +41,8 @@ enum Start {
 /// One channel, played live.
 pub(crate) struct Live {
     engine: Engine,
+    /// [`RELEASE_MS`] in output samples.
+    release: usize,
     keys: Box<[Option<Start>]>,
     /// The number of the generator note each key has sounding.
     held: Box<[Option<u32>]>,
@@ -68,12 +77,13 @@ impl Live {
             ..Pattern::default()
         }];
         let graph = Graph::keys(&alone, index, sample_rate, &Approximate, plugin_dir, sample)?;
-        Ok(Self::of(graph))
+        let release = (sample_rate as usize).saturating_mul(RELEASE_MS as usize) / 1000;
+        Ok(Self::of(graph, release))
     }
 
     /// Take the notes out of a graph built as [`Live::new`] builds one: the
     /// key of each is the tick it starts on.
-    fn of(mut graph: Graph) -> Self {
+    fn of(mut graph: Graph, release: usize) -> Self {
         let mut keys: Box<[Option<Start>]> = (0..KEYS).map(|_| None).collect();
         let starts: Vec<usize> = (0..KEYS)
             .map(|key| graph.clock.sample(key as u64))
@@ -98,6 +108,7 @@ impl Live {
         engine.play();
         Live {
             engine,
+            release,
             keys,
             held: vec![None; KEYS].into(),
             next,
@@ -128,12 +139,12 @@ impl Live {
         }
     }
 
-    /// End the key. A sampler channel's voices all end here, since only
-    /// one key is held at a time.
+    /// Let go of the key. A sampler channel's voices all fade out here,
+    /// over [`RELEASE_MS`], since only one key is held at a time.
     pub fn note_off(&mut self, key: u8) {
         let key = usize::from(key);
         match self.keys.get(key) {
-            Some(Some(Start::Voice(_))) => self.engine.end_voices(),
+            Some(Some(Start::Voice(_))) => self.engine.release_voices(self.release),
             Some(Some(Start::Cue(generator, _))) => {
                 if let Some(voice) = self.held[key].take() {
                     self.engine.signal(*generator, Signal::Off(voice));
@@ -233,6 +244,9 @@ pub(crate) mod tests {
         assert!(out.iter().all(|v| *v > 0.0), "{out:?}");
         let level = out[0];
         live.note_off(60);
+        // The rest of the sample, fading, and then nothing.
+        let out = play(&mut live, 50);
+        assert!(out.windows(2).all(|w| w[1] < w[0] && w[1] > 0.0), "{out:?}");
         assert_eq!(play(&mut live, 50), [0.0; 50]);
         assert!(!live.sounding());
 
@@ -245,6 +259,78 @@ pub(crate) mod tests {
         // A key the channel has not got plays nothing.
         live.note_on(200, 1.0);
         assert_eq!(play(&mut live, 10), [0.0; 10]);
+    }
+
+    #[test]
+    fn a_released_key_fades_out_rather_than_stopping_on_the_spot() {
+        let channel = Channel {
+            index: 0,
+            kind: Some(ChannelKind::Sampler),
+            sample_path: Some("sample".to_owned()),
+            ..Channel::default()
+        };
+        let mut live = live_with(channel, 10_000);
+        live.note_on(60, 1.0);
+        let held = play(&mut live, 100);
+        let level = held[99];
+        live.note_off(60);
+        // 5 ms at 48 kHz: 240 samples down a straight line from the level
+        // the key had, so no step between two samples is more than a
+        // 240th of it. A hard stop would drop the whole level at once.
+        let fade = RATE as usize * RELEASE_MS as usize / 1000;
+        assert_eq!(fade, 240);
+        let out = play(&mut live, 300);
+        let steps = std::iter::once(level).chain(out.iter().copied());
+        let steps: Vec<f32> = steps.collect();
+        let largest = steps
+            .windows(2)
+            .map(|w| (w[0] - w[1]).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            largest <= level / fade as f32 * 1.01,
+            "{largest} of {level}"
+        );
+        assert!((out[0] - level).abs() < 1e-6, "{} after {level}", out[0]);
+        assert!(out[fade - 1] > 0.0);
+        assert_eq!(out[fade..], [0.0; 60]);
+        assert!(!live.sounding());
+
+        // Letting go again, or of a key that was let go of, keeps the fade.
+        live.note_on(60, 1.0);
+        play(&mut live, 10);
+        live.note_off(60);
+        play(&mut live, 100);
+        live.note_off(60);
+        let out = play(&mut live, 200);
+        assert!(out[..fade - 100].iter().all(|v| *v > 0.0));
+        assert_eq!(out[fade - 100..], [0.0; 60]);
+
+        // A key played again while the last fades starts in full, and the
+        // fading voice goes on under it.
+        live.note_on(60, 1.0);
+        play(&mut live, 10);
+        live.note_on(64, 1.0);
+        let out = play(&mut live, 10);
+        assert!(out[0] > level, "{} under {level}", out[0]);
+    }
+
+    #[test]
+    fn keys_played_and_let_go_of_ask_for_no_memory() {
+        let mut live = live();
+        let (mut left, mut right) = (vec![0.0; 64], vec![0.0; 64]);
+        let (mut a, mut b) = (vec![0.0; 64], vec![0.0; 64]);
+        // The engine sizes what it needs as it plays its first block.
+        live.add(&mut left, &mut right, (&mut a, &mut b));
+        let ((), largest) = crate::sample::robustness::largest_allocation(|| {
+            for key in [60, 64, 60, 200] {
+                live.note_on(key, 1.0);
+                live.add(&mut left, &mut right, (&mut a, &mut b));
+                live.note_off(key);
+                live.note_off(key);
+                live.add(&mut left, &mut right, (&mut a, &mut b));
+            }
+        });
+        assert_eq!(largest, 0);
     }
 
     #[test]

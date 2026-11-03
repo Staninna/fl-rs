@@ -80,11 +80,17 @@ impl Band {
     /// `FUN_0127b390` and `FUN_0069d0e0` do. A band with a gain runs for
     /// good, and one without runs on for `tail` frames: FL starts that tail
     /// on any change to a band without a gain.
+    ///
+    /// The coefficients come from the values held to their knobs' ranges,
+    /// a gain of -1800..=1800 and a frequency and width of 0..=65536: a
+    /// gain from a file at the end of an i32 gives an infinite level, and
+    /// a width below 0 a shelf's square root of a negative number. Whether
+    /// FL holds a file's values to them is not known.
     fn set(&mut self, raw: EqBand, sample_rate: u32, tail: i64) {
         self.raw = raw;
-        self.frequency = frequency_hz(raw.frequency);
-        self.width = (f64::from(raw.width) * (1.0 / 65_536.0)) as f32;
-        self.gain = raw.gain as f32 * 0.01;
+        self.frequency = frequency_hz(raw.frequency.clamp(0, 65_536));
+        self.width = (f64::from(raw.width.clamp(0, 65_536)) * (1.0 / 65_536.0)) as f32;
+        self.gain = raw.gain.clamp(-1800, 1800) as f32 * 0.01;
         self.left = if raw.gain == 0 { tail } else { -1 };
         self.design(sample_rate);
     }

@@ -1,3 +1,33 @@
+# Handoff, 2026-11-03, second editing batch, review fixes and edit robustness
+
+Same branch and PR (Staninna/fl-rs#5), same container without FL. Three more agents worked in their own worktrees (each with its own `codegen-units` for `model` in an untracked `.cargo/config.toml`, so their builds in the shared target dir stop overwriting each other; worktrees made by the agent tool start at `main`, so each agent first fast-forwarded to this branch).
+
+- Copilot's review of PR 5: fixed the step fill's unbounded size, the arpeggiator's i64 overflow, Flip's and Legato's overflows, and where a split clip's second part starts (now the cut at the clip's rate past its trim's start; an audio clip that anything but the tempo moves stays whole). Left as it is, thread open for the user: a pattern split cuts a note that crosses it, as FL is thought to.
+- Playlist: Ctrl+C/V clips (`Edit::PasteItems`), Ctrl+B, track mute from a menu on the track name (238 @12, PyFLP's `enabled`; `sequence.rs` now skips muted tracks, which a corpus render should check nothing in the corpus trips over), Delete pattern, keypad -/+ for the previous/next pattern, File > New (`Project::blank`, no mixer or arrangement), the cloned channel selected.
+- Mixer/rack/top bar: Ctrl+L links the rack's channel to the insert, F2 renames what the pointer is over (`windows::under_pointer`), channel colour (128, and 41 = 1), insert colour (149; pre-11.5.9 files minus 36), time signature on the position's menu (17, 18, and 35 = 1), channel pitch in cents (219 @8 and any 225 for control 4), bypass/enable all effects, a test that every knob resets on a double click.
+- Robustness: `crates/model/tests/edits.rs` (random runs of every edit, written and read back byte for byte), `crates/ui/tests/random_input.rs` (random input at every window), `apps/fl-rs/tests/random_commands.rs` (undo all gives the opened bytes), `crates/engine/tests/edited.rs`, `crates/ui/tests/file_ends.rs`. Fixed: overflows in slice-along, snap to scale, strum, the rack's note view, the piano roll's and playlist's drag sums, the paste shift and a tempo drag from a file tempo past i32; chop and arpeggiate that would make over 2^16 notes are turned down whole (our bound).
+- `docs/shortcuts.md`: every key and mouse action, by window.
+
+Left open: the mixer draws a pre-11.5.9 insert colour without FL's +36; a 67 that names a deleted pattern is kept; the window title of a new project is plain "fl-rs"; the five fixed Copilot threads could not be resolved from here (permission), so they show as outdated.
+
+# Handoff, 2026-11-02, editing and robustness batch
+
+Branch `claude/determined-wozniak-du1sx5`, off `main` at `eba6a78`. Cloud container with no FL Studio install: no DLLs, no corpus, so nothing here was checked against FL's code, and no README screenshot was redrawn (nothing changed at rest; no `ui` snapshot changed). Four agents each did a batch in their own worktree, one commit per task, merged here. fmt, workspace clippy, `cargo test --workspace` (no corpus), `progress.py --check` and `bench.py --check` pass at the head. FL behaviour picked from what is known of FL rather than its binary (shortcuts, menus, solo rules) says so as inferred in each doc comment.
+
+- Piano roll: Tools menu Reverse, Flip (Alt+Y), Legato (Ctrl+L); copy, cut, paste (Ctrl+C/X/V, which also put a line on the system clipboard, since egui only sends a paste when it holds text); Ctrl+B duplicates after the selection; Shift+Left/Right shorten and lengthen by the snap; submenus for Chop/Arpeggiate's step and Strum's delay. `flp::Note` derives `Eq` now.
+- Playlist: Ctrl+A / Ctrl+D, arrow nudges (snap step, one track), Ctrl+E splits the selected clips at the play cursor (`Edit::SplitItems`; FL splits with a slice tool, which the playlist does not have).
+- Channel rack: rename (double click, or F2 while the rack is shown), solo on a right click on the switch, and a menu on the name that shifts, fills each 2/4/8 or clears the steps and clones the channel (events copied with the next index; automation clips and notes are not cloned). `crates/model/src/channel_edit.rs`.
+- Mixer: solo (Ctrl+click or right click on the switch; keeps the insert, what sends into it and its way to the master), a strip menu for polarity, swap and separation, M and S keys.
+- Top bar: tempo by drag or typed value (10..522 BPM; every tempo event the project has is written), F4 / "New pattern", "Clone pattern", "Rename pattern" (F2 when the rack is not shown).
+- Robustness: `crates/flp/tests/robustness.rs`, `crates/model/tests/robustness.rs`, `crates/engine/src/sample/robustness.rs`, `crates/engine/tests/dangling.rs`. Fixed: `Pattern::steps` at PPQ < 8 with a note at 2^31 (capped at 65,536 steps), symphonia and wavicle panicking on overflowing WAV headers in debug (caught, now a decode error), a WAV of rate 0, float samples that are NaN or infinite (0, a stand-in), sides of unequal length, a far seek, arpeggiator range/repeat at i32's ends (capped), keys at i16's ends (held to -128..=255 for generators), and insert EQ values past the knobs (clamped; FL itself does not clamp the gain). These bounds are ours and change nothing inside FL's ranges, but a corpus render should confirm that.
+- Live preview: a released key fades out over 5 ms (a stand-in; the engine plays no sampler release) instead of stopping hard.
+
+## Next
+
+- On a machine with FL: rerun the corpus render and the profile harness to confirm the clamps changed no hash, and redraw the screenshots if wanted.
+- Left open: a cloned channel is not selected after it is made; a cloned pattern goes to the lowest free index rather than FL's renumbering after the source; no app test checks that a paste or cut undoes in one step.
+- Everything in the 2026-11-02 "note pitch" section's Next list below still stands.
+
 # Handoff, 2026-11-02, note pitch, the plugin bench and robustness
 
 Branch `claude/fervent-cori-pkwjx7`, off `main` at `f40ac7a`. Worked in a cloud container with no FL Studio install: no DLLs, no corpus, no Ghidra. Nothing here was checked against FL's code or rendered from the corpus. fmt, workspace clippy, the dsp, flp, model, plugins and ui tests (the ui snapshots through lavapipe), the engine lib, fixtures and no_alloc tests (no corpus), `progress.py --check`, `bench.py --check` and the plugin bench check pass at the head.

@@ -478,6 +478,8 @@ fn the_keys_act_on_the_selection_under_the_pointer() {
         (Modifiers::NONE, Key::ArrowDown),
         (Modifiers::NONE, Key::ArrowLeft),
         (Modifiers::NONE, Key::ArrowRight),
+        (Modifiers::SHIFT, Key::ArrowLeft),
+        (Modifiers::SHIFT, Key::ArrowRight),
         (ctrl, Key::ArrowUp),
         (ctrl, Key::ArrowDown),
         (ctrl, Key::A),
@@ -498,6 +500,15 @@ fn the_keys_act_on_the_selection_under_the_pointer() {
         moved(&ids, 0, -1),
         moved(&ids, -24, 0),
         moved(&ids, 24, 0),
+        // With Shift they resize, and do not move.
+        Edit::ResizeNotes {
+            ids: ids.clone(),
+            delta_ticks: -24,
+        },
+        Edit::ResizeNotes {
+            ids: ids.clone(),
+            delta_ticks: 24,
+        },
         moved(&ids, 0, 12),
         moved(&ids, 0, -12),
         Edit::SelectNotes {
@@ -702,7 +713,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
     }
     let mut harness = harness(project);
     let ids = vec![BASS[0], BASS[2]];
-    for entry in ["Glue", "Arpeggiate"] {
+    for entry in ["Glue", "Arpeggiate", "Reverse"] {
         harness.get_by_label("Tools").click();
         harness.run();
         harness.get_by_label(entry).click();
@@ -717,6 +728,7 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
                 ids: ids.clone(),
                 step
             }),
+            edit(Edit::ReverseNotes { ids: ids.clone() }),
         ]
     );
 
@@ -727,6 +739,8 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
         (Modifiers::SHIFT, Key::Q),
         (Modifiers::ALT, Key::U),
         (Modifiers::ALT, Key::S),
+        (Modifiers::ALT, Key::Y),
+        (Modifiers::COMMAND, Key::L),
     ] {
         harness.key_press_modifiers(modifiers, key);
         harness.run();
@@ -748,8 +762,146 @@ fn the_tools_menu_and_its_keys_edit_the_selection() {
             ids: ids.clone(),
             delay: 6,
         },
+        Edit::FlipNotes { ids: ids.clone() },
+        Edit::LegatoNotes { ids: ids.clone() },
     ];
-    assert_eq!(edits(&harness)[2..], expected.map(edit));
+    assert_eq!(edits(&harness)[3..], expected.map(edit));
+}
+
+/// The fixture with these notes selected.
+fn with_selected(ids: &[usize]) -> Project {
+    let mut project = fixture();
+    for id in ids {
+        project.patterns[0].notes[*id].flags |= Note::SELECTED;
+    }
+    project
+}
+
+/// The notes of the fixture at these places, `shift` ticks later.
+fn copies(project: &Project, ids: &[usize], shift: i32) -> Edit {
+    let notes = &project.patterns[0].notes;
+    let notes = ids.iter().map(|id| Note {
+        position: notes[*id].position + shift,
+        ..notes[*id]
+    });
+    Edit::PasteNotes {
+        notes: notes.collect(),
+    }
+}
+
+#[test]
+fn copy_cut_and_paste_take_the_selection_and_put_it_after_itself() {
+    let ids = [BASS[0], BASS[1]];
+    let project = with_selected(&ids);
+    let mut harness = harness_with(project.clone(), |state| state.playing = false);
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.run();
+    // With nothing copied a paste does nothing.
+    let ctrl = Modifiers::COMMAND;
+    harness.key_press_modifiers(ctrl, Key::V);
+    harness.run();
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
+
+    // The two notes span 144 ticks, six steps of the grid: each paste goes
+    // that far after the one before. A cut is a delete, and its paste goes
+    // after where the notes were. egui's integration sends a cut as an
+    // event of its own.
+    for (modifiers, key) in [(ctrl, Key::C), (ctrl, Key::V), (ctrl, Key::V)] {
+        harness.key_press_modifiers(modifiers, key);
+        harness.run();
+    }
+    harness.event(egui::Event::Cut);
+    harness.run();
+    harness.event(egui::Event::Paste("anything".to_owned()));
+    harness.run();
+    let expected = [
+        edit(copies(&project, &ids, 144)),
+        edit(copies(&project, &ids, 288)),
+        edit(Edit::DeleteNotes { ids: ids.to_vec() }),
+        edit(copies(&project, &ids, 144)),
+    ];
+    assert_eq!(edits(&harness), expected);
+
+    // While the pattern plays a paste goes to the play cursor, snapped:
+    // tick 250 is nearest 240.
+    let mut harness = harness_with(project.clone(), |state| state.position = 250);
+    harness.hover_at(at(&harness, 30.0, 58));
+    for key in [Key::C, Key::V] {
+        harness.key_press_modifiers(ctrl, key);
+        harness.run();
+    }
+    assert_eq!(edits(&harness), [edit(copies(&project, &ids, 240))]);
+}
+
+#[test]
+fn ctrl_b_duplicates_the_selection_after_itself() {
+    // The D#4 from tick 192 lasts 144 ticks, six steps.
+    let project = with_selected(&[BASS[2]]);
+    let mut harness = harness(project.clone());
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+    harness.run();
+    assert_eq!(edits(&harness), [edit(copies(&project, &[BASS[2]], 144))]);
+
+    // With a bar's snap the copy goes a bar on.
+    choose_snap(&mut harness, "Line", "Bar");
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+    harness.run();
+    assert_eq!(
+        edits(&harness)[1..],
+        [edit(copies(&project, &[BASS[2]], 384))]
+    );
+}
+
+#[test]
+fn the_tools_settings_choose_the_chop_step_and_the_strum_delay() {
+    let mut harness = harness(fixture());
+    for (submenu, entry) in [
+        ("Chop and arpeggiate step", "1/8 note"),
+        ("Strum delay", "1/32 note"),
+    ] {
+        harness.get_by_label("Tools").click();
+        harness.run();
+        harness.get_by_label_contains(submenu).click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+        harness.key_press(Key::Escape);
+        harness.run();
+    }
+    assert!(edits(&harness).is_empty(), "{:?}", edits(&harness));
+    harness.hover_at(at(&harness, 30.0, 58));
+    harness.run();
+    for key in [Key::U, Key::A, Key::S] {
+        harness.key_press_modifiers(Modifiers::ALT, key);
+        harness.run();
+    }
+    // At PPQ 96 an 8th note is 48 ticks and a 32nd 12. Quantize keeps
+    // the grid's step.
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Q);
+    harness.run();
+    let ids = BASS.to_vec();
+    let expected = [
+        Edit::ChopNotes {
+            ids: ids.clone(),
+            step: 48,
+        },
+        Edit::ArpeggiateNotes {
+            ids: ids.clone(),
+            step: 48,
+        },
+        Edit::StrumNotes {
+            ids: ids.clone(),
+            delay: 12,
+        },
+        Edit::QuantizeNotes {
+            ids,
+            step: 24,
+            lengths: true,
+        },
+    ];
+    assert_eq!(edits(&harness), expected.map(edit));
 }
 
 fn choose_snap(harness: &mut Harness<'_, Vec<Command>>, from: &str, to: &str) {

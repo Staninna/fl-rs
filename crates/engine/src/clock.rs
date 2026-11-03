@@ -6,6 +6,13 @@ use crate::mix::BLOCK;
 /// of song at 48 kHz. Past them the tempo stays what it was in the last.
 const CELLS: usize = 1 << 20;
 
+/// The latest output sample a clock gives, a quarter of `usize`'s range:
+/// over 10^12 years at 48 kHz on a 64-bit machine. Only a seek far past
+/// the song, or a note near tick 2^31 at a crawl of a tempo, reaches it,
+/// and such a tick is held here so that the sums the engine does on a
+/// position cannot overflow.
+pub(crate) const LAST_SAMPLE: usize = usize::MAX / 4;
+
 /// Converts a position in ticks to a position in output samples.
 ///
 /// The tempo is the project's for the whole song, unless an automation
@@ -66,14 +73,18 @@ impl Clock {
     }
 
     /// The output sample nearest to `tick`.
+    /// It is at most [`LAST_SAMPLE`].
     pub fn sample(&self, tick: u64) -> usize {
         let tick = tick as f64;
         let started = self.cells.partition_point(|(start, _)| *start <= tick);
-        let Some(cell) = started.checked_sub(1) else {
-            return (tick * self.samples_per_tick).round() as usize;
+        let sample = match started.checked_sub(1) {
+            None => tick * self.samples_per_tick,
+            Some(cell) => {
+                let (start, per_tick) = self.cells[cell];
+                (cell * BLOCK) as f64 + (tick - start) * per_tick
+            }
         };
-        let (start, per_tick) = self.cells[cell];
-        ((cell * BLOCK) as f64 + (tick - start) * per_tick).round() as usize
+        (sample.round() as usize).min(LAST_SAMPLE)
     }
 
     /// The tick nearest to an output sample.

@@ -4,18 +4,38 @@
 //! A click selects an item, and with Shift adds it to the selection. A drag
 //! moves the selection, a drag by an item's right edge resizes it, and
 //! Ctrl+drag moves a copy. A right click mutes or unmutes and Delete
-//! removes. A drag snaps to the grid unless Alt is held. Ctrl+wheel zooms
+//! removes. A right click on a track's name opens a menu that mutes the
+//! track or unmutes it, which FL does with a switch beside the name: a
+//! muted track's name and items are drawn faint. A drag snaps to the grid unless Alt is held. Ctrl+wheel zooms
 //! around the pointer, the wheel scrolls through the tracks and Shift+wheel
 //! along the timeline. A click on the ruler seeks.
+//!
+//! With the pointer over the playlist, Ctrl+A selects every item and
+//! Ctrl+D lets go of them, as in FL. The left and right arrows move the
+//! selection along by the step a drag snaps to, and the up and down arrows
+//! by a track (inferred: FL's own keys for this were not looked up).
+//! Ctrl+E cuts the selected items under the play cursor in two, which is
+//! this app's key: FL cuts with its slice tool, and this playlist has no
+//! tools.
+//!
+//! Ctrl+C copies the selected items, and Ctrl+V pastes them at the play
+//! cursor, snapped to the step a drag snaps to, each on the track it was
+//! copied from, and selects them. The items are kept in the playlist, and
+//! the system's clipboard gets a line that says how many, as the piano
+//! roll does. Ctrl+B duplicates the selection, as FL's does: the copies go
+//! right after it, moved by the span it covers rounded up to that step,
+//! and become the selection. Where FL's paste goes and that its Ctrl+B
+//! rounds to the snap are inferred.
 //!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
 
+use crate::piano_roll::clipboard_key;
 use crate::widgets::next_drag_id;
-use crate::{Command, Edit, Grid, ItemId, UiState};
+use crate::{Command, CopiedItem, Edit, Grid, ItemId, UiState};
 use egui::{
-    Align2, Color32, Context, CursorIcon, FontId, Key, PointerButton, Pos2, Rect, Sense, Shape,
-    Stroke, StrokeKind, Ui, pos2, vec2,
+    Align2, Color32, Context, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
+    Shape, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use engine::automation::Curve;
 use flp::event::layout::Point;
@@ -162,9 +182,11 @@ pub(crate) fn snap_step(grid: Grid, scale: f32) -> u64 {
     step
 }
 
-/// The multiple of `step` nearest to `tick`.
+/// The multiple of `step` nearest to `tick`, or an end of an i64 for a
+/// tick past what one holds.
 pub(crate) fn snap(tick: f32, step: u64) -> i64 {
-    (tick / step as f32).round() as i64 * step as i64
+    let step = i64::try_from(step).unwrap_or(i64::MAX);
+    ((tick / step as f32).round() as i64).saturating_mul(step)
 }
 
 /// Where the timeline's ticks are on the screen.
@@ -207,6 +229,14 @@ struct Memory {
     /// The tick at the timeline's left edge.
     left: f32,
     drag: Option<Drag>,
+    /// Where the playlist was drawn and in which frame, for [`keys`], which
+    /// runs before the windows are drawn.
+    area: Option<(Rect, u64)>,
+    /// Points per tick as the timeline was drawn last, for the step the
+    /// arrows move by.
+    scale: f32,
+    /// The items Ctrl+C took, as they were when it did.
+    clipboard: Vec<PlaylistItem>,
 }
 
 impl Default for Memory {
@@ -215,8 +245,130 @@ impl Default for Memory {
             zoom: 1.0,
             left: 0.0,
             drag: None,
+            area: None,
+            scale: 1.0,
+            clipboard: Vec::new(),
         }
     }
+}
+
+fn memory_id() -> egui::Id {
+    egui::Id::new("fl-rs playlist")
+}
+
+/// The keys the playlist takes when the pointer is over it and no text
+/// field has the keyboard. This runs before the windows are drawn, and
+/// what it takes no other window sees.
+pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
+    let mut memory: Memory = ui
+        .data(|data| data.get_temp(memory_id()))
+        .unwrap_or_default();
+    let Some((area, frame)) = memory.area else {
+        return;
+    };
+    let pointer = ui.input(|input| input.pointer.hover_pos());
+    let over = pointer.is_some_and(|pos| area.contains(pos));
+    // A playlist that is no longer drawn has no pointer over it.
+    let drawn = frame + 1 >= ui.ctx().cumulative_frame_nr();
+    if !over || !drawn || ui.memory(|egui| egui.focused().is_some()) {
+        return;
+    }
+    let blocks = blocks(&state.project);
+    let selected: Vec<ItemId> = blocks
+        .iter()
+        .filter(|block| block.selected)
+        .map(|block| block.id)
+        .collect();
+    let pressed = |modifiers, key| ui.input_mut(|input| input.consume_key(modifiers, key));
+    let ctrl = Modifiers::COMMAND;
+
+    if pressed(ctrl, Key::A) && !blocks.is_empty() {
+        let ids = blocks.iter().map(|block| block.id).collect();
+        out.push(edit(Edit::SelectItems { ids, add: false }));
+    }
+    let step = snap_step(Grid::of(&state.project), memory.scale);
+    if !memory.clipboard.is_empty() && clipboard_key(ui, Key::V) {
+        let first = memory.clipboard.iter().map(|item| item.position).min();
+        let first = i64::from(first.unwrap_or(0));
+        let at = (state.position + step / 2) / step * step;
+        let shift = i64::try_from(at).unwrap_or(i64::MAX) - first;
+        let items = shifted(&memory.clipboard, shift);
+        out.push(edit(Edit::PasteItems { items }));
+    }
+    // Without a selection the other keys are another window's.
+    if selected.is_empty() {
+        return;
+    }
+    let records = state
+        .project
+        .current_arrangement()
+        .map_or(&[][..], |a| &a.items);
+    let chosen: Vec<PlaylistItem> = selected.iter().map(|id| records[*id]).collect();
+    if clipboard_key(ui, Key::C) {
+        // On the system's clipboard too, so that Ctrl+V comes back as a
+        // paste, which egui's integration sends only when the clipboard
+        // has something.
+        let text = format!("{} items of the fl-rs playlist", chosen.len());
+        ui.ctx().copy_text(text);
+        memory.clipboard.clone_from(&chosen);
+        ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
+    }
+    if pressed(ctrl, Key::B) {
+        let chosen_blocks = blocks.iter().filter(|block| block.selected);
+        let start = chosen_blocks.clone().map(|block| block.start).min();
+        let end = chosen_blocks.map(|block| block.end).max();
+        let span = end.unwrap_or(0) - start.unwrap_or(0);
+        let shift = span.max(1).div_ceil(step) * step;
+        let items = shifted(&chosen, i64::try_from(shift).unwrap_or(i64::MAX));
+        out.push(edit(Edit::PasteItems { items }));
+    }
+    if pressed(ctrl, Key::D) {
+        let ids = Vec::new();
+        out.push(edit(Edit::SelectItems { ids, add: false }));
+    }
+    if pressed(ctrl, Key::E) {
+        let at = state.position;
+        let under = blocks
+            .iter()
+            .filter(|block| block.start < at && at < block.end);
+        let ids: Vec<ItemId> = under
+            .filter(|block| block.selected)
+            .map(|block| block.id)
+            .collect();
+        if !ids.is_empty() {
+            out.push(edit(Edit::SplitItems { ids, at }));
+        }
+    }
+    // Each press is a step for Undo of its own.
+    let step = step as i64;
+    for (key, delta_ticks, delta_tracks) in [
+        (Key::ArrowLeft, -step, 0),
+        (Key::ArrowRight, step, 0),
+        (Key::ArrowUp, 0, -1),
+        (Key::ArrowDown, 0, 1),
+    ] {
+        if pressed(Modifiers::NONE, key) {
+            let ids = selected.clone();
+            out.push(edit(Edit::MoveItems {
+                ids,
+                delta_ticks,
+                delta_tracks,
+            }));
+        }
+    }
+}
+
+/// Copies of the items `shift` ticks later, each held to where a position
+/// goes.
+fn shifted(items: &[PlaylistItem], shift: i64) -> Vec<CopiedItem> {
+    let moved = items.iter().map(|item| {
+        let position = i64::from(item.position).saturating_add(shift);
+        CopiedItem(PlaylistItem {
+            position: position.clamp(0, i64::from(i32::MAX)) as i32,
+            ..*item
+        })
+    });
+    moved.collect()
 }
 
 /// A drag of items that is under way.
@@ -251,7 +403,9 @@ impl Drag {
         let moved = tick - self.tick;
         let ids = self.ids.clone();
         if self.resizes {
-            let length = snap(self.end as f32 + moved, step) - self.start as i64;
+            // Saturating, as the piano roll's drags are.
+            let start = i64::try_from(self.start).unwrap_or(i64::MAX);
+            let length = snap(self.end as f32 + moved, step).saturating_sub(start);
             // An end dragged to the start or past it leaves one step.
             let length = if length < 1 { step as i64 } else { length };
             Edit::ResizeItems {
@@ -261,8 +415,9 @@ impl Drag {
         } else {
             Edit::MoveItems {
                 ids,
-                delta_ticks: snap(self.start as f32 + moved, step) - self.start as i64,
-                delta_tracks: row - self.row,
+                delta_ticks: snap(self.start as f32 + moved, step)
+                    .saturating_sub(i64::try_from(self.start).unwrap_or(i64::MAX)),
+                delta_tracks: row.saturating_sub(self.row),
             }
         }
     }
@@ -408,9 +563,10 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let weak = ui.visuals().weak_text_color();
     let playhead = Stroke::new(1.5, Color32::from_rgb(120, 220, 110));
 
-    let memory_id = egui::Id::new("fl-rs playlist");
+    let memory_id = memory_id();
     let mut memory: Memory = ui.data(|data| data.get_temp(memory_id)).unwrap_or_default();
     let whole = ui.available_rect_before_wrap();
+    memory.area = Some((whole, ui.ctx().cumulative_frame_nr()));
     let width = ui.available_width();
     let fit = (width - NAMES).max(1.0) / ticks as f32;
     let dragged = memory.drag.as_ref();
@@ -421,6 +577,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         left,
         scale,
     };
+    memory.scale = scale;
     let step = bar_step(grid.bar as f32 * scale);
 
     // The ruler: a number on every `step` bars, and a click seeks.
@@ -491,6 +648,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                         Some(name) => (name.to_owned(), ui.visuals().text_color()),
                         None => (format!("Track {}", index + 1), weak),
                     };
+                    let ink = if track.is_some_and(|track| !track.enabled()) {
+                        ink.gamma_multiply(0.4)
+                    } else {
+                        ink
+                    };
                     let at = pos2(name.left() + 4.0, name.center().y);
                     painter.with_clip_rect(name).text(
                         at,
@@ -530,8 +692,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                // A muted item is a shade of its colour with faint text.
-                let (fill, text) = if block.muted {
+                // A muted item is a shade of its colour with faint text,
+                // and so is every item of a muted track.
+                let track = i32::try_from(block.row + 1).unwrap_or(i32::MAX);
+                let on = arrangement.is_none_or(|a| a.track_enabled(track));
+                let (fill, text) = if block.muted || !on {
                     (block.colour.gamma_multiply(0.3), weak)
                 } else {
                     (block.colour, text_on(block.colour))
@@ -705,6 +870,34 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                     muted: !block.muted,
                 }));
             }
+
+            // The track names, on top of the rows. A click on one lets go
+            // of the items, as one beside them does, and a right click
+            // opens the track's menu.
+            for index in 0..rows {
+                let top = area.top() + index as f32 * row;
+                let name = Rect::from_min_size(pos2(area.left(), top), vec2(NAMES, row));
+                let header = ui.interact(name, ui.id().with(("track", index)), Sense::click());
+                if header.clicked() && !modifiers.shift && !selected().is_empty() {
+                    out.push(edit(Edit::SelectItems {
+                        ids: Vec::new(),
+                        add: false,
+                    }));
+                }
+                let track = (index + 1) as u32;
+                header.context_menu(|ui| {
+                    let own = names.iter().find(|t| t.index == track);
+                    let on = own.is_none_or(|track| track.enabled());
+                    let label = if on { "Mute track" } else { "Unmute track" };
+                    // Only a track with a 238 has the switch.
+                    let switch = egui::Button::new(label);
+                    let has = own.is_some_and(|track| track.data.is_some());
+                    if ui.add_enabled(has, switch).clicked() {
+                        let enabled = !on;
+                        out.push(edit(Edit::SetTrackEnabled { track, enabled }));
+                    }
+                });
+            }
         });
     set_hovered(ui.ctx(), hover);
 
@@ -811,6 +1004,8 @@ mod tests {
         assert_eq!(snap(229.0, 96), 192);
         assert_eq!(snap(-50.0, 96), -96);
         assert_eq!(snap(229.4, 1), 229);
+        assert_eq!(snap(f32::MAX, 96), i64::MAX);
+        assert_eq!(snap(f32::MIN, 96), i64::MIN);
     }
 
     #[test]

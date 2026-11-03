@@ -132,9 +132,24 @@ struct Bent {
     until: usize,
 }
 
+/// The lowest and highest keys a generator is handed. A note record can
+/// hold any i16, and a key far past the keyboard is a frequency past what
+/// an f32 holds: TestSine plays NaN at key 32767. FL's keyboard is 0 to
+/// 131 and a channel's pitch knob moves it 48 keys either way, so no note
+/// FL writes comes near these. They are fl-rs's bounds, not FL's.
+const KEYS: (i16, i16) = (-128, 255);
+
+/// [`KEYS`] as pitches in cents from key 60, for
+/// [`Generator::set_note_pitch`].
+const PITCHES: (f32, f32) = (
+    (KEYS.0 as f32 - 60.0) * 100.0,
+    (KEYS.1 as f32 - 60.0) * 100.0,
+);
+
 /// The pitch of a note on in cents from key 60.
 fn pitch_of(note: &NoteOn) -> f32 {
-    f32::from(note.key - 60) * 100.0 + note.fine_pitch
+    // In f32: a key from a file can be any i16.
+    (f32::from(note.key) - 60.0) * 100.0 + note.fine_pitch
 }
 
 impl Hosted {
@@ -210,8 +225,8 @@ impl Hosted {
 
 /// Tell the generator the pitch of a note when it has moved.
 fn tell(generator: &mut dyn Generator, bent: &mut Bent, shift: f32) {
-    let pitch = bent.pitch + shift;
-    if pitch != bent.told {
+    let pitch = (bent.pitch + shift).clamp(PITCHES.0, PITCHES.1);
+    if pitch != bent.told && !pitch.is_nan() {
         bent.told = pitch;
         generator.set_note_pitch(bent.voice, pitch);
     }
@@ -405,7 +420,7 @@ impl Rack {
         let keys = (shift / 100.0).round();
         let on = NoteOn {
             voice,
-            key: note.key.saturating_add(keys as i16),
+            key: note.key.saturating_add(keys as i16).clamp(KEYS.0, KEYS.1),
             velocity: levels.vol,
             pan: levels.pan,
             fine_pitch: shift - keys * 100.0 + note.fine_pitch_cents() as f32,

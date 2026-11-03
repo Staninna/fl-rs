@@ -1,14 +1,59 @@
 //! The bar across the top: the menu, the transport with the pattern that
 //! plays in pattern mode, the tempo and position readouts, the master's
 //! peak meter and the project's title.
+//!
+//! The pattern selector's list ends in what changes the patterns: a new
+//! empty pattern, which F4 makes too (FL's key for the next empty pattern,
+//! inferred), and a clone of the selected pattern. Either goes at the
+//! lowest index the project has free, and is selected. The last entry, and
+//! F2 (inferred too) with the pointer anywhere but over the channel rack
+//! or the mixer, which rename their own, give the selected pattern a new
+//! name: a field takes the selector's place, Enter and a click elsewhere
+//! take the name, and Escape leaves it. "Delete pattern" removes the
+//! selected pattern and its items from every arrangement, in one undo
+//! step, and selects the pattern before it, or the one after it when it
+//! was the first.
+//!
+//! The numeric keypad's minus and plus select the pattern before the
+//! selected one and the one after it that the project has, as FL's do
+//! (inferred). egui does not tell the keypad's keys from the others, so
+//! the minus key and a plus typed on the main keyboard do the same.
+//!
+//! A drag up or down on the tempo changes it, a BPM a point and a tenth of
+//! that with Ctrl held, and a double click on it opens a field to type it
+//! in. Enter and a click elsewhere take what was typed, and Escape leaves
+//! the tempo as it was. A right-click on the position opens a menu that
+//! sets the time signature: 1 to 16 beats a bar, of a half, a quarter, an
+//! eighth or a sixteenth note (FL's choices, inferred). The grid of the
+//! windows follows it.
 
-use crate::{Command, Dialog, Grid, UiState};
+use crate::widgets::drag_value;
+use crate::{Command, Dialog, Edit, Grid, UiState};
 use craft_ui::buttons::{ButtonVisuals, IconButton, IconButtonStyle};
-use egui::{Align, Color32, Layout, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{
+    Align, Color32, FontId, Key, Layout, Modifiers, Rect, Response, RichText, Sense, Shape, Stroke,
+    Ui, Vec2, WidgetInfo, pos2, vec2,
+};
+use model::{TEMPO_MILLI, TIME_SIG_DENOMINATORS, TIME_SIG_NUMERATORS};
+
+/// How many points of drag take the tempo through FL's whole 10 to 522
+/// BPM: a BPM a point.
+const TEMPO_TRAVEL: f32 = 512.0;
+
+/// A tempo that is being typed.
+#[derive(Clone)]
+struct TypedTempo {
+    text: String,
+    /// Whether the field has asked for the keyboard, which it does once.
+    focused: bool,
+}
 
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     ui.horizontal(|ui| {
         ui.menu_button("File", |ui| {
+            if ui.button("New").clicked() {
+                out.push(Command::New);
+            }
             if ui.button("Open…").clicked() {
                 out.push(Command::Choose(Dialog::Open));
             }
@@ -30,13 +75,8 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         transport(ui, state, out);
         ui.separator();
 
-        let tempo = match state.project.tempo() {
-            Some(bpm) => format!("{bpm:.3}"),
-            None => "---.---".to_owned(),
-        };
-        readout(ui, &tempo, "BPM");
-        let (bar, beat, tick) = Grid::of(&state.project).bar_beat_tick(state.position);
-        readout(ui, &format!("{bar:03}:{beat:02}:{tick:03}"), "B:B:T");
+        tempo(ui, state, out);
+        position(ui, state, out);
         ui.separator();
         meter(ui, state.peaks);
         ui.separator();
@@ -173,26 +213,123 @@ fn transport(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         out.push(Command::ToggleLoop);
     }
 
-    let name = |index: u16| {
-        let pattern = state.project.pattern(index);
-        let name = pattern.and_then(|pattern| pattern.name.clone());
-        name.unwrap_or_else(|| format!("Pattern {index}"))
+    pattern_selector(ui, state, out);
+}
+
+/// A pattern's name that is being typed.
+#[derive(Clone)]
+struct TypedName {
+    pattern: u16,
+    text: String,
+    /// Whether the field has asked for the keyboard, which it does once.
+    focused: bool,
+}
+
+/// The pattern selector: the list of the patterns, and under them a new
+/// pattern, a clone of the selected one and its new name. While the name
+/// is typed, a field takes the selector's place.
+fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    let edit = |edit: Edit| Command::Edit {
+        edit,
+        drag_id: None,
     };
+    let own = |index: u16| state.project.pattern(index).and_then(|p| p.name.clone());
+    let name = |index: u16| own(index).unwrap_or_else(|| format!("Pattern {index}"));
+    let typed_id = egui::Id::new("fl-rs pattern name");
+    if let Some(mut field) = ui.data(|data| data.get_temp::<TypedName>(typed_id)) {
+        let text = egui::TextEdit::singleline(&mut field.text).desired_width(120.0);
+        let response = ui.add(text);
+        if !std::mem::replace(&mut field.focused, true) {
+            response.request_focus();
+        }
+        if response.lost_focus() {
+            let name = field.text.trim();
+            let escaped = ui.input(|input| input.key_pressed(Key::Escape));
+            if !escaped && name != own(field.pattern).unwrap_or_default() {
+                let pattern = field.pattern;
+                let name = name.to_owned();
+                out.push(edit(Edit::SetPatternName { pattern, name }));
+            }
+            ui.data_mut(|data| data.remove::<TypedName>(typed_id));
+        } else {
+            ui.data_mut(|data| data.insert_temp(typed_id, field));
+        }
+        return;
+    }
+
     let mut patterns: Vec<u16> = state.project.patterns.iter().map(|p| p.index).collect();
     patterns.sort_unstable();
+    let listed = patterns.clone();
+    let free = state.project.free_pattern_index();
+    let keys = !ui.ctx().egui_wants_keyboard_input();
+    let pressed = |ui: &mut Ui, key| keys && ui.input_mut(|i| i.consume_key(Modifiers::NONE, key));
+    let mut add = pressed(ui, Key::F4);
+    // F2 renames what the pointer is over: the channel rack's channel and
+    // the mixer's insert are theirs, and anywhere else it is the pattern.
+    use crate::windows::{Window, under_pointer};
+    let theirs = matches!(
+        under_pointer(ui.ctx()),
+        Some(Window::ChannelRack | Window::Mixer)
+    );
+    let mut rename = !theirs && pressed(ui, Key::F2);
+    let earlier = patterns.iter().rev().find(|index| **index < state.pattern);
+    let later = patterns.iter().find(|index| **index > state.pattern);
+    for (key, next) in [(Key::Minus, earlier), (Key::Plus, later)] {
+        if pressed(ui, key)
+            && let Some(next) = next
+        {
+            out.push(Command::SelectPattern(*next));
+        }
+    }
+    let (mut clone, mut delete) = (false, false);
+    let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")
         .width(120.0)
         .selected_text(name(state.pattern))
         .show_ui(ui, |ui| {
-            for index in patterns {
+            for index in listed {
                 let chosen = index == state.pattern;
                 if ui.selectable_label(chosen, name(index)).clicked() && !chosen {
                     out.push(Command::SelectPattern(index));
                 }
             }
+            ui.separator();
+            let new = egui::Button::new("New pattern").shortcut_text("F4");
+            add |= ui.add_enabled(free.is_some(), new).clicked();
+            let copy = egui::Button::new("Clone pattern");
+            clone = ui.add_enabled(free.is_some() && has, copy).clicked();
+            let name = egui::Button::new("Rename pattern…").shortcut_text("F2");
+            rename |= ui.add(name).clicked();
+            delete = ui
+                .add_enabled(has, egui::Button::new("Delete pattern"))
+                .clicked();
         })
         .response
         .on_hover_text("The pattern that plays in pattern mode");
+    let from = state.pattern;
+    let made = match free {
+        Some(index) if add => Some((Edit::AddPattern { index }, index)),
+        Some(to) if clone => Some((Edit::ClonePattern { from, to }, to)),
+        _ => None,
+    };
+    if let Some((made, index)) = made {
+        out.push(edit(made));
+        out.push(Command::SelectPattern(index));
+    } else if delete {
+        out.push(edit(Edit::DeletePattern { pattern: from }));
+        let before = patterns.iter().rev().find(|index| **index < from);
+        let after = patterns.iter().find(|index| **index > from);
+        if let Some(next) = before.or(after) {
+            out.push(Command::SelectPattern(*next));
+        }
+    } else if rename {
+        let field = TypedName {
+            pattern: from,
+            text: own(from).unwrap_or_default(),
+            focused: false,
+        };
+        ui.data_mut(|data| data.insert_temp(typed_id, field));
+    }
 }
 
 /// The transport buttons in the colours of egui's own buttons.
@@ -217,8 +354,130 @@ fn icon_style(visuals: &egui::Visuals) -> IconButtonStyle {
     }
 }
 
+/// The tempo's readout, which a drag changes and a double click opens a
+/// field on. A project without a tempo shows dashes and takes no edit.
+fn tempo(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    let id = egui::Id::new("fl-rs tempo");
+    let bpm = state.project.tempo();
+    let milli = bpm.map(|bpm| (bpm * 1000.0).round() as u32);
+    let typed: Option<TypedTempo> = ui.data(|data| data.get_temp(id));
+    let set = |milli: u32, drag_id: Option<u64>| Command::Edit {
+        edit: Edit::SetTempo { milli },
+        drag_id,
+    };
+    if let Some(mut field) = typed {
+        let text = egui::TextEdit::singleline(&mut field.text)
+            .font(FontId::monospace(12.0))
+            .desired_width(56.0);
+        let response = ui.add(text);
+        if !std::mem::replace(&mut field.focused, true) {
+            response.request_focus();
+        }
+        ui.weak("BPM");
+        if response.lost_focus() {
+            let escaped = ui.input(|input| input.key_pressed(Key::Escape));
+            let typed = parse_tempo(&field.text).filter(|_| !escaped);
+            if let Some(typed) = typed.filter(|typed| Some(*typed) != milli) {
+                out.push(set(typed, None));
+            }
+            ui.data_mut(|data| data.remove::<TypedTempo>(id));
+        } else {
+            ui.data_mut(|data| data.insert_temp(id, field));
+        }
+        return;
+    }
+
+    let text = match bpm {
+        Some(bpm) => format!("{bpm:.3}"),
+        None => "---.---".to_owned(),
+    };
+    let plate = readout(ui, &text, "BPM");
+    let (Some(bpm), Some(milli)) = (bpm, milli) else {
+        return;
+    };
+    let response = ui.interact(plate.rect, id.with("drag"), Sense::click_and_drag());
+    response.widget_info(|| WidgetInfo::slider(true, bpm, "Tempo"));
+    let range = *TEMPO_MILLI.start() as i32..=*TEMPO_MILLI.end() as i32;
+    // A drag starts from the tempo held to FL's range: a file can hold
+    // any u32, and one past i32's range would wrap to below the range's
+    // start.
+    let milli = milli.clamp(*TEMPO_MILLI.start(), *TEMPO_MILLI.end()) as i32;
+    if response.double_clicked() {
+        let field = TypedTempo {
+            text: format!("{bpm:.3}"),
+            focused: false,
+        };
+        ui.data_mut(|data| data.insert_temp(id, field));
+    } else if let Some((milli, drag)) = drag_value(ui, &response, milli, range, TEMPO_TRAVEL) {
+        out.push(set(milli as u32, Some(drag)));
+    }
+    let hint = "Tempo: drag up or down, with Ctrl for fine steps, or double-click to type it";
+    response.on_hover_text(hint);
+}
+
+/// The position's readout, in bars, beats and ticks, whose right-click
+/// menu sets the time signature, as FL's song settings do: the beats a
+/// bar has, and the note that is a beat. The readout shows no signature,
+/// so it looks as it did; its hint names the one there is.
+fn position(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
+    let project = &state.project;
+    let (bar, beat, tick) = Grid::of(project).bar_beat_tick(state.position);
+    let plate = readout(ui, &format!("{bar:03}:{beat:02}:{tick:03}"), "B:B:T");
+    let id = egui::Id::new("fl-rs position");
+    let response = ui.interact(plate.rect, id, Sense::click());
+    let (numerator, denominator) = project.time_signature().unwrap_or((4, 4));
+    response.widget_info(|| WidgetInfo::labeled(egui::WidgetType::Button, true, "Song position"));
+    let set = |numerator: u8, denominator: u8| Command::Edit {
+        edit: Edit::SetTimeSignature {
+            numerator,
+            denominator,
+        },
+        drag_id: None,
+    };
+    response
+        .on_hover_text(format!(
+            "Bar, beat and tick in {numerator}/{denominator}. Right-click for the time signature"
+        ))
+        .context_menu(|ui| {
+            ui.menu_button("Beats per bar", |ui| {
+                for beats in TIME_SIG_NUMERATORS {
+                    let label = format!("{beats}/{denominator}");
+                    if ui.selectable_label(beats == numerator, label).clicked() {
+                        out.push(set(beats, denominator));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("Beat value", |ui| {
+                for note in TIME_SIG_DENOMINATORS {
+                    let label = format!("{numerator}/{note}");
+                    if ui.selectable_label(note == denominator, label).clicked() {
+                        out.push(set(numerator, note));
+                        ui.close();
+                    }
+                }
+            });
+        });
+}
+
+/// A typed tempo in thousandths of a BPM, held to FL's range. `None` for
+/// what is not a number.
+fn parse_tempo(text: &str) -> Option<u32> {
+    let bpm: f64 = text
+        .trim()
+        .parse()
+        .ok()
+        .filter(|bpm: &f64| bpm.is_finite())?;
+    let (low, high) = (*TEMPO_MILLI.start(), *TEMPO_MILLI.end());
+    Some(
+        (bpm * 1000.0)
+            .round()
+            .clamp(f64::from(low), f64::from(high)) as u32,
+    )
+}
+
 /// A number on a dark plate with its unit beside it.
-fn readout(ui: &mut Ui, value: &str, unit: &str) {
+fn readout(ui: &mut Ui, value: &str, unit: &str) -> Response {
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .inner_margin(vec2(6.0, 2.0))
@@ -231,7 +490,8 @@ fn readout(ui: &mut Ui, value: &str, unit: &str) {
                     .color(crate::theme::READOUT),
             );
             ui.weak(unit);
-        });
+        })
+        .response
 }
 
 /// The bottom of the meter, in dB below full scale.
@@ -291,6 +551,17 @@ fn meter(ui: &mut Ui, (left, right): (f32, f32)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_tempo_is_held_to_fl_s_range() {
+        assert_eq!(parse_tempo(" 128.5 "), Some(128_500));
+        assert_eq!(parse_tempo("90"), Some(90_000));
+        assert_eq!(parse_tempo("1"), Some(10_000));
+        assert_eq!(parse_tempo("1000"), Some(522_000));
+        assert_eq!(parse_tempo("fast"), None);
+        assert_eq!(parse_tempo("NaN"), None);
+        assert_eq!(parse_tempo("inf"), None);
+    }
 
     #[test]
     fn the_meter_runs_from_minus_48_to_plus_6_db() {

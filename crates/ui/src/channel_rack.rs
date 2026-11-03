@@ -11,7 +11,17 @@
 //! The graph button opens a lane under the rows with the velocity of each
 //! step of the selected channel, and a drag in it draws velocities. A
 //! click on a name selects its channel, and the up and down arrows move
-//! the selection. Shift+wheel scrolls along the steps.
+//! the selection. A double click on a name, or F2 with the pointer over
+//! the rack, renames the channel:
+//! Enter and a click elsewhere take the name, and Escape leaves the old
+//! one. A right click on a channel's switch solos it, as in FL, and one
+//! on the switch of the channel that is soloed switches every channel back
+//! on. A right click on a name opens the channel's menu: rename it, clone
+//! it to the end of the rack, give it a colour of a small palette, drag or
+//! type its pitch in cents, shift
+//! its steps one step left or right round the pattern, light each second,
+//! fourth or eighth step in place of the ones that are lit, or clear them.
+//! Shift+wheel scrolls along the steps.
 //!
 //! A sample dragged out of the browser can be dropped on the row of a
 //! sampler or an audio clip, which then plays it, or on the space under
@@ -22,7 +32,7 @@
 
 use crate::browser::SampleDrag;
 use crate::playlist::{rgb, text_on};
-use crate::widgets::{Knob, drag_value, next_drag_id};
+use crate::widgets::{Knob, colour_menu, drag_value, next_drag_id};
 use crate::{Command, Edit, Grid, UiState};
 use egui::{
     Align2, Color32, Context, FontId, Key, Modifiers, PointerButton, Rect, Response, Sense, Stroke,
@@ -52,9 +62,10 @@ const INSERTS: i32 = 125;
 /// The top of a channel's volume and of its pan, and of a velocity.
 const LEVEL_TOP: i32 = 12_800;
 const VELOCITY_TOP: f32 = 128.0;
+/// The ends of a channel's pitch knob, in cents.
+const PITCH_END: i32 = 4800;
 /// The colour of an enabled channel's LED and of a knob's arc.
 const LIT: Color32 = Color32::from_rgb(120, 220, 110);
-
 /// What the rack keeps from one frame to the next.
 #[derive(Clone, Default)]
 struct Memory {
@@ -69,6 +80,43 @@ struct Memory {
     /// drawn before the rows.
     steps_x: Option<f32>,
     paint: Option<Paint>,
+    rename: Option<Rename>,
+}
+
+/// A name that is being typed.
+#[derive(Clone)]
+struct Rename {
+    channel: u16,
+    text: String,
+    /// Whether the field has asked for the keyboard, which it does once.
+    focused: bool,
+}
+
+impl Rename {
+    /// A field that starts from the channel's own name, empty when it has
+    /// none.
+    fn of(channel: &Channel) -> Self {
+        Rename {
+            channel: channel.index,
+            text: channel.name.clone().unwrap_or_default(),
+            focused: false,
+        }
+    }
+}
+
+/// Send the name that was typed, unless it is empty or the one the
+/// channel has.
+fn take_name(project: &Project, typed: &Rename, out: &mut Vec<Command>) {
+    let channel = project.channel(typed.channel);
+    let own = channel.and_then(|channel| channel.name.as_deref());
+    let name = typed.text.trim();
+    if !name.is_empty() && name != own.unwrap_or_default() {
+        let named = Edit::SetChannelName {
+            channel: typed.channel,
+            name: name.to_owned(),
+        };
+        out.push(edit(named, None));
+    }
 }
 
 /// A drag across steps, or across the velocity lane.
@@ -209,6 +257,40 @@ fn has_long_notes(pattern: Option<&Pattern>, channel: u16) -> bool {
     own.any(|note| !note.is_deleted() && note.length > 0)
 }
 
+/// The channel's pitch knob as a number in cents, to drag or to type. A
+/// drag is one drag of many values, and so one step for `Undo`.
+fn pitch(ui: &mut Ui, channel: &Channel, out: &mut Vec<Command>) {
+    let mut cents = channel.pitch().unwrap_or(0);
+    let value = egui::DragValue::new(&mut cents)
+        .range(-PITCH_END..=PITCH_END)
+        .speed(1.0)
+        .suffix(" cents");
+    let response = ui.add(value);
+    let label = format!("{} pitch", name(channel));
+    response.widget_info(|| {
+        let mut info = WidgetInfo::labeled(WidgetType::DragValue, true, &label);
+        info.value = Some(f64::from(cents));
+        info
+    });
+    let drag = response.id.with("pitch drag");
+    if response.drag_started() {
+        let id = next_drag_id(ui.ctx());
+        ui.data_mut(|data| data.insert_temp(drag, id));
+    }
+    if response.changed() {
+        let drag_id = response
+            .dragged()
+            .then(|| ui.data(|data| data.get_temp::<u64>(drag)))
+            .flatten();
+        let pitch = Edit::SetChannelPitch {
+            channel: channel.index,
+            cents,
+        };
+        out.push(edit(pitch, drag_id));
+    }
+    response.on_hover_text("The channel's pitch: drag, or click to type it");
+}
+
 fn memory_id() -> egui::Id {
     egui::Id::new("fl-rs channel rack")
 }
@@ -259,6 +341,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let is_selected = |channel: &Channel| Some(channel.index) == memory.selected;
     let mut selected = project.channels.iter().position(is_selected).unwrap_or(0);
     let mut moved = false;
+    let mut rename = false;
     if ui.memory(|egui| egui.focused().is_none()) {
         let pressed = |key| ui.input_mut(|input| input.consume_key(Modifiers::NONE, key));
         if pressed(Key::ArrowUp) && selected > 0 {
@@ -267,8 +350,16 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         if pressed(Key::ArrowDown) && selected + 1 < project.channels.len() {
             (selected, moved) = (selected + 1, true);
         }
+        let over = crate::windows::under_pointer(ui.ctx());
+        rename = over == Some(crate::windows::Window::ChannelRack) && pressed(Key::F2);
     }
     memory.selected = Some(project.channels[selected].index);
+    if rename {
+        memory.rename = Some(Rename::of(&project.channels[selected]));
+    }
+    memory
+        .rename
+        .take_if(|rename| project.channel(rename.channel).is_none());
 
     let whole = ui.available_rect_before_wrap();
     let mut steps = Steps::of(project, pattern);
@@ -279,6 +370,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         pattern,
         playing,
         last_insert: last_insert(project),
+        count: steps.count,
     };
 
     if memory.graph {
@@ -305,7 +397,8 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             for (place, channel) in project.channels.iter().enumerate() {
                 let row = ui.horizontal(|ui| {
                     let selected = place == selected;
-                    if rack.controls(ui, channel, selected, moved && selected, out) {
+                    let (scroll_to, rename) = (moved && selected, &mut memory.rename);
+                    if rack.controls(ui, channel, selected, scroll_to, rename, out) {
                         memory.selected = Some(channel.index);
                     }
                     let size = vec2(ui.available_width().max(STEP), ROW);
@@ -360,6 +453,8 @@ struct Rack<'a> {
     /// The step the clock is in, when a pattern plays.
     playing: Option<u64>,
     last_insert: i32,
+    /// How many steps the pattern has, which a shift goes round.
+    count: u32,
 }
 
 impl Rack<'_> {
@@ -371,6 +466,7 @@ impl Rack<'_> {
         channel: &Channel,
         selected: bool,
         scroll_to: bool,
+        rename: &mut Option<Rename>,
         out: &mut Vec<Command>,
     ) -> bool {
         let index = channel.index;
@@ -392,7 +488,13 @@ impl Rack<'_> {
             fill,
             visuals.widgets.inactive.fg_stroke,
         );
-        if response.on_hover_text("Channel on or off").clicked() {
+        if response.secondary_clicked() {
+            out.push(edit(Edit::SoloChannel { channel: index }, None));
+        }
+        if response
+            .on_hover_text("Channel on or off. Right-click to solo")
+            .clicked()
+        {
             let enabled = !enabled;
             out.push(edit(
                 Edit::SetChannelEnabled {
@@ -490,7 +592,24 @@ impl Rack<'_> {
         }
         response.on_hover_text("The mixer insert the channel plays into. Drag to change it");
 
-        let (button, response) = ui.allocate_exact_size(vec2(NAME, ROW - 2.0), Sense::click());
+        let size = vec2(NAME, ROW - 2.0);
+        if let Some(typed) = rename.as_mut().filter(|typed| typed.channel == index) {
+            let field = egui::TextEdit::singleline(&mut typed.text)
+                .font(FontId::proportional(11.0))
+                .margin(vec2(4.0, 1.0));
+            let response = ui.add_sized(size, field);
+            if !std::mem::replace(&mut typed.focused, true) {
+                response.request_focus();
+            }
+            if response.lost_focus() {
+                if !ui.input(|input| input.key_pressed(Key::Escape)) {
+                    take_name(self.project, typed, out);
+                }
+                *rename = None;
+            }
+            return false;
+        }
+        let (button, response) = ui.allocate_exact_size(size, Sense::click());
         response.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, &name));
         let visuals = ui.visuals();
         let plain = visuals.widgets.inactive.bg_fill;
@@ -521,7 +640,88 @@ impl Rack<'_> {
         if scroll_to {
             response.scroll_to_me(None);
         }
+        if response.double_clicked() {
+            // A field that has not seen the click yet will not be drawn to
+            // see it.
+            if let Some(typed) = rename {
+                take_name(self.project, typed, out);
+            }
+            *rename = Some(Rename::of(channel));
+        }
+        response.context_menu(|ui| self.menu(ui, channel, rename, out));
         response.clicked()
+    }
+
+    /// The channel's menu, behind a right click on its name. The entries
+    /// for steps are there for a channel that takes steps only.
+    fn menu(
+        &self,
+        ui: &mut Ui,
+        channel: &Channel,
+        rename: &mut Option<Rename>,
+        out: &mut Vec<Command>,
+    ) {
+        let index = channel.index;
+        if ui.button("Rename").clicked() {
+            *rename = Some(Rename::of(channel));
+            ui.close();
+        }
+        // What an automation clip drives names its channel, so a copy
+        // would drive nothing.
+        let clones = channel.kind != Some(ChannelKind::Automation);
+        if ui.add_enabled(clones, egui::Button::new("Clone")).clicked() {
+            out.push(edit(Edit::CloneChannel { channel: index }, None));
+            ui.close();
+        }
+        if let Some(color) = colour_menu(ui, channel.color) {
+            let colour = Edit::SetChannelColor {
+                channel: index,
+                color,
+            };
+            out.push(edit(colour, None));
+        }
+        // An automation clip keeps its range where the knob would be.
+        if channel.kind != Some(ChannelKind::Automation) {
+            ui.horizontal(|ui| {
+                ui.label("Pitch");
+                pitch(ui, channel, out);
+            });
+        }
+        ui.separator();
+        let steps = takes_notes(channel) && !has_long_notes(self.pattern, index);
+        for (label, by) in [("Shift steps left", -1), ("Shift steps right", 1)] {
+            if ui.add_enabled(steps, egui::Button::new(label)).clicked() {
+                let count = self.count;
+                let shift = Edit::ShiftSteps {
+                    channel: index,
+                    by,
+                    count,
+                };
+                out.push(edit(shift, None));
+                ui.close();
+            }
+        }
+        ui.separator();
+        for every in [2, 4, 8] {
+            let label = format!("Fill each {every} steps");
+            if ui.add_enabled(steps, egui::Button::new(label)).clicked() {
+                let count = self.count;
+                let fill = Edit::FillSteps {
+                    channel: index,
+                    every,
+                    count,
+                };
+                out.push(edit(fill, None));
+                ui.close();
+            }
+        }
+        if ui
+            .add_enabled(steps, egui::Button::new("Clear steps"))
+            .clicked()
+        {
+            out.push(edit(Edit::ClearSteps { channel: index }, None));
+            ui.close();
+        }
     }
 
     /// The steps of a channel, and the clicks and drags on them.
@@ -651,7 +851,8 @@ impl Rack<'_> {
         };
         let keys = own().map(|note| note.key);
         let (low, high) = (keys.clone().min().unwrap_or(0), keys.max().unwrap_or(0));
-        let span = f32::from((high - low).max(1));
+        // In i32: keys from a file can be the ends of an i16.
+        let span = (i32::from(high) - i32::from(low)).max(1) as f32;
         let x = |tick: i32| steps.origin + tick as f32 / steps.ticks as f32 * STEP;
         painter.rect_filled(
             area.shrink2(vec2(0.0, 1.0)),
@@ -659,7 +860,7 @@ impl Rack<'_> {
             Color32::from_rgb(44, 48, 52),
         );
         for note in own() {
-            let up = f32::from(note.key - low) / span;
+            let up = (i32::from(note.key) - i32::from(low)) as f32 / span;
             let y = area.bottom() - 4.0 - up * (area.height() - 8.0);
             let end = x(note.position.saturating_add(note.length.max(1)));
             let line = Rect::from_min_max(

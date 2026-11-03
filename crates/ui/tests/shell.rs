@@ -167,6 +167,293 @@ fn the_pattern_selector_lists_the_patterns() {
 }
 
 #[test]
+fn the_keypad_s_minus_and_plus_step_through_the_patterns_there_are() {
+    // Patterns 1, 2 and 5, with 2 selected.
+    let mut project = fixture();
+    project.patterns.push(Pattern {
+        index: 5,
+        ..Pattern::default()
+    });
+    let mut harness = harness(UiState {
+        project: Arc::new(project),
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    for key in [egui::Key::Minus, egui::Key::Plus] {
+        harness.key_press(key);
+        harness.run();
+    }
+    let want = [Command::SelectPattern(1), Command::SelectPattern(5)];
+    assert_eq!(harness.state(), &want);
+
+    // There is no pattern before the first.
+    let mut harness = crate::harness(state());
+    harness.run();
+    harness.key_press(egui::Key::Minus);
+    harness.run();
+    harness.key_press(egui::Key::Plus);
+    harness.run();
+    assert_eq!(harness.state(), &[Command::SelectPattern(2)]);
+}
+
+/// The shell in frames short enough that two clicks make a double click:
+/// the harness runs a frame for every event, and a click is four events.
+fn quick_harness(state: UiState) -> Harness<'static, Vec<Command>> {
+    Harness::builder()
+        .with_step_dt(0.05)
+        .with_size(egui::vec2(900.0, 360.0))
+        .with_theme(egui::Theme::Dark)
+        .build_ui_state(move |ui, out| ui::shell(ui, &state, out), Vec::new())
+}
+
+fn tempo(milli: u32, drag_id: Option<u64>) -> Command {
+    Command::Edit {
+        edit: Edit::SetTempo { milli },
+        drag_id,
+    }
+}
+
+#[test]
+fn a_drag_on_the_tempo_changes_it_a_bpm_a_point() {
+    let mut harness = harness(state());
+    harness.run();
+    let readout = harness.get_by_label("Tempo");
+    assert_eq!(readout.accesskit_node().role(), Role::Slider);
+    assert_eq!(readout.accesskit_node().numeric_value(), Some(140.0));
+    let from = readout.rect().center();
+    harness.hover_at(from);
+    harness.drag_at(from);
+    harness.step();
+    for up in [8.0, 20.0] {
+        harness.hover_at(from - egui::vec2(0.0, up));
+        harness.step();
+    }
+    harness.drop_at(from - egui::vec2(0.0, 20.0));
+    harness.run();
+    assert_eq!(
+        harness.state(),
+        &[tempo(148_000, Some(1)), tempo(160_000, Some(1))]
+    );
+
+    // With Ctrl, a tenth of a BPM a point, and down is slower.
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    harness.drag_at(from);
+    harness.step();
+    harness.hover_at(from + egui::vec2(0.0, 15.0));
+    harness.step();
+    harness.drop_at(from + egui::vec2(0.0, 15.0));
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    harness.run();
+    assert_eq!(harness.state().last(), Some(&tempo(138_500, Some(2))));
+    assert_eq!(harness.state().len(), 3);
+}
+
+#[test]
+fn the_position_s_menu_sets_the_time_signature() {
+    let mut harness = harness(state());
+    harness.run();
+    let signature = |numerator, denominator| {
+        edit_of(Edit::SetTimeSignature {
+            numerator,
+            denominator,
+        })
+    };
+    for (menu, entry) in [("Beats per bar", "3/4"), ("Beat value", "4/8")] {
+        harness.get_by_label("Song position").click_secondary();
+        harness.run();
+        harness.get_by_label_contains(menu).click();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+        assert!(harness.query_by_label(entry).is_none());
+    }
+    assert_eq!(harness.state(), &[signature(3, 4), signature(4, 8)]);
+}
+
+#[test]
+fn a_double_click_on_the_tempo_types_it() {
+    let mut harness = quick_harness(state());
+    harness.run();
+    let open = |harness: &mut Harness<'_, Vec<Command>>| {
+        let at = harness.get_by_label("Tempo").rect().center();
+        for _ in 0..2 {
+            harness.hover_at(at);
+            harness.drag_at(at);
+            harness.drop_at(at);
+        }
+        harness.run();
+    };
+    open(&mut harness);
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("140.000"));
+    // Space is the field's while it is typed in, and plays nothing.
+    harness.key_press(egui::Key::Space);
+    harness.run();
+    for _ in 0.."140.000 ".len() {
+        harness.key_press(egui::Key::Backspace);
+        harness.run();
+    }
+    harness.get_by_role(Role::TextInput).type_text("97.5");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state(), &[tempo(97_500, None)]);
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+
+    // Escape leaves the tempo, and so does what is not a number. Past
+    // FL's range is its end.
+    for (text, key) in [("60", egui::Key::Escape), ("x", egui::Key::Enter)] {
+        open(&mut harness);
+        harness.get_by_role(Role::TextInput).type_text(text);
+        harness.run();
+        harness.key_press(key);
+        harness.run();
+    }
+    assert_eq!(harness.state().len(), 1);
+    open(&mut harness);
+    harness.key_press(egui::Key::Home);
+    harness.run();
+    harness.get_by_role(Role::TextInput).type_text("9");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state().last(), Some(&tempo(522_000, None)));
+}
+
+fn edit_of(edit: Edit) -> Command {
+    Command::Edit {
+        edit,
+        drag_id: None,
+    }
+}
+
+#[test]
+fn a_new_pattern_takes_the_lowest_free_index_and_is_selected() {
+    let mut harness = harness(state());
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label_contains("New pattern").click();
+    harness.run();
+    harness.key_press(egui::Key::F4);
+    harness.run();
+    let new = [
+        edit_of(Edit::AddPattern { index: 3 }),
+        Command::SelectPattern(3),
+    ];
+    assert_eq!(harness.state(), &[new.clone(), new].concat());
+}
+
+#[test]
+fn a_clone_of_the_selected_pattern_is_selected() {
+    let mut harness = harness(UiState {
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Clone pattern").click();
+    harness.run();
+    let clone = edit_of(Edit::ClonePattern { from: 2, to: 3 });
+    assert_eq!(harness.state(), &[clone, Command::SelectPattern(3)]);
+
+    // A pattern the project does not have has nothing to clone.
+    let mut harness = crate::harness(UiState {
+        pattern: 7,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Clone pattern").click();
+    harness.run();
+    assert!(harness.state().is_empty());
+}
+
+#[test]
+fn a_deleted_pattern_hands_the_selection_to_its_neighbour() {
+    // Pattern 2 hands it to pattern 1 before it, and pattern 1, the first,
+    // to pattern 2 after it.
+    for (pattern, next) in [(2, 1), (1, 2)] {
+        let mut harness = harness(UiState { pattern, ..state() });
+        harness.run();
+        harness.get_by_role(Role::ComboBox).click();
+        harness.run();
+        harness.get_by_label("Delete pattern").click();
+        harness.run();
+        let deleted = edit_of(Edit::DeletePattern { pattern });
+        assert_eq!(harness.state(), &[deleted, Command::SelectPattern(next)]);
+    }
+
+    // A pattern the project does not have has nothing to delete.
+    let mut harness = harness(UiState {
+        pattern: 7,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("Delete pattern").click();
+    harness.run();
+    assert!(harness.state().is_empty());
+}
+
+#[test]
+fn f2_or_the_list_renames_the_selected_pattern() {
+    let mut harness = harness(state());
+    harness.run();
+    assert!(harness.query_by_role(Role::TextInput).is_none());
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Drums"));
+    field.type_text(" 2 ");
+    harness.run();
+    // The name is trimmed.
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let named = |pattern, name: &str| {
+        let name = name.to_owned();
+        edit_of(Edit::SetPatternName { pattern, name })
+    };
+    assert_eq!(harness.state(), &[named(1, "Drums 2")]);
+    assert!(harness.query_by_role(Role::ComboBox).is_some());
+
+    // Escape leaves the name, and so does the name it had.
+    for key in [egui::Key::Escape, egui::Key::Enter] {
+        harness.key_press(egui::Key::F2);
+        harness.run();
+        if key == egui::Key::Escape {
+            harness.get_by_role(Role::TextInput).type_text("s");
+            harness.run();
+        }
+        harness.key_press(key);
+        harness.run();
+    }
+    assert_eq!(harness.state().len(), 1);
+
+    // A pattern without a name starts from an empty field.
+    let mut harness = crate::harness(UiState {
+        pattern: 2,
+        ..state()
+    });
+    harness.run();
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label_contains("Rename pattern").click();
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some(""));
+    field.type_text("Bass");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(harness.state(), &[named(2, "Bass")]);
+}
+
+#[test]
 fn a_render_shows_how_far_it_is() {
     let mut harness = harness(UiState {
         playing: false,
@@ -184,6 +471,7 @@ fn a_render_shows_how_far_it_is() {
 fn the_menu_asks_for_paths_and_quits() {
     let mut harness = harness(state());
     for (entry, command) in [
+        ("New", Command::New),
         ("Open…", Command::Choose(Dialog::Open)),
         ("Save", Command::Save),
         ("Save As…", Command::Choose(Dialog::SaveAs)),
@@ -196,7 +484,7 @@ fn the_menu_asks_for_paths_and_quits() {
         harness.run();
         assert_eq!(harness.state().last(), Some(&command));
     }
-    assert_eq!(harness.state().len(), 5);
+    assert_eq!(harness.state().len(), 6);
 }
 
 #[test]
@@ -393,4 +681,101 @@ fn the_window_keys_show_and_hide_their_windows() {
     // With every window closed, the welcome screen lists their keys.
     assert!(harness.query_by_label("No window is open").is_some());
     assert!(harness.state().is_empty());
+}
+
+/// The fixture with a 238 for its track 2, switched on or off.
+fn with_track_switch(on: bool) -> UiState {
+    let mut bytes = vec![0; 70];
+    bytes[..4].copy_from_slice(&2u32.to_le_bytes());
+    bytes[12] = u8::from(on);
+    let mut project = fixture();
+    project.arrangements[0].tracks[0].data = flp::event::layout::Track::from_bytes(&bytes);
+    UiState {
+        project: Arc::new(project),
+        ..state()
+    }
+}
+
+/// A right click at `pos`.
+fn right_click(harness: &mut Harness<'_, Vec<Command>>, pos: egui::Pos2) {
+    harness.hover_at(pos);
+    button(harness, pos, true);
+    button(harness, pos, false);
+    harness.run();
+}
+
+#[test]
+fn a_right_click_on_a_track_s_name_mutes_and_unmutes_the_track() {
+    for (on, entry) in [(true, "Mute track"), (false, "Unmute track")] {
+        let mut harness = harness(with_track_switch(on));
+        harness.run();
+        let name = egui::pos2(40.0, at(&harness, 0.0, 2).y);
+        right_click(&mut harness, name);
+        harness.get_by_label(entry).click();
+        harness.run();
+        let switched = Edit::SetTrackEnabled {
+            track: 2,
+            enabled: !on,
+        };
+        // The right click on the name mutes no item.
+        assert_eq!(harness.state(), &[edit(switched)]);
+    }
+
+    // Track 1 has no 238, so there is no switch to set.
+    let mut harness = harness(with_track_switch(true));
+    harness.run();
+    let name = egui::pos2(40.0, at(&harness, 0.0, 1).y);
+    right_click(&mut harness, name);
+    harness.get_by_label("Mute track").click();
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+}
+
+#[test]
+fn a_cloned_channel_is_the_selected_one_once_it_is_made() {
+    // Channels with events, which the model clones.
+    let mut project = fixture();
+    for (pos, channel) in project.channels.iter_mut().enumerate() {
+        channel.order = vec![model::Placed {
+            pos,
+            item: model::Item::Field(flp::event::Id::ChannelNew),
+        }];
+    }
+    // The state the harness draws, which the test changes as the app
+    // would.
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(UiState {
+        project: Arc::new(project.clone()),
+        playing: false,
+        ..state()
+    }));
+    let drawn = std::rc::Rc::clone(&shown);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 360.0))
+        .with_theme(egui::Theme::Dark)
+        .build_ui_state(
+            move |ui, out| ui::shell(ui, &drawn.borrow(), out),
+            Vec::new(),
+        );
+    harness.run();
+    harness.key_press(egui::Key::F5);
+    harness.key_press(egui::Key::F6);
+    harness.run();
+    // The graph names the selected channel.
+    harness.get_by_label("Graph").click();
+    harness.run();
+    assert!(harness.query_by_label("Kick velocity").is_some());
+    let name = harness.get_by_label("Kick").rect().center();
+    harness.hover_at(name);
+    button(&harness, name, true);
+    button(&harness, name, false);
+    harness.run();
+    // The app applies the edit before it draws the next frame.
+    harness.get_by_label("Clone").click();
+    harness.step();
+    assert_eq!(harness.state(), &[edit(Edit::CloneChannel { channel: 0 })]);
+    assert_eq!(project.clone_channel(0), Some(2));
+    shown.borrow_mut().project = Arc::new(project);
+    harness.run();
+    assert!(harness.query_by_label("Kick #2 velocity").is_some());
+    assert!(harness.query_by_label("Kick velocity").is_none());
 }

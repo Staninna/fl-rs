@@ -393,6 +393,13 @@ impl Channel {
         Some(self.levels?.pan)
     }
 
+    /// The pitch knob from 219 @8, an i32 in cents from -4800 to 4800
+    /// (control 4 in `docs/rec-channel.md`). The dictionary does not name
+    /// the field, so [`layout::Levels`] has it as `unknown_8`.
+    pub fn pitch(&self) -> Option<i32> {
+        Some(i32::from_le_bytes(self.levels?.unknown_8))
+    }
+
     /// Whether one of the channel's five instrument envelopes or LFOs (218,
     /// controls 0x1000..) moves what it sounds like: its envelope is
     /// switched on with an amount off 0, or, for the volume envelope, which

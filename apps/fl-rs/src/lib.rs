@@ -11,7 +11,7 @@
 //! goes on the undo stack.
 
 use engine::{Approximate, PreparedSamples, RenderOptions, Transport};
-use model::{Arrangement, Channel, ChannelKind, Note, Pattern, Project};
+use model::{Arrangement, Channel, ChannelKind, Note, Pattern, PlaylistItem, Project};
 use std::mem::{Discriminant, discriminant};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ const RENDER_RATE: u32 = 44_100;
 const PEAK_FALL: f32 = 0.93;
 /// How many steps back `Undo` goes. Each one keeps a whole project.
 const UNDO_STEPS: usize = 100;
+/// What a command that needs a project says without one.
+const NOT_OPEN: &str = "no project is open";
 
 /// A project read from disk with its samples decoded.
 pub struct Loaded {
@@ -194,6 +196,13 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
                 pattern.add_notes(channel, length, notes);
             }
         }
+        Edit::PasteNotes { ref notes } => {
+            let has = |note: &&Note| project.channel(note.channel).is_some();
+            let notes: Vec<Note> = notes.iter().filter(has).copied().collect();
+            if !notes.is_empty() {
+                project.pattern_to_edit(pattern).paste_notes(&notes);
+            }
+        }
         Edit::DeleteNotes { .. }
         | Edit::SliceNotes { .. }
         | Edit::SliceNotesAlong { .. }
@@ -203,6 +212,9 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         | Edit::ArpeggiateNotes { .. }
         | Edit::StrumNotes { .. }
         | Edit::SnapNotesToScale { .. }
+        | Edit::ReverseNotes { .. }
+        | Edit::FlipNotes { .. }
+        | Edit::LegatoNotes { .. }
         | Edit::MoveNotes { .. }
         | Edit::ResizeNotes { .. }
         | Edit::SetNotesMuted { .. }
@@ -225,10 +237,48 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         Edit::AddSamplerChannel { ref path } => {
             project.add_sampler_channel(&stored_path(path, data_root));
         }
+        Edit::SetChannelName { channel, ref name } => project.set_channel_name(channel, name),
+        Edit::SoloChannel { channel } => project.solo_channel(channel),
+        Edit::CloneChannel { channel } => {
+            project.clone_channel(channel);
+        }
+        Edit::SetChannelColor { channel, color } => project.set_channel_color(channel, color),
+        Edit::SetChannelPitch { channel, cents } => project.set_channel_pitch(channel, cents),
+        Edit::FillSteps {
+            channel,
+            every,
+            count,
+        } => {
+            if project.channel(channel).is_some() && every > 0 {
+                let pattern = project.pattern_to_edit(pattern);
+                pattern.fill_steps(channel, every, count, ppq);
+            }
+        }
+        Edit::ClearSteps { channel } => {
+            let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
+            if let Some(pattern) = pattern {
+                pattern.clear_steps(channel);
+            }
+        }
+        Edit::ShiftSteps { channel, by, count } => {
+            let pattern = project.patterns.iter_mut().find(|p| p.index == pattern);
+            if let Some(pattern) = pattern {
+                pattern.shift_steps(channel, by, count, ppq);
+            }
+        }
         Edit::SetInsertVolume { insert, volume } => project.set_insert_volume_raw(insert, volume),
         Edit::SetInsertPan { insert, pan } => project.set_insert_pan_raw(insert, pan),
         Edit::SetInsertEnabled { insert, enabled } => project.set_insert_enabled(insert, enabled),
+        Edit::SoloInsert { insert } => project.solo_insert(insert),
+        Edit::SetInsertSeparation { insert, separation } => {
+            project.set_insert_separation_raw(insert, separation);
+        }
+        Edit::SetInsertPolarity { insert, reversed } => {
+            project.set_insert_polarity_reversed(insert, reversed);
+        }
+        Edit::SetInsertSwapped { insert, swapped } => project.set_insert_swapped(insert, swapped),
         Edit::SetInsertName { insert, ref name } => project.set_insert_name(insert, name),
+        Edit::SetInsertColor { insert, color } => project.set_insert_color(insert, color),
         Edit::SetRoute { from, to, on } => project.set_route(from, to, on),
         Edit::SetSendLevel { from, to, level } => project.set_send_level_raw(from, to, level),
         Edit::SetSlotEnabled {
@@ -237,12 +287,31 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
             enabled,
         } => project.set_slot_enabled(insert, slot, enabled),
         Edit::SetSlotMix { insert, slot, mix } => project.set_slot_mix_raw(insert, slot, mix),
+        Edit::SetInsertEffectsEnabled { insert, enabled } => {
+            project.set_insert_effects_enabled(insert, enabled);
+        }
+        Edit::SetTempo { milli } => project.set_tempo_milli(milli),
+        Edit::SetTimeSignature {
+            numerator,
+            denominator,
+        } => project.set_time_signature(numerator, denominator),
+        Edit::AddPattern { index } => project.add_pattern(index),
+        Edit::ClonePattern { from, to } => project.clone_pattern(from, to),
+        Edit::SetPatternName { pattern, ref name } => project.set_pattern_name(pattern, name),
+        Edit::DeletePattern { pattern } => project.delete_pattern(pattern),
+        Edit::SplitItems { ref ids, at } => {
+            if let Ok(at) = i32::try_from(at) {
+                project.split_items(ids, at);
+            }
+        }
         Edit::MoveItems { .. }
         | Edit::ResizeItems { .. }
         | Edit::SetMuted { .. }
         | Edit::DeleteItems { .. }
         | Edit::DuplicateItems { .. }
-        | Edit::SelectItems { .. } => {
+        | Edit::SelectItems { .. }
+        | Edit::PasteItems { .. }
+        | Edit::SetTrackEnabled { .. } => {
             if let Some(playlist) = project.current_arrangement_mut() {
                 edit_playlist(playlist, version, edit);
             }
@@ -266,6 +335,15 @@ fn edit_playlist(playlist: &mut Arrangement, version: u32, edit: &Edit) {
         Edit::DeleteItems { ids } => playlist.delete_items(ids),
         Edit::DuplicateItems { ids } => playlist.duplicate_items(ids),
         Edit::SelectItems { ids, add } => playlist.select_items(ids, *add),
+        Edit::PasteItems { items } => {
+            let items: Vec<PlaylistItem> = items.iter().map(|copied| copied.0).collect();
+            playlist.paste_items(&items);
+        }
+        Edit::SetTrackEnabled { track, enabled } => {
+            if let Ok(track) = i32::try_from(*track) {
+                playlist.set_track_enabled(track, *enabled);
+            }
+        }
         _ => {}
     }
 }
@@ -296,6 +374,9 @@ fn edit_notes(pattern: &mut Pattern, edit: &Edit) {
         Edit::ArpeggiateNotes { ids, step } => pattern.arpeggiate_notes(ids, *step),
         Edit::StrumNotes { ids, delay } => pattern.strum_notes(ids, *delay),
         Edit::SnapNotesToScale { ids, keys } => pattern.snap_notes_to_scale(ids, *keys),
+        Edit::ReverseNotes { ids } => pattern.reverse_notes(ids),
+        Edit::FlipNotes { ids } => pattern.flip_notes(ids),
+        Edit::LegatoNotes { ids } => pattern.legato_notes(ids),
         _ => {}
     }
 }
@@ -397,6 +478,7 @@ fn decode(sample: &str, root: &Path) -> Result<PreparedSamples, String> {
 enum After {
     Quit,
     Open(PathBuf),
+    New,
 }
 
 /// What a worker thread reports when it is done.
@@ -448,8 +530,11 @@ pub struct App {
     redo: Vec<Arc<Project>>,
     /// The drag the last edit was part of.
     drag: Option<Drag>,
-    /// The file the project came from. `None` until one is open.
+    /// The file the project came from. `None` until one is open, and for
+    /// a new project until it is saved.
     path: Option<PathBuf>,
+    /// Whether a project is open: one read from a file, or a new one.
+    open: bool,
     /// `None` until a project is open, and when no stream could be opened.
     transport: Option<Transport>,
     /// The stream of the sample that was previewed last. It is a stream of
@@ -507,6 +592,7 @@ impl App {
             redo: Vec::new(),
             drag: None,
             path: None,
+            open: false,
             transport: None,
             preview: None,
             previews: 0,
@@ -634,9 +720,12 @@ impl App {
     pub fn apply(&mut self, command: Command) {
         let result = match command {
             Command::Open(path) => self.leave(After::Open(path)),
-            Command::Save => match self.open_path() {
-                Ok(path) => self.save_as(path.to_path_buf()),
-                Err(error) => Err(error),
+            Command::New => self.leave(After::New),
+            // A new project has no file yet, so it asks for one.
+            Command::Save => match self.path.clone() {
+                Some(path) => self.save_as(path),
+                None if self.open => self.choose(Dialog::SaveAs),
+                None => Err(NOT_OPEN.to_owned()),
             },
             Command::SaveAs(path) => self.save_as(path),
             Command::Render(path) => self.render(path),
@@ -676,7 +765,7 @@ impl App {
                 Done::Loaded { path, result, .. } => {
                     self.loading = None;
                     match result {
-                        Ok(loaded) => self.show(path, *loaded),
+                        Ok(loaded) => self.show(Some(path), *loaded),
                         Err(error) => {
                             self.play_when_loaded = false;
                             self.error = Some(error);
@@ -749,6 +838,40 @@ impl App {
         self.sample_root.clone().unwrap_or_else(beside)
     }
 
+    /// Where the samples of the open project are looked up: for a new
+    /// project that has no file yet, the sample root or the current
+    /// directory.
+    fn sample_root(&self) -> PathBuf {
+        match &self.path {
+            Some(path) => self.sample_root_for(path),
+            None => (self.sample_root.clone()).unwrap_or_else(|| PathBuf::from(".")),
+        }
+    }
+
+    /// `Err` when no project is open.
+    fn require_open(&self) -> Result<(), String> {
+        if self.open {
+            Ok(())
+        } else {
+            Err(NOT_OPEN.to_owned())
+        }
+    }
+
+    /// Make a new project the open one, as a load that lands makes the
+    /// project it read: [`Project::blank`], which has no sample to decode.
+    /// A load that is running is dropped when it lands.
+    fn new_project(&mut self) {
+        self.error = None;
+        self.load += 1;
+        self.loading = None;
+        let loaded = Loaded {
+            project: Project::blank(),
+            samples: PreparedSamples::default(),
+            notice: None,
+        };
+        self.show(None, loaded);
+    }
+
     fn open(&mut self, path: PathBuf) {
         self.error = None;
         self.load += 1;
@@ -770,7 +893,8 @@ impl App {
     }
 
     /// Make a loaded project the open one and open a stream for it.
-    fn show(&mut self, path: PathBuf, loaded: Loaded) {
+    /// `path` is the file it came from, and `None` for a new project.
+    fn show(&mut self, path: Option<PathBuf>, loaded: Loaded) {
         let project = Arc::new(loaded.project);
         // The old stream closes before the new one opens.
         self.transport = None;
@@ -791,21 +915,16 @@ impl App {
         self.undo.clear();
         self.redo.clear();
         self.drag = None;
-        self.path = Some(path);
+        self.path = path;
+        self.open = true;
         self.error = (!notices.is_empty()).then(|| notices.join("; "));
         if std::mem::take(&mut self.play_when_loaded) && self.transport.is_some() {
             self.apply(Command::Play);
         }
     }
 
-    fn open_path(&self) -> Result<&Path, String> {
-        self.path
-            .as_deref()
-            .ok_or_else(|| "no project is open".to_owned())
-    }
-
     fn save_as(&mut self, path: PathBuf) -> Result<(), String> {
-        self.open_path()?;
+        self.require_open()?;
         self.error = None;
         save(&self.project, &path)?;
         self.saved = Arc::clone(&self.project);
@@ -826,7 +945,7 @@ impl App {
     ///
     /// A selection is no step, and nothing to save or to play.
     fn edit(&mut self, edit: &Edit, drag_id: Option<u64>) -> Result<(), String> {
-        self.open_path()?;
+        self.require_open()?;
         if matches!(edit, Edit::SelectItems { .. } | Edit::SelectNotes { .. }) {
             self.drag = None;
             let mut project = (*self.project).clone();
@@ -871,10 +990,10 @@ impl App {
 
     /// Decode a sample for the stream to play, on a thread of its own.
     fn decode_for_stream(&self, sample: String) {
-        let Some(path) = self.path.as_deref().filter(|_| self.transport.is_some()) else {
+        if self.transport.is_none() {
             return;
-        };
-        let root = self.sample_root_for(path);
+        }
+        let root = self.sample_root();
         self.spawn(
             move || Done::Decoded(decode(&sample, &root)),
             || Done::Decoded(Err("decoding the sample failed".to_owned())),
@@ -956,10 +1075,15 @@ impl App {
         if self.choosing {
             return Ok(());
         }
-        let file = name(self.open_path()?);
+        self.require_open()?;
+        let file = self
+            .path
+            .as_deref()
+            .map_or("the new project".to_owned(), name);
         let what = match &after {
             After::Quit => "quitting".to_owned(),
             After::Open(path) => format!("opening {}", name(path)),
+            After::New => "starting a new one".to_owned(),
         };
         let unanswered = after.clone();
         self.choosing = true;
@@ -988,6 +1112,7 @@ impl App {
         match after {
             After::Quit => self.quit = true,
             After::Open(path) => self.open(path),
+            After::New => self.new_project(),
         }
     }
 
@@ -1032,7 +1157,8 @@ impl App {
     }
 
     fn render(&mut self, path: PathBuf) -> Result<(), String> {
-        let root = self.sample_root_for(self.open_path()?);
+        self.require_open()?;
+        let root = self.sample_root();
         if self.rendering.is_some() {
             return Err("a render is running already".to_owned());
         }
@@ -1067,7 +1193,9 @@ impl App {
         }
         let mut ask = rfd::FileDialog::new();
         if dialog != Dialog::Open {
-            let stem = self.open_path()?.file_stem().unwrap_or_default();
+            self.require_open()?;
+            let stem = self.path.as_deref().and_then(Path::file_stem);
+            let stem = stem.unwrap_or("untitled".as_ref());
             let extension = if dialog == Dialog::Render {
                 "wav"
             } else {
@@ -1098,7 +1226,7 @@ impl App {
             self.play_when_loaded = true;
             return Ok(());
         }
-        self.open_path()?;
+        self.require_open()?;
         let transport = self.transport.as_mut().ok_or("there is no audio stream")?;
         transport.play().map_err(|e| e.to_string())
     }

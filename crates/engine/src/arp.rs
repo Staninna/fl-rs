@@ -49,6 +49,10 @@ const NEVER: i64 = i64::MAX;
 /// one to come, start: `0x4f000000`, 2^31 as an f32.
 const UNSET: f32 = 2_147_483_648.0;
 
+/// The most entries a pattern is built with: 65,536, where the corpus's
+/// longest is 12. See `Run::build`.
+const MAX_PATTERN: i64 = 1 << 16;
+
 /// The arpeggiator's time knob at its top: no steps, one note.
 pub(crate) const TIME_HOLD: i32 = 1447;
 
@@ -878,14 +882,22 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             c if c < 0 => (1, 1),
             c => (c, 1),
         };
-        let per = notes * settings.repeat;
-        let up = settings.range.max(1) * per;
+        // In i64, as a range and a repeat from a file can be anything.
+        let notes = i64::from(notes);
+        // Saturating, since even an i64 overflows at i32's ends with a few
+        // notes held; the bound below cuts what saturates anyway.
+        let per = notes.saturating_mul(i64::from(settings.repeat));
+        let up = i64::from(settings.range.max(1)).saturating_mul(per);
         let len = match settings.direction {
-            3 if up > 1 => 2 * up - 2,
-            4 if up > 1 => 2 * up,
+            3 if up > 1 => up.saturating_mul(2) - 2,
+            4 if up > 1 => up.saturating_mul(2),
             _ => up,
         };
-        let mut pattern = Vec::with_capacity(len.max(0) as usize);
+        // A range and a repeat at the ends of an i32 ask for 2^63 entries,
+        // which FL would try to build. Past this bound the first entries
+        // are built and the rest left out, which is fl-rs's choice.
+        let len = len.clamp(0, MAX_PATTERN);
+        let mut pattern = Vec::with_capacity(len as usize);
         for i in 0..len {
             let j = match settings.direction {
                 _ if up <= 1 => i,
@@ -909,7 +921,8 @@ impl<F: Fn(u16, bool, u64) -> Option<i32>> Run<F> {
             };
             pattern.push(Entry {
                 pitch: pitch + (octave * 1200) as f32,
-                key: key + octave * 12,
+                // A key from octaves past an i32 is held at its end.
+                key: (i64::from(key) + octave * 12).clamp(i32::MIN.into(), i32::MAX.into()) as i32,
                 source,
             });
         }
@@ -1025,6 +1038,20 @@ mod tests {
     fn down_starts_at_the_top_of_the_range() {
         let out = run(settings(2, 2), &chord());
         assert_eq!(keys(&out[..7]), [79, 76, 72, 67, 64, 60, 79]);
+    }
+
+    #[test]
+    fn a_range_and_a_repeat_at_the_ends_of_an_i32_play_with_a_chord_held() {
+        // Three notes at i32::MAX twice overflow an i64, and up and down
+        // double it again.
+        for direction in 1..=4 {
+            let settings = Settings {
+                repeat: i32::MAX,
+                ..settings(direction, i32::MAX)
+            };
+            let out = run(settings, &chord());
+            assert_eq!(out.len(), 16, "direction {direction}");
+        }
     }
 
     #[test]

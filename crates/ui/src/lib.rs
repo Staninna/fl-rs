@@ -29,7 +29,7 @@ mod windows;
 pub use model::NoteField;
 pub use windows::Window;
 
-use model::Project;
+use model::{Note, PlaylistItem, Project};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,6 +43,10 @@ pub enum Command {
     /// Open the project in this file. Like `Quit` it asks first when the
     /// open project has changes that are not saved.
     Open(PathBuf),
+    /// Start a new project, as File > New does: see
+    /// [`model::Project::blank`]. It asks first as `Open` does, and it has
+    /// no file until it is saved, so a `Save` of it asks for one.
+    New,
     /// Write the project to the file it came from, or was last saved to.
     Save,
     /// Write the project to this file.
@@ -155,6 +159,14 @@ pub enum Edit {
         ids: Vec<ItemId>,
         add: bool,
     },
+    /// Cut each item that tick `at` falls inside of in two at `at`. The
+    /// first part keeps the item's ID, and the second parts go to the end
+    /// of the list in the order of `ids`, each showing its source from
+    /// where its first part stops.
+    SplitItems {
+        ids: Vec<ItemId>,
+        at: Ticks,
+    },
     /// Light or clear a step of the pattern the top bar has selected, for
     /// the channel with this index. Step 0 is the pattern's first
     /// sixteenth note.
@@ -200,6 +212,55 @@ pub enum Edit {
         channel: u16,
         step: u32,
         velocity: u8,
+    },
+    /// Name the channel. An empty name is not set.
+    SetChannelName {
+        channel: u16,
+        name: String,
+    },
+    /// Switch the channel on and every other off, or, when it is the one
+    /// channel on already, every channel back on.
+    SoloChannel {
+        channel: u16,
+    },
+    /// Move the channel's notes in the pattern the top bar has selected
+    /// `by` steps along, later when it is positive, round the pattern's
+    /// first `count` steps: what goes off one end comes in at the other.
+    ShiftSteps {
+        channel: u16,
+        by: i32,
+        count: u32,
+    },
+    /// Light every `every`th step of the channel among the pattern's first
+    /// `count`, from the first, and clear the others. The pattern the top
+    /// bar has selected is made when the file has none with that index.
+    FillSteps {
+        channel: u16,
+        every: u32,
+        count: u32,
+    },
+    /// Remove every note of the channel from the pattern the top bar has
+    /// selected.
+    ClearSteps {
+        channel: u16,
+    },
+    /// Copy the channel, its plugin and its settings, to the end of the
+    /// rack, named with " #2" behind its name. An automation clip is not
+    /// copied.
+    CloneChannel {
+        channel: u16,
+    },
+    /// Give the channel a colour: an RGBA u32 with red in the low byte,
+    /// as `model` keeps a colour.
+    SetChannelColor {
+        channel: u16,
+        color: u32,
+    },
+    /// The channel's pitch knob in cents, -4800 to 4800, where a new
+    /// channel has 0.
+    SetChannelPitch {
+        channel: u16,
+        cents: i32,
     },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
@@ -293,6 +354,28 @@ pub enum Edit {
         ids: Vec<NoteId>,
         keys: u16,
     },
+    /// Mirror the notes in time within the span they cover, keeping each
+    /// one's length.
+    ReverseNotes {
+        ids: Vec<NoteId>,
+    },
+    /// Mirror the notes' keys around the middle of their range of keys,
+    /// so the highest becomes the lowest.
+    FlipNotes {
+        ids: Vec<NoteId>,
+    },
+    /// End each note where the next of the notes starts that starts later.
+    LegatoNotes {
+        ids: Vec<NoteId>,
+    },
+    /// Add copies of these notes to the pattern the top bar has selected,
+    /// which is made when the file has none with that index, with every
+    /// field kept. They become the selection, in place of the notes that
+    /// were selected: what a paste and a duplicate do. A note for no
+    /// channel is left out.
+    PasteNotes {
+        notes: Vec<Note>,
+    },
     /// Select the notes, on top of the selection when `add` is set and in
     /// its place when not. Like [`Edit::SelectItems`] this is no step for
     /// `Undo` and no change to save.
@@ -315,10 +398,38 @@ pub enum Edit {
         insert: u16,
         enabled: bool,
     },
+    /// Solo the insert, or with it soloed already, switch every insert
+    /// back on: see [`model::Project::solo_insert`] for which inserts stay
+    /// on. One step for `Undo`, however many switches it moves.
+    SoloInsert {
+        insert: u16,
+    },
+    /// The insert's stereo separation: -64 all separated, 0 as it comes,
+    /// 64 merged to mono.
+    SetInsertSeparation {
+        insert: u16,
+        separation: i32,
+    },
+    /// Reverse the insert's polarity, or put it back.
+    SetInsertPolarity {
+        insert: u16,
+        reversed: bool,
+    },
+    /// Swap the insert's left and right, or put them back.
+    SetInsertSwapped {
+        insert: u16,
+        swapped: bool,
+    },
     /// Name the insert. An empty name gives it its number back.
     SetInsertName {
         insert: u16,
         name: String,
+    },
+    /// Give the insert a colour: an RGBA u32 with red in the low byte, as
+    /// `model` keeps a colour.
+    SetInsertColor {
+        insert: u16,
+        color: u32,
     },
     /// Make or remove the route from insert `from` to insert `to`. A route
     /// from the master, or one that would lead an insert back into itself,
@@ -341,13 +452,85 @@ pub enum Edit {
         slot: u8,
         enabled: bool,
     },
+    /// Switch every slot of the insert that holds a plugin on or off at
+    /// once: one step for `Undo`.
+    SetInsertEffectsEnabled {
+        insert: u16,
+        enabled: bool,
+    },
     /// How much of a slot's output is its plugin's: 0 to 12800.
     SetSlotMix {
         insert: u16,
         slot: u8,
         mix: i32,
     },
+    /// The song's tempo in thousandths of a BPM, held to FL's 10 to 522
+    /// BPM.
+    SetTempo {
+        milli: u32,
+    },
+    /// The song's time signature: `numerator` beats a bar, from 1 to 16,
+    /// of a `denominator`th note, one of 2, 4, 8 and 16.
+    SetTimeSignature {
+        numerator: u8,
+        denominator: u8,
+    },
+    /// Add an empty pattern with this index, which the project has no
+    /// pattern for. The pattern selector sends a `SelectPattern` of it
+    /// behind this.
+    AddPattern {
+        index: u16,
+    },
+    /// Copy pattern `from` to a new pattern `to`, which the project has no
+    /// pattern for: see [`model::Project::clone_pattern`] for what comes
+    /// along. The pattern selector sends a `SelectPattern` of `to` behind
+    /// this.
+    ClonePattern {
+        from: u16,
+        to: u16,
+    },
+    /// Name the pattern. An empty name gives it its number back, and a
+    /// name for a pattern the project does not have makes it.
+    SetPatternName {
+        pattern: u16,
+        name: String,
+    },
+    /// Add copies of these items to the playlist of the arrangement FL
+    /// shows, at the end of its list in this order, with every field kept:
+    /// what a paste and a duplicate do. They become the selection, in
+    /// place of the items that were selected. See
+    /// [`model::Arrangement::paste_items`] for the items left out.
+    PasteItems {
+        items: Vec<CopiedItem>,
+    },
+    /// Switch the playlist track with this number, where the first is 1,
+    /// on or off, in the arrangement FL shows: see
+    /// [`model::Track::enabled`]. A track the file has no 238 for is
+    /// skipped.
+    SetTrackEnabled {
+        track: u32,
+        enabled: bool,
+    },
+    /// Delete the pattern and every playlist item of it in every
+    /// arrangement: see [`model::Project::delete_pattern`].
+    DeletePattern {
+        pattern: u16,
+    },
 }
+
+/// A playlist item as it was copied: its whole record. Two are the same
+/// when their bytes are, so that an [`Edit`] that carries one compares as
+/// a whole, a gain that is NaN included.
+#[derive(Debug, Clone, Copy)]
+pub struct CopiedItem(pub PlaylistItem);
+
+impl PartialEq for CopiedItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bytes() == other.0.to_bytes()
+    }
+}
+
+impl Eq for CopiedItem {}
 
 impl Edit {
     /// Whether, in a drag, this edit takes the place of the edit of its
@@ -425,7 +608,41 @@ pub fn shell(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
     shortcuts(ui, state, out);
     egui::Panel::top("top bar").show(ui, |ui| top_bar::show(ui, state, out));
     egui::Panel::bottom("status").show(ui, |ui| status(ui, state));
+    let sent = out.len();
     egui::CentralPanel::no_frame().show(ui, |ui| windows::show(ui, state, out));
+    select_clone(ui.ctx(), &state.project, &out[sent..]);
+}
+
+/// Select the channel that a "Clone" of the channel rack's menu makes, in
+/// the rack and so in the piano roll: the one after the last, where
+/// [`model::Project::clone_channel`] puts it. This runs after the rack has
+/// kept its selection for the frame, and only for a clone the model makes:
+/// of a channel that is not an automation clip, in a project whose
+/// channels have events.
+fn select_clone(ctx: &egui::Context, project: &Project, sent: &[Command]) {
+    for command in sent {
+        let Command::Edit {
+            edit: Edit::CloneChannel { channel },
+            ..
+        } = command
+        else {
+            continue;
+        };
+        let clones = project
+            .channel(*channel)
+            .is_some_and(|channel| channel.kind != Some(model::ChannelKind::Automation));
+        let placed = project
+            .channels
+            .iter()
+            .any(|channel| !channel.order.is_empty());
+        let last = project.channels.iter().map(|channel| channel.index).max();
+        if let Some(index) = last.and_then(|last| last.checked_add(1))
+            && clones
+            && placed
+        {
+            channel_rack::select_channel(ctx, index);
+        }
+    }
 }
 
 /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo, Ctrl+S saves. On a Mac

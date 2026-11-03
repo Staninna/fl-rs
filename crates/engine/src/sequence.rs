@@ -79,12 +79,22 @@ fn ticks(stored: i32) -> u64 {
 /// Walk the current arrangement's items. A project with an empty playlist
 /// plays pattern 1 once, which is what FL does in pattern mode.
 ///
-/// A muted item adds nothing, and neither does a record FL deleted. A
-/// pattern item adds the pattern's notes that are not muted. An item that
-/// places an audio clip channel adds a clip, and one that places an
-/// automation channel adds an automation clip.
+/// A muted item adds nothing, and neither does an item on a track that
+/// is switched off ([`model::Track::enabled`]) or a record FL deleted.
+/// Both kinds of item count towards the song's length. A pattern item
+/// adds the pattern's notes that are not muted. An item that places an
+/// audio clip channel adds a clip, and one that places an automation
+/// channel adds an automation clip.
 pub(crate) fn sequence(project: &Project) -> Song {
-    let items = project.current_arrangement().map_or(&[][..], |a| &a.items);
+    let arrangement = project.current_arrangement();
+    let items = arrangement.map_or(&[][..], |a| &a.items);
+    // Nearly always none.
+    let tracks = arrangement.map_or(&[][..], |a| &a.tracks);
+    let off: Vec<i64> = (tracks.iter())
+        .filter(|track| !track.enabled())
+        .map(|track| i64::from(track.index))
+        .collect();
+    let version = project.version();
     let mut song = Song::default();
     if items.is_empty() {
         pattern_mode(project, 1, &mut song);
@@ -96,7 +106,7 @@ pub(crate) fn sequence(project: &Project) -> Song {
         let position = ticks(item.position);
         let length = ticks(item.length);
         song.end = song.end.max(position + length);
-        if item.muted() {
+        if item.muted() || off.contains(&i64::from(item.track(version))) {
             continue;
         }
         match source {
@@ -300,6 +310,45 @@ mod tests {
         assert_eq!(song.clips, []);
         // The deleted record is no part of the song.
         assert_eq!(song.end, 1152);
+    }
+
+    #[test]
+    fn a_track_that_is_switched_off_plays_none_of_its_items() {
+        let notes = [note(0, 0)];
+        // Track 1 has the first item, and track 2 the second and the clip.
+        let mut second = item(384, 1, 384);
+        second.track_word -= 1;
+        let mut automation = clip(0, 0, 768);
+        automation.track_word -= 1;
+        let mut project = project(&[(1, &notes)], &[item(0, 1, 384), second, automation]);
+        // A writer that counts the tracks down from 500.
+        project.writer_version = Some("24.1.1.4285".to_owned());
+        project.channels.push(Channel {
+            index: 0,
+            kind: Some(ChannelKind::Automation),
+            ..Channel::default()
+        });
+        let track = |index: u32, on: u8| {
+            let mut bytes = vec![0; 70];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            bytes[12] = on;
+            model::Track {
+                index,
+                data: flp::event::layout::Track::from_bytes(&bytes),
+                ..model::Track::default()
+            }
+        };
+        project.arrangements[0].tracks = vec![track(1, 1), track(2, 0)];
+        let song = sequence(&project);
+        assert_eq!(ticks(&song), [(0, None)]);
+        assert_eq!(song.automation, []);
+        // The track's items still count towards the song's length.
+        assert_eq!(song.end, 768);
+
+        project.arrangements[0].tracks[1] = track(2, 1);
+        let song = sequence(&project);
+        assert_eq!(ticks(&song), [(0, None), (384, None)]);
+        assert_eq!(song.automation.len(), 1);
     }
 
     #[test]

@@ -381,7 +381,9 @@ layout! {
 layout! {
     /// One 24-byte record of 224 `PatternID.Notes`. FL's loader copies the
     /// record whole, and `docs/records-224-233.md` has the function that
-    /// reads each field.
+    /// reads each field. Every field is a whole number, so a note is
+    /// `Eq`, and an edit that carries notes can be too.
+    #[derive(Eq)]
     Note[24] {
         /// Ticks from the start of the pattern.
         position: i32,

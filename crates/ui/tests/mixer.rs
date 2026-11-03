@@ -208,6 +208,45 @@ fn a_drag_on_the_fader_is_one_drag_of_many_values() {
 }
 
 #[test]
+fn a_double_click_puts_each_knob_back_at_fl_s_default() {
+    let mut harness = harness();
+    select_bass(&mut harness);
+    let double_click = |harness: &mut Harness<'_, Vec<Command>>, label: &str| {
+        let at = harness.get_by_label(label).rect().center();
+        for _ in 0..2 {
+            harness.hover_at(at);
+            harness.drag_at(at);
+            harness.drop_at(at);
+        }
+        harness.run();
+        // Long enough that the next click starts a click of its own.
+        harness.run_steps(10);
+    };
+    // The drums' pan is half left, the bass sends to the reverb at half
+    // the fader and its plugin is at half its mix. A knob at its default
+    // already sends nothing.
+    for knob in ["Drums pan", "Send to Reverb", "Slot 1 mix", "Bass pan"] {
+        double_click(&mut harness, knob);
+    }
+    assert_eq!(
+        harness.state(),
+        &[
+            edit(Edit::SetInsertPan { insert: 1, pan: 0 }),
+            edit(Edit::SetSendLevel {
+                from: 2,
+                to: 4,
+                level: 12_800,
+            }),
+            edit(Edit::SetSlotMix {
+                insert: 2,
+                slot: 0,
+                mix: 12_800,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn the_led_switches_its_insert_and_the_knob_pans_it() {
     let mut harness = harness();
     let led = harness.get_by_label("Drums on");
@@ -235,6 +274,171 @@ fn the_led_switches_its_insert_and_the_knob_pans_it() {
     };
     assert_eq!(harness.state().last(), Some(&pan));
     assert_eq!(harness.state().len(), 3);
+}
+
+#[test]
+fn a_ctrl_click_or_a_right_click_on_the_led_solos_the_insert() {
+    let mut harness = harness();
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    harness.get_by_label("Drums on").click();
+    harness.run();
+    harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    harness.get_by_label("Bass on").click_secondary();
+    harness.run();
+    // A plain click still switches.
+    harness.get_by_label("Reverb on").click();
+    harness.run();
+    let solo = |insert| edit(Edit::SoloInsert { insert });
+    let switch = edit(Edit::SetInsertEnabled {
+        insert: 4,
+        enabled: false,
+    });
+    assert_eq!(harness.state(), &[solo(1), solo(2), switch]);
+}
+
+#[test]
+fn m_switches_the_selected_insert_and_s_solos_it() {
+    let mut harness = harness();
+    // The master is selected to begin with, and is on.
+    harness.key_press(egui::Key::M);
+    harness.run();
+    select_bass(&mut harness);
+    harness.key_press(egui::Key::S);
+    harness.run();
+    // Insert 3 is off, so M switches it on.
+    harness.get_by_label("Insert 3 strip").click();
+    harness.run();
+    harness.key_press(egui::Key::M);
+    harness.run();
+    let enabled = |insert, enabled| edit(Edit::SetInsertEnabled { insert, enabled });
+    assert_eq!(
+        harness.state(),
+        &[
+            enabled(0, false),
+            edit(Edit::SoloInsert { insert: 2 }),
+            enabled(3, true)
+        ]
+    );
+
+    // While a name is typed the keys are the field's.
+    harness.get_by_label("Drums").click();
+    harness.run();
+    for key in [egui::Key::M, egui::Key::S] {
+        harness.key_press(key);
+        harness.run();
+    }
+    assert_eq!(harness.state().len(), 3);
+}
+
+#[test]
+fn ctrl_l_links_the_rack_s_channel_to_the_selected_insert() {
+    let mut harness = harness();
+    let ctrl = egui::Modifiers::COMMAND;
+    // The rack has selected the first channel, which plays into insert 3.
+    harness.get_by_label("Insert 3 strip").click();
+    harness.run();
+    harness.key_press_modifiers(ctrl, egui::Key::L);
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    harness.get_by_label("Bass strip").click();
+    harness.run();
+    harness.key_press_modifiers(ctrl, egui::Key::L);
+    harness.run();
+    let link = edit(Edit::SetChannelInsert {
+        channel: 0,
+        insert: 2,
+    });
+    assert_eq!(harness.state(), &[link]);
+
+    // While a name is typed the keys are the field's.
+    harness.get_by_label("Drums").click();
+    harness.run();
+    harness.key_press_modifiers(ctrl, egui::Key::L);
+    harness.run();
+    assert_eq!(harness.state().len(), 1);
+}
+
+#[test]
+fn the_strip_s_menu_sets_polarity_swap_and_separation() {
+    let mut harness = harness();
+    assert!(harness.query_by_label("Reverse polarity").is_none());
+    for (strip, entry) in [
+        ("Drums strip", "Reverse polarity"),
+        ("Bass", "Swap left and right"),
+        ("Reverb strip", "Solo"),
+    ] {
+        harness.get_by_label(strip).click_secondary();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
+    assert_eq!(
+        harness.state(),
+        &[
+            edit(Edit::SetInsertPolarity {
+                insert: 1,
+                reversed: true,
+            }),
+            edit(Edit::SetInsertSwapped {
+                insert: 2,
+                swapped: true,
+            }),
+            edit(Edit::SoloInsert { insert: 4 }),
+        ]
+    );
+
+    // 150 points are the knob's whole range, from -64 to 64.
+    harness.get_by_label("Insert 3 strip").click_secondary();
+    harness.run();
+    let knob = harness.get_by_label("Insert 3 separation");
+    assert_eq!(knob.accesskit_node().numeric_value(), Some(0.0));
+    let from = knob.rect().center();
+    drag(&mut harness, from, &[egui::vec2(0.0, 37.5)]);
+    let separation = Command::Edit {
+        edit: Edit::SetInsertSeparation {
+            insert: 3,
+            separation: -32,
+        },
+        drag_id: Some(1),
+    };
+    assert_eq!(harness.state().last(), Some(&separation));
+    assert_eq!(harness.state().len(), 4);
+}
+
+#[test]
+fn the_strip_s_menu_switches_all_its_effects_at_once() {
+    let mut harness = harness();
+    for entry in ["Bypass all effects", "Enable all effects"] {
+        harness.get_by_label("Bass strip").click_secondary();
+        harness.run();
+        harness.get_by_label(entry).click();
+        harness.run();
+    }
+    let all = |enabled| edit(Edit::SetInsertEffectsEnabled { insert: 2, enabled });
+    assert_eq!(harness.state(), &[all(false), all(true)]);
+    // The drums have no plugin to switch.
+    harness.get_by_label("Drums strip").click_secondary();
+    harness.run();
+    harness.get_by_label("Bypass all effects").click();
+    harness.run();
+    assert_eq!(harness.state().len(), 2);
+}
+
+#[test]
+fn the_strip_s_menu_colours_the_insert() {
+    let mut harness = harness();
+    harness.get_by_label("Reverb strip").click_secondary();
+    harness.run();
+    harness.get_by_label_contains("Colour").click();
+    harness.run();
+    harness.get_by_label("Teal").click();
+    harness.run();
+    let teal = edit(Edit::SetInsertColor {
+        insert: 4,
+        color: 0x00aa_aa3c,
+    });
+    assert_eq!(harness.state(), &[teal]);
+    assert!(harness.query_by_label("Teal").is_none());
 }
 
 #[test]
@@ -392,6 +596,38 @@ fn a_click_on_a_name_renames_the_insert() {
         harness.get_by_role(Role::TextInput).value().as_deref(),
         Some("Drums")
     );
+}
+
+#[test]
+fn f2_over_the_mixer_renames_the_selected_insert() {
+    let mut harness = harness();
+    let bass = harness.get_by_label("Bass strip").rect().center();
+    harness.get_by_label("Bass strip").click();
+    harness.hover_at(bass);
+    harness.run();
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Bass"));
+    field.type_text("es");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let name = "Basses".to_owned();
+    assert_eq!(
+        harness.state(),
+        &[edit(Edit::SetInsertName { insert: 2, name })]
+    );
+
+    // With the pointer elsewhere F2 is the pattern selector's, and the
+    // field takes the selector's place.
+    let combo = harness.get_by_role(Role::ComboBox).rect().center();
+    harness.hover_at(combo);
+    harness.run();
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    assert!(harness.query_by_role(Role::ComboBox).is_none());
+    assert!(harness.query_by_label("Bass").is_some());
 }
 
 #[test]

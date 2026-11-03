@@ -2,9 +2,18 @@
 //! the ten effect slots of the selected insert.
 //!
 //! A strip has the insert's name, its pan knob, its peak meter beside its
-//! fader, and the LED that switches it on and off. A click on a strip
-//! selects its insert, a click on its name renames it as well, and the
-//! left and right arrows move the selection.
+//! fader, and the LED that switches it on and off, and with Ctrl held or
+//! with the right button solos it. A click on a strip
+//! selects its insert, and a click on its name renames it as well. F2
+//! renames the selected insert while the pointer is over the mixer. The
+//! left and right arrows move the selection. M switches the selected
+//! insert on or off and S solos it, and Ctrl+L links the channel the
+//! channel rack has selected to it: the channel plays into it from then on.
+//!
+//! A right-click on a strip or on its name opens a menu with what the
+//! strip has no room for: the solo, the insert's polarity, the swap of its
+//! left and right, its stereo separation, the switch of all its effects at
+//! once and its colour.
 //!
 //! The bottom of a strip is what the selected insert sends to it, as FL
 //! has it: an arrow that makes the route or removes it, and above a lit
@@ -25,11 +34,11 @@
 
 use crate::playlist::{rgb, text_on};
 use crate::top_bar::meter_fraction;
-use crate::widgets::{Knob, drag_value};
+use crate::widgets::{Knob, colour_menu, drag_value};
 use crate::{Command, Edit, UiState};
 use egui::{
-    Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, Sense, Shape, Stroke, StrokeKind,
-    Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use engine::{Curves, FlExact};
 use model::rec::LAST_INSERT;
@@ -63,6 +72,8 @@ const FADER_TOP: i32 = 16_000;
 const UNITY: i32 = 12_800;
 /// A pan all the way to the right.
 const PAN_END: i32 = 6400;
+/// The ends of an insert's stereo separation: separated, then merged.
+const SEPARATION_END: i32 = 64;
 /// The top of a slot's mix level.
 const MIX_TOP: i32 = 12_800;
 /// The colour of a lit LED, of a lit arrow and of a knob's arc.
@@ -146,14 +157,24 @@ fn pan_hint(pan: i32) -> String {
     }
 }
 
+/// An insert's stereo separation as FL's hint words it (`FUN_006a4ac0`):
+/// a percentage separated below 0 and merged above.
+fn separation_hint(separation: i32) -> String {
+    match (separation as f32 / SEPARATION_END as f32 * 100.0).round() as i32 {
+        0 => "Original".to_owned(),
+        apart if apart < 0 => format!("{}% separated", -apart),
+        merged => format!("{merged}% merged"),
+    }
+}
+
 /// How far up its travel a fader's handle is, from 0 to 1.
 fn fader_fraction(volume: i32) -> f32 {
     volume.clamp(0, FADER_TOP) as f32 / FADER_TOP as f32
 }
 
 /// An LED that switches something on and off. One that cannot be clicked
-/// is drawn faint. True when it was clicked.
-fn led(ui: &mut Ui, on: bool, enabled: bool, label: &str, hint: &str) -> bool {
+/// is drawn faint.
+fn led(ui: &mut Ui, on: bool, enabled: bool, label: &str, hint: &str) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
@@ -172,7 +193,7 @@ fn led(ui: &mut Ui, on: bool, enabled: bool, label: &str, hint: &str) -> bool {
     };
     ui.painter()
         .circle(rect.center(), LED / 2.0 - 1.5, fill, stroke);
-    response.on_hover_text(hint).clicked()
+    response.on_hover_text(hint)
 }
 
 pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
@@ -206,9 +227,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         .rename
         .take_if(|rename| !shown.contains(&rename.insert));
 
-    // The arrows that move the selection.
+    // The arrows that move the selection, and the keys for its switch,
+    // while no field has the keyboard.
     let mut moved = false;
-    if ui.memory(|egui| egui.focused().is_none()) {
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    if !typing && ui.memory(|egui| egui.focused().is_none()) {
         let pressed = |key| ui.input_mut(|input| input.consume_key(Modifiers::NONE, key));
         let at = shown.iter().position(|index| *index == memory.selected);
         let at = at.unwrap_or(0);
@@ -217,6 +240,38 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         }
         if pressed(Key::ArrowRight) && at + 1 < shown.len() {
             (memory.selected, moved) = (shown[at + 1], true);
+        }
+        // M switches the selected insert and S solos it (inferred from
+        // FL's mute and solo; FL's own keys were not read from its code).
+        let insert = memory.selected;
+        if pressed(Key::M) {
+            let enabled = !project.insert_mix(insert).enabled();
+            let switch = Edit::SetInsertEnabled { insert, enabled };
+            out.push(edit(switch, None));
+        }
+        if pressed(Key::S) {
+            out.push(edit(Edit::SoloInsert { insert }, None));
+        }
+        // Ctrl+L links the channel the rack has selected to the selected
+        // insert, FL's "Link selected channels" key (inferred from FL's
+        // manual). A channel the insert has already sends nothing.
+        let over = crate::windows::under_pointer(ui.ctx());
+        if over == Some(crate::windows::Window::Mixer) && pressed(Key::F2) {
+            let own = project.insert_mix(insert).insert();
+            let own = own.and_then(|insert| insert.name.clone());
+            memory.rename = Some(Rename {
+                insert,
+                text: own.unwrap_or_default(),
+                focused: false,
+            });
+        }
+        let link = ui.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
+        if link
+            && let Some(channel) = crate::channel_rack::selected_channel(ui.ctx(), project)
+            && channel.insert().unwrap_or(0) != i32::from(insert)
+        {
+            let channel = channel.index;
+            out.push(edit(Edit::SetChannelInsert { channel, insert }, None));
         }
     }
 
@@ -292,6 +347,7 @@ impl Strips<'_> {
         if background.clicked() {
             memory.selected = index;
         }
+        background.context_menu(|ui| self.menu(ui, index, &name, out));
         let visuals = ui.visuals();
         // FL lights the selected strip a shade, and keeps the orange for
         // what is switched on.
@@ -356,8 +412,15 @@ impl Strips<'_> {
         let (row, _) = ui.allocate_exact_size(size, Sense::hover());
         self.fader(ui, row, index, &name, mix.volume_raw(), out);
 
+        // FL solos an insert on a Ctrl+click or a right-click on its
+        // switch (from FL's manual).
         let enabled = mix.enabled();
-        if led(ui, enabled, true, &format!("{name} on"), "Insert on or off") {
+        let hint = "Insert on or off. Ctrl+click or right-click to solo it";
+        let switch = led(ui, enabled, true, &format!("{name} on"), hint);
+        let ctrl = ui.input(|input| input.modifiers.command);
+        if switch.secondary_clicked() || (switch.clicked() && ctrl) {
+            out.push(edit(Edit::SoloInsert { insert: index }, None));
+        } else if switch.clicked() {
             let enabled = !enabled;
             let switch = Edit::SetInsertEnabled {
                 insert: index,
@@ -366,6 +429,83 @@ impl Strips<'_> {
             out.push(edit(switch, None));
         }
         self.send(ui, index, &name, out);
+    }
+
+    /// The menu a right-click on a strip or on its name opens: the
+    /// insert's solo, and the parts of it that the strip has no room for,
+    /// its polarity, the swap of its left and right, its stereo
+    /// separation, the switch of all its effects and its colour.
+    fn menu(&self, ui: &mut Ui, index: u16, name: &str, out: &mut Vec<Command>) {
+        let mix = self.project.insert_mix(index);
+        if ui.button("Solo").clicked() {
+            out.push(edit(Edit::SoloInsert { insert: index }, None));
+        }
+        ui.separator();
+        let mut reversed = mix.polarity_reversed();
+        if ui.checkbox(&mut reversed, "Reverse polarity").clicked() {
+            let polarity = Edit::SetInsertPolarity {
+                insert: index,
+                reversed,
+            };
+            out.push(edit(polarity, None));
+        }
+        let mut swapped = mix.swapped();
+        if ui.checkbox(&mut swapped, "Swap left and right").clicked() {
+            let swap = Edit::SetInsertSwapped {
+                insert: index,
+                swapped,
+            };
+            out.push(edit(swap, None));
+        }
+        ui.horizontal(|ui| {
+            let separation = mix.separation_raw();
+            let knob = Knob {
+                label: &format!("{name} separation"),
+                value: separation,
+                range: -SEPARATION_END..=SEPARATION_END,
+                default: 0,
+                hint: separation_hint(separation),
+                colour: LIT,
+                enabled: true,
+            };
+            if let Some((separation, drag_id)) = knob.show(ui, KNOB) {
+                let separation = Edit::SetInsertSeparation {
+                    insert: index,
+                    separation,
+                };
+                out.push(edit(separation, drag_id));
+            }
+            ui.label(format!("Stereo: {}", separation_hint(separation)));
+        });
+        ui.separator();
+        // FL's "Bypass all effects" and "Enable all effects" (inferred
+        // from its mixer menu), for the slots that hold a plugin.
+        let held = mix.insert().is_some_and(|insert| {
+            let plugins = insert
+                .slots
+                .iter()
+                .filter_map(|slot| slot.plugin_name.as_deref());
+            plugins.into_iter().any(|name| !name.is_empty())
+        });
+        for (label, enabled) in [("Bypass all effects", false), ("Enable all effects", true)] {
+            if ui.add_enabled(held, egui::Button::new(label)).clicked() {
+                let all = Edit::SetInsertEffectsEnabled {
+                    insert: index,
+                    enabled,
+                };
+                out.push(edit(all, None));
+                ui.close();
+            }
+        }
+        ui.separator();
+        let colour = mix.insert().and_then(|insert| insert.color);
+        if let Some(color) = colour_menu(ui, colour) {
+            let colour = Edit::SetInsertColor {
+                insert: index,
+                color,
+            };
+            out.push(edit(colour, None));
+        }
     }
 
     /// The plate with the insert's name, which a click turns into a field
@@ -422,6 +562,7 @@ impl Strips<'_> {
         if selected {
             painter.rect_stroke(plate, 2.0, Stroke::new(1.5, LIT), StrokeKind::Inside);
         }
+        response.context_menu(|ui| self.menu(ui, index, name, out));
         if response.on_hover_text("Click to rename").clicked() {
             // The field of a strip further right has not seen this click
             // yet, and will not be drawn to see it.
@@ -636,13 +777,8 @@ fn slots(ui: &mut Ui, project: &Project, index: u16, out: &mut Vec<Command>) {
         let filled = plugin.is_some();
         ui.horizontal(|ui| {
             let enabled = mix.slot_enabled(slot).unwrap_or(true);
-            if led(
-                ui,
-                enabled,
-                filled,
-                &format!("{label} on"),
-                "Slot on or off",
-            ) {
+            let hint = "Slot on or off";
+            if led(ui, enabled, filled, &format!("{label} on"), hint).clicked() {
                 let enabled = !enabled;
                 let switch = Edit::SetSlotEnabled {
                     insert: index,
@@ -749,6 +885,9 @@ mod tests {
         assert_eq!(pan_hint(0), "Pan centred");
         assert_eq!(pan_hint(-6400), "Pan 100% left");
         assert_eq!(pan_hint(3200), "Pan 50% right");
+        assert_eq!(separation_hint(0), "Original");
+        assert_eq!(separation_hint(-64), "100% separated");
+        assert_eq!(separation_hint(16), "25% merged");
     }
 
     #[test]

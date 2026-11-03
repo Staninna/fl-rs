@@ -142,6 +142,9 @@ pub(crate) struct Voice {
     /// mod Y automated, and the cutoff and resonance it was last given.
     filter: Option<ChannelFilter>,
     mods: Option<(f32, f32)>,
+    /// Set once the voice was let go of with [`Voice::release`]: the output
+    /// sample its fade ends on, and how many samples the fade lasts.
+    fade: Option<(usize, usize)>,
 }
 
 impl Voice {
@@ -174,6 +177,7 @@ impl Voice {
             next_bend: 0,
             filter: None,
             mods: None,
+            fade: None,
         }
     }
 
@@ -295,6 +299,29 @@ impl Voice {
         self
     }
 
+    /// Let go of the voice: from the next sample on it fades to silence
+    /// in a straight line over `frames` output samples, and ends there. A
+    /// voice that is fading already keeps the fade that ends first. This
+    /// allocates nothing, so it is for the audio thread.
+    pub fn release(&mut self, frames: usize) {
+        let frames = frames.max(1);
+        let end = self.done.saturating_add(frames);
+        if self.fade.is_some_and(|(ends, _)| ends <= end) {
+            return;
+        }
+        self.fade = Some((end, frames));
+        self.frames = self.frames.min(end);
+    }
+
+    /// The level the fade leaves at output sample `at` of the voice: 1
+    /// before a fade, and from `1` down to `1 / frames` over one.
+    fn faded(&self, at: usize) -> f32 {
+        match self.fade {
+            Some((end, frames)) => end.saturating_sub(at).min(frames) as f32 / frames as f32,
+            None => 1.0,
+        }
+    }
+
     /// Output samples the voice lasts from its first to its last.
     pub fn frames(&self) -> usize {
         self.frames
@@ -355,15 +382,16 @@ impl Voice {
                 Some(right) => read_hermite(right, pos),
                 None => a,
             };
+            let faded = self.faded(self.done + i);
             if let Some(filter) = &mut self.filter {
                 let [a, b] = filter.run([a, b]);
-                let gain = filter.gain();
+                let gain = filter.gain() * faded;
                 *l += a * (self.gains.0 * gain);
                 *r += b * (self.gains.1 * gain);
                 continue;
             }
-            *l += a * self.gains.0;
-            *r += b * self.gains.1;
+            *l += a * (self.gains.0 * faded);
+            *r += b * (self.gains.1 * faded);
         }
         self.done = (self.done + count).min(self.frames);
     }

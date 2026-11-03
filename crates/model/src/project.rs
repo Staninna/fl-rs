@@ -1,8 +1,20 @@
 //! The project and the events that belong to no smaller object.
 
 use crate::codec::{self, Cx, object};
+use crate::pattern::write_field;
+use crate::rec::{RecTarget, control};
 use crate::{Arrangement, Channel, Error, Insert, Item, Pattern, Placed};
 use flp::event::{Id, layout};
+use std::ops::RangeInclusive;
+
+/// FL's tempo range, 10 to 522 BPM, in thousandths of a BPM: the range its
+/// tempo control maps automation onto (`docs/automation-234.md`).
+pub const TEMPO_MILLI: RangeInclusive<u32> = 10_000..=522_000;
+
+/// The beats a bar can have in FL's time signature, and the notes a beat
+/// can be (inferred from FL's song settings, not read from its code).
+pub const TIME_SIG_NUMERATORS: RangeInclusive<u8> = 1..=16;
+pub const TIME_SIG_DENOMINATORS: [u8; 4] = [2, 4, 8, 16];
 
 /// A whole project.
 ///
@@ -111,6 +123,42 @@ impl Project {
         }
     }
 
+    /// A new project, for File > New: PPQ 96, a 199 of FL 24.2.99, 120 BPM
+    /// in a 156, and one sampler channel named "Sampler" that plays no
+    /// sample yet, with the events of the one channel in FL's own
+    /// `Empty.flp` ([`Channel::new_sampler`]), playing into the master.
+    ///
+    /// The rest of that template is not known here, so this has no mixer,
+    /// no arrangement and no pattern: FL's 103, its inserts, its 99 and its
+    /// tracks are left out, and the mixer window shows none. The edits put
+    /// a pattern, a step, a note and a channel in as they do in a file,
+    /// and the playlist stays empty. That FL starts its empty project at
+    /// 120 BPM and PPQ 96 is inferred.
+    pub fn blank() -> Self {
+        let mut project = Project::new(flp::Header {
+            format: 0,
+            channel_count: 1,
+            ppq: 96,
+        });
+        project.writer_version = Some("24.2.99.4720".to_owned());
+        project.tempo_milli = Some(120_000);
+        project.order = [Id::FLVersion, Id::Tempo]
+            .into_iter()
+            .enumerate()
+            .map(|(pos, id)| Placed {
+                pos,
+                item: Item::Field(id),
+            })
+            .collect();
+        let mut channel = Channel::new_sampler(0, "Sampler", "", false, 2);
+        // The template's channel has no 196.
+        channel.sample_path = None;
+        let path = Item::Field(Id::SamplePath);
+        channel.order.retain(|placed| placed.item != path);
+        project.channels.push(channel);
+        project
+    }
+
     /// Tempo in BPM: 156 divided by 1000, or for a file that only has the
     /// old pair, 66 plus 93 thousandths.
     pub fn tempo(&self) -> Option<f64> {
@@ -123,10 +171,98 @@ impl Project {
         }
     }
 
+    /// Set the tempo, in thousandths of a BPM, held to [`TEMPO_MILLI`].
+    ///
+    /// The loader's tempo setter takes 156 whole, and 66 and 93 as the
+    /// whole BPM and the thousandths of it (`docs/event-dictionary.md`).
+    /// Each of the three the project has gets the new tempo, so the file
+    /// reads as that tempo whichever of them comes last. A project with
+    /// neither 156 nor 66 gets a 156 behind its 199, and a 66 without a
+    /// 93 gets one behind it when the tempo has a fraction. No file of the
+    /// corpus has a 225 record for the tempo, but one that does is set
+    /// too, since the loader replays the records after the events.
+    pub fn set_tempo_milli(&mut self, milli: u32) {
+        let milli = milli.clamp(*TEMPO_MILLI.start(), *TEMPO_MILLI.end());
+        let old_pair = self.tempo_coarse.is_some();
+        if self.tempo_milli.is_some() || !old_pair {
+            self.tempo_milli = Some(milli);
+            write_field(&mut self.order, Id::FLVersion, Id::Tempo);
+        }
+        if old_pair {
+            let (whole, fraction) = ((milli / 1000) as u16, (milli % 1000) as u16);
+            self.tempo_coarse = Some(whole);
+            if self.tempo_fine.is_some() || fraction != 0 {
+                self.tempo_fine = Some(fraction);
+                write_field(&mut self.order, Id::TempoCoarse, Id::TempoFine);
+            }
+        }
+        let tempo = RecTarget::Global {
+            control: control::TEMPO,
+        };
+        let legacy = self.legacy_rec_ids();
+        for record in &mut self.initial_values {
+            if RecTarget::decode(record.rec_id, legacy) == tempo {
+                record.value = milli as i32;
+            }
+        }
+    }
+
     /// 17 over 18, as the file stores them. Whether 17 counts beats per bar
     /// or is a numerator depends on 35 `TimeSigMode`, which stays raw.
     pub fn time_signature(&self) -> Option<(u8, u8)> {
         Some((self.time_sig_num?, self.time_sig_beat?))
+    }
+
+    /// Set the time signature: 17 to `numerator` beats a bar, 1 to 16,
+    /// and 18 to `denominator`, one of [`TIME_SIG_DENOMINATORS`]. Anything
+    /// else is skipped.
+    ///
+    /// A project without a 17 gets one behind its 199, and one without an
+    /// 18 gets it behind the 17, so that an 18 is read after the 17 it
+    /// goes with, as FL writes the two. The 35 `TimeSigMode` decides
+    /// whether FL reads 17 and 18 as a time signature, so it is set to 1,
+    /// and a project without a 35 gets one behind the 18: the loader sets
+    /// it to 1 itself only for 4/4 (`docs/event-dictionary.md`, row 35;
+    /// that 1 is the time signature's mode is inferred). A loader older
+    /// than 12.0.0 caps the steps of a bar at 64, which this leaves to it.
+    pub fn set_time_signature(&mut self, numerator: u8, denominator: u8) {
+        if !TIME_SIG_NUMERATORS.contains(&numerator)
+            || !TIME_SIG_DENOMINATORS.contains(&denominator)
+        {
+            return;
+        }
+        if self.time_signature() == Some((numerator, denominator)) {
+            return;
+        }
+        let (num, beat) = (Id::ArrangementsTimeSigNum, Id::ArrangementsTimeSigBeat);
+        self.time_sig_num = Some(numerator);
+        write_field(&mut self.order, Id::FLVersion, num);
+        self.time_sig_beat = Some(denominator);
+        write_field(&mut self.order, num, beat);
+        let mode = Id::from(35);
+        let order = &mut self.order;
+        let set = order
+            .iter_mut()
+            .rev()
+            .find_map(|placed| match &mut placed.item {
+                Item::Raw(e) if e.id == mode.0 => Some(&mut e.data),
+                _ => None,
+            });
+        if let Some(data) = set {
+            *data = vec![1];
+        } else if let Some(at) = order.iter().position(|p| p.item == Item::Field(beat)) {
+            let item = Item::Raw(flp::RawEvent {
+                id: mode.0,
+                data: vec![1],
+            });
+            order.insert(
+                at + 1,
+                Placed {
+                    pos: order[at].pos,
+                    item,
+                },
+            );
+        }
     }
 
     /// The channel a 64 with this index opened.
@@ -282,6 +418,35 @@ mod tests {
         PlaylistItem::new(ItemSource::Pattern(1), position, length)
     }
 
+    #[test]
+    fn a_blank_project_reads_back_as_itself_and_takes_the_edits() {
+        let blank = Project::blank();
+        let file = to_flp(&blank).unwrap();
+        let read = crate::from_flp(&file);
+        assert_eq!(to_flp(&read), Ok(file.clone()));
+        assert_eq!(read.tempo(), Some(120.0));
+        assert_eq!(read.header.channel_count, 1);
+        let channel = &read.channels[..];
+        assert_eq!(channel.len(), 1);
+        assert_eq!(channel[0].kind, Some(crate::ChannelKind::Sampler));
+        assert_eq!(channel[0].name.as_deref(), Some("Sampler"));
+        assert_eq!(
+            (channel[0].sample_path.as_deref(), channel[0].insert()),
+            (None, Some(0))
+        );
+        assert!(read.patterns.is_empty() && read.arrangements.is_empty());
+
+        // A step makes pattern 1, and a sample makes a second channel.
+        let mut edited = read;
+        edited.pattern_to_edit(1).set_step(0, 0, true, 96);
+        assert_eq!(edited.add_sampler_channel("kick.wav"), Some(1));
+        let again = crate::from_flp(&to_flp(&edited).unwrap());
+        assert!(again.pattern(1).unwrap().steps(0, 96)[0]);
+        let names: Vec<_> = again.channels.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names, [Some("Sampler".to_owned()), Some("kick".to_owned())]);
+        assert_eq!(again.header.channel_count, 2);
+    }
+
     fn project(items: &[PlaylistItem]) -> Project {
         let mut project = Project::new(flp::Header {
             format: 0,
@@ -303,6 +468,131 @@ mod tests {
                 data: arrangement.to_le_bytes().to_vec(),
             }),
         });
+    }
+
+    fn ev(id: Id, data: &[u8]) -> RawEvent {
+        RawEvent {
+            id: id.0,
+            data: data.to_vec(),
+        }
+    }
+
+    /// A file of these events after a 199 of FL 20.8, read and checked to
+    /// write back the same, and what it writes once `edit` has run.
+    fn edited(events: &[RawEvent], edit: impl FnOnce(&mut Project)) -> (Project, Vec<RawEvent>) {
+        let mut all = vec![ev(Id::FLVersion, b"20.8.4.2576\0")];
+        all.extend_from_slice(events);
+        let file = flp::Project {
+            header: flp::Header {
+                format: 0,
+                channel_count: 0,
+                ppq: 96,
+            },
+            events: all,
+        };
+        let mut project = crate::from_flp(&file);
+        assert_eq!(to_flp(&project), Ok(file));
+        edit(&mut project);
+        let written = to_flp(&project).unwrap();
+        // What is written reads back as the same events.
+        assert_eq!(to_flp(&crate::from_flp(&written)), Ok(written.clone()));
+        (crate::from_flp(&written), written.events[1..].to_vec())
+    }
+
+    #[test]
+    fn the_tempo_goes_into_156_held_to_fl_s_range() {
+        let tempo = |milli: u32| ev(Id::Tempo, &milli.to_le_bytes());
+        let title = ev(Id::Title, b"Song\0");
+        let events = [tempo(140_000), title.clone()];
+        let (read, written) = edited(&events, |p| p.set_tempo_milli(128_500));
+        assert_eq!(written, [tempo(128_500), title.clone()]);
+        assert_eq!(read.tempo(), Some(128.5));
+        let (read, _) = edited(&events, |p| p.set_tempo_milli(5));
+        assert_eq!(read.tempo(), Some(10.0));
+        let (read, _) = edited(&events, |p| p.set_tempo_milli(999_999));
+        assert_eq!(read.tempo(), Some(522.0));
+
+        // A file without a tempo gets a 156 behind its 199.
+        let (read, written) = edited(std::slice::from_ref(&title), |p| p.set_tempo_milli(90_000));
+        assert_eq!(written, [tempo(90_000), title]);
+        assert_eq!(read.tempo(), Some(90.0));
+    }
+
+    #[test]
+    fn an_old_tempo_goes_into_66_and_93_and_a_225_record_too() {
+        let word = |id: Id, value: u16| ev(id, &value.to_le_bytes());
+        let coarse = word(Id::TempoCoarse, 128);
+        let (read, written) = edited(std::slice::from_ref(&coarse), |p| p.set_tempo_milli(99_500));
+        let want = [word(Id::TempoCoarse, 99), word(Id::TempoFine, 500)];
+        assert_eq!(written, want);
+        assert_eq!(read.tempo(), Some(99.5));
+        // A whole tempo needs no 93, and one that is there is set.
+        let (_, written) = edited(std::slice::from_ref(&coarse), |p| {
+            p.set_tempo_milli(100_000)
+        });
+        assert_eq!(written, [word(Id::TempoCoarse, 100)]);
+        let (_, written) = edited(&want, |p| p.set_tempo_milli(100_000));
+        assert_eq!(
+            written,
+            [word(Id::TempoCoarse, 100), word(Id::TempoFine, 0)]
+        );
+
+        // Beside a 156 both are set, and so is a record for the tempo.
+        let record = |value: i32| {
+            let id = 0x4000_0005u32.to_le_bytes();
+            ev(Id::MixerParams, &[[0; 4], id, value.to_le_bytes()].concat())
+        };
+        let both = [
+            ev(Id::Tempo, &140_000u32.to_le_bytes()),
+            coarse,
+            record(140_000),
+        ];
+        let (read, written) = edited(&both, |p| p.set_tempo_milli(75_250));
+        let want = [
+            ev(Id::Tempo, &75_250u32.to_le_bytes()),
+            word(Id::TempoCoarse, 75),
+            word(Id::TempoFine, 250),
+            record(75_250),
+        ];
+        assert_eq!(written, want);
+        assert_eq!(read.tempo(), Some(75.25));
+    }
+
+    #[test]
+    fn a_time_signature_is_17_and_18_with_35_set() {
+        let byte = |id: u32, value: u8| ev(Id::from(id), &[value]);
+        let title = ev(Id::Title, b"Song\0");
+        // A file as FL writes one, in 4/4 with the mode clear.
+        let events = [byte(17, 4), byte(18, 4), byte(35, 0), title.clone()];
+        let (read, written) = edited(&events, |p| p.set_time_signature(7, 8));
+        assert_eq!(
+            written,
+            [byte(17, 7), byte(18, 8), byte(35, 1), title.clone()]
+        );
+        assert_eq!(read.time_signature(), Some((7, 8)));
+
+        // A file with none of them gets all three behind its 199.
+        let (read, written) = edited(std::slice::from_ref(&title), |p| p.set_time_signature(3, 4));
+        assert_eq!(
+            written,
+            [byte(17, 3), byte(18, 4), byte(35, 1), title.clone()]
+        );
+        assert_eq!(read.time_signature(), Some((3, 4)));
+        // And one with a 17 alone gets the 18 behind it.
+        let (_, written) = edited(&[title.clone(), byte(17, 4)], |p| {
+            p.set_time_signature(5, 16)
+        });
+        assert_eq!(
+            written,
+            [title.clone(), byte(17, 5), byte(18, 16), byte(35, 1)]
+        );
+
+        // What FL does not offer is skipped, and so is the signature the
+        // file has.
+        for (numerator, denominator) in [(0, 4), (17, 4), (4, 3), (4, 32), (4, 4)] {
+            let (_, written) = edited(&events, |p| p.set_time_signature(numerator, denominator));
+            assert_eq!(written, events[..]);
+        }
     }
 
     #[test]
