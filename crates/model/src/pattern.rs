@@ -771,7 +771,7 @@ impl Project {
     /// The channel's 219, made as FL makes it for a new channel when the
     /// channel has none: volume 10000, pan in the centre and 256 for mod
     /// X, which is what 2136 of the corpus channels have behind the two.
-    fn levels_to_edit(&mut self, channel: u16) -> Option<&mut layout::Levels> {
+    pub(crate) fn levels_to_edit(&mut self, channel: u16) -> Option<&mut layout::Levels> {
         let channel = self.channel_to_edit(channel)?;
         if channel.kind == Some(ChannelKind::Automation) {
             return None;

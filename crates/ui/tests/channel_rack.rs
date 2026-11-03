@@ -563,3 +563,35 @@ fn the_menu_of_a_name_colours_the_channel() {
     assert_eq!(harness.state(), &[edit(blue)]);
     assert!(harness.query_by_label("Blue").is_none());
 }
+
+#[test]
+fn the_menu_of_a_name_drags_the_channel_s_pitch() {
+    let mut harness = harness();
+    let name = harness.get_by_label("Kick").rect().center();
+    right_click(&mut harness, name);
+    let field = harness.get_by_label("Kick pitch");
+    assert_eq!(field.accesskit_node().numeric_value(), Some(0.0));
+    // A cent a point, to the right is higher, and the drag is one drag.
+    let from = field.rect().center();
+    harness.hover_at(from);
+    harness.drag_at(from);
+    harness.step();
+    for right in [10.0, 30.0] {
+        harness.hover_at(from + egui::vec2(right, 0.0));
+        harness.step();
+    }
+    harness.drop_at(from + egui::vec2(30.0, 0.0));
+    harness.run();
+    let edits = harness.state();
+    assert!(!edits.is_empty());
+    let Some(Command::Edit {
+        edit: Edit::SetChannelPitch { channel: 0, cents },
+        drag_id: Some(drag),
+    }) = edits.last()
+    else {
+        panic!("{edits:?}");
+    };
+    assert!((20..=30).contains(cents), "{cents} cents");
+    let one_drag = |command: &Command| matches!(command, Command::Edit { drag_id: Some(id), .. } if id == drag);
+    assert!(edits.iter().all(one_drag), "{edits:?}");
+}

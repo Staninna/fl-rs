@@ -778,6 +778,26 @@ fn a_channel_s_colour_is_saved_reloaded_and_undone() {
     assert_eq!(colour(app.project()), None);
 }
 
+#[test]
+fn a_drag_on_a_channel_s_pitch_is_saved_and_undone_in_one_step() {
+    let dir = Dir::new("pitch");
+    let (mut app, path) = open_fixture(&dir);
+    let pitch = |project: &Project| project.channels[0].pitch();
+    for cents in [100, 250, 1200] {
+        edit(
+            &mut app,
+            Edit::SetChannelPitch { channel: 0, cents },
+            Some(7),
+        );
+    }
+    assert_eq!(pitch(app.project()), Some(1200));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    assert_eq!(pitch(&fl_rs::read(&path).unwrap()), Some(1200));
+    app.apply(Command::Undo);
+    assert_eq!(pitch(app.project()), Some(0));
+}
+
 /// The steps of pattern 1 that are lit for channel 0.
 fn lit(project: &Project) -> Vec<usize> {
     let Some(pattern) = project.pattern(1) else {

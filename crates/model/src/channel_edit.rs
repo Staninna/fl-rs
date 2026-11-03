@@ -1,12 +1,16 @@
 //! The channel rack's edits of whole channels: a channel's name, its
-//! colour, its solo, and a clone of it.
+//! colour, its pitch, its solo, and a clone of it.
 //!
 //! Like the edits in `pattern.rs`, each sets a field and sees to it that
 //! the field has an event to be written in, see "Changing a project" in
 //! the crate's docs. A channel index that names no channel is skipped.
 
 use crate::codec::{Codec, Cx};
+use crate::rec::{RecTarget, control};
 use crate::{ChannelKind, Item, Placed, Project};
+
+/// The ends of a channel's pitch knob, in cents.
+const PITCH_END: i32 = 4800;
 use flp::event::Id;
 
 /// Whether the entry is the event `id`, typed or raw.
@@ -155,6 +159,38 @@ impl Project {
         channel.color_is_custom = Some(true);
         if find_field(order, Id::PluginColorIsCustom).is_none() {
             after(Id::PluginColorIsCustom, order, colour);
+        }
+    }
+
+    /// The channel's pitch knob in cents, held to FL's -4800 to 4800: the
+    /// i32 at @8 of its 219 `Levels`, where the engine reads it
+    /// (`docs/rec-channel.md`, control 4). A channel without a 219 gets
+    /// one as [`Project::set_channel_volume`] makes it, and an automation
+    /// clip, which keeps its range there, is skipped.
+    ///
+    /// The loader replays the 225 records after the events, so a record
+    /// for the channel's control 4 is set too.
+    pub fn set_channel_pitch(&mut self, channel: u16, cents: i32) {
+        let cents = cents.clamp(-PITCH_END, PITCH_END);
+        let is_clip = |c: &crate::Channel| c.kind == Some(ChannelKind::Automation);
+        let Some(own) = self.channel(channel).filter(|c| !is_clip(c)) else {
+            return;
+        };
+        if own.pitch() == Some(cents) || (own.levels.is_none() && cents == 0) {
+            return;
+        }
+        if let Some(levels) = self.levels_to_edit(channel) {
+            levels.unknown_8 = cents.to_le_bytes();
+        }
+        let knob = RecTarget::Channel {
+            index: channel,
+            control: control::CHANNEL_PITCH,
+        };
+        let legacy = self.legacy_rec_ids();
+        for record in &mut self.initial_values {
+            if RecTarget::decode(record.rec_id, legacy) == knob {
+                record.value = cents;
+            }
         }
     }
 
@@ -409,6 +445,41 @@ mod tests {
         project.writer_version = Some("3.5.3".to_owned());
         project.set_channel_color(0, 0x0050_70d0);
         assert_eq!(project.channels[0].color, Some(0x0040_60d0));
+    }
+
+    #[test]
+    fn a_pitch_goes_into_219_at_8_held_to_fl_s_range() {
+        let mut project = project();
+        project.set_channel_pitch(0, 700);
+        project.set_channel_pitch(2, -9999);
+        // No pitch on a channel without a 219 is no change.
+        project.set_channel_pitch(1, 0);
+        let written = to_flp(&project).unwrap();
+        let read = from_flp(&written);
+        let pitches: Vec<_> = read.channels.iter().map(|c| c.pitch()).collect();
+        assert_eq!(pitches, [Some(700), None, Some(-4800), None]);
+        // The 219 is the one FL makes for a new channel, behind the 64.
+        let levels = read.channels[0].levels.unwrap();
+        assert_eq!(
+            (levels.volume, levels.pan, levels.mod_x),
+            (10_000, 6400, 256)
+        );
+        assert_eq!(written.events[2].id, Id::Levels.0);
+        assert_eq!(written.events.len(), file().events.len() + 2);
+
+        // A record for the knob is set too, and an automation clip keeps
+        // its range where the knob would be.
+        let record = |value: i32| flp::event::layout::InitialValue {
+            unknown_0: [0; 4],
+            rec_id: 4,
+            value,
+        };
+        project.initial_values = vec![record(100)];
+        project.set_channel_pitch(0, -1200);
+        assert_eq!(project.initial_values, [record(-1200)]);
+        project.channels[1].kind = Some(ChannelKind::Automation);
+        project.set_channel_pitch(1, 300);
+        assert_eq!(project.channels[1].levels, None);
     }
 
     fn enabled(project: &Project) -> Vec<Option<bool>> {

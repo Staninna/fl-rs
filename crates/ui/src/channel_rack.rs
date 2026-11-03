@@ -17,7 +17,8 @@
 //! one. A right click on a channel's switch solos it, as in FL, and one
 //! on the switch of the channel that is soloed switches every channel back
 //! on. A right click on a name opens the channel's menu: rename it, clone
-//! it to the end of the rack, give it a colour of a small palette, shift
+//! it to the end of the rack, give it a colour of a small palette, drag or
+//! type its pitch in cents, shift
 //! its steps one step left or right round the pattern, light each second,
 //! fourth or eighth step in place of the ones that are lit, or clear them.
 //! Shift+wheel scrolls along the steps.
@@ -61,6 +62,8 @@ const INSERTS: i32 = 125;
 /// The top of a channel's volume and of its pan, and of a velocity.
 const LEVEL_TOP: i32 = 12_800;
 const VELOCITY_TOP: f32 = 128.0;
+/// The ends of a channel's pitch knob, in cents.
+const PITCH_END: i32 = 4800;
 /// The colour of an enabled channel's LED and of a knob's arc.
 const LIT: Color32 = Color32::from_rgb(120, 220, 110);
 /// What the rack keeps from one frame to the next.
@@ -252,6 +255,40 @@ fn has_long_notes(pattern: Option<&Pattern>, channel: u16) -> bool {
     let notes = pattern.map_or(&[][..], |pattern| &pattern.notes);
     let mut own = notes.iter().filter(|note| note.channel == channel);
     own.any(|note| !note.is_deleted() && note.length > 0)
+}
+
+/// The channel's pitch knob as a number in cents, to drag or to type. A
+/// drag is one drag of many values, and so one step for `Undo`.
+fn pitch(ui: &mut Ui, channel: &Channel, out: &mut Vec<Command>) {
+    let mut cents = channel.pitch().unwrap_or(0);
+    let value = egui::DragValue::new(&mut cents)
+        .range(-PITCH_END..=PITCH_END)
+        .speed(1.0)
+        .suffix(" cents");
+    let response = ui.add(value);
+    let label = format!("{} pitch", name(channel));
+    response.widget_info(|| {
+        let mut info = WidgetInfo::labeled(WidgetType::DragValue, true, &label);
+        info.value = Some(f64::from(cents));
+        info
+    });
+    let drag = response.id.with("pitch drag");
+    if response.drag_started() {
+        let id = next_drag_id(ui.ctx());
+        ui.data_mut(|data| data.insert_temp(drag, id));
+    }
+    if response.changed() {
+        let drag_id = response
+            .dragged()
+            .then(|| ui.data(|data| data.get_temp::<u64>(drag)))
+            .flatten();
+        let pitch = Edit::SetChannelPitch {
+            channel: channel.index,
+            cents,
+        };
+        out.push(edit(pitch, drag_id));
+    }
+    response.on_hover_text("The channel's pitch: drag, or click to type it");
 }
 
 fn memory_id() -> egui::Id {
@@ -642,6 +679,13 @@ impl Rack<'_> {
                 color,
             };
             out.push(edit(colour, None));
+        }
+        // An automation clip keeps its range where the knob would be.
+        if channel.kind != Some(ChannelKind::Automation) {
+            ui.horizontal(|ui| {
+                ui.label("Pitch");
+                pitch(ui, channel, out);
+            });
         }
         ui.separator();
         let steps = takes_notes(channel) && !has_long_notes(self.pattern, index);

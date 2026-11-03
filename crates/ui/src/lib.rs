@@ -252,6 +252,12 @@ pub enum Edit {
         channel: u16,
         color: u32,
     },
+    /// The channel's pitch knob in cents, -4800 to 4800, where a new
+    /// channel has 0.
+    SetChannelPitch {
+        channel: u16,
+        cents: i32,
+    },
     /// Add a note for this channel to the pattern the top bar has
     /// selected, which is made when the file has none with that index. Key
     /// 60 is C5, and 131 is the highest. A `length` of 0 is a step, which
