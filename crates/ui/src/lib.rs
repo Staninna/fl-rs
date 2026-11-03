@@ -578,7 +578,41 @@ pub fn shell(ui: &mut egui::Ui, state: &UiState, out: &mut Vec<Command>) {
     shortcuts(ui, state, out);
     egui::Panel::top("top bar").show(ui, |ui| top_bar::show(ui, state, out));
     egui::Panel::bottom("status").show(ui, |ui| status(ui, state));
+    let sent = out.len();
     egui::CentralPanel::no_frame().show(ui, |ui| windows::show(ui, state, out));
+    select_clone(ui.ctx(), &state.project, &out[sent..]);
+}
+
+/// Select the channel that a "Clone" of the channel rack's menu makes, in
+/// the rack and so in the piano roll: the one after the last, where
+/// [`model::Project::clone_channel`] puts it. This runs after the rack has
+/// kept its selection for the frame, and only for a clone the model makes:
+/// of a channel that is not an automation clip, in a project whose
+/// channels have events.
+fn select_clone(ctx: &egui::Context, project: &Project, sent: &[Command]) {
+    for command in sent {
+        let Command::Edit {
+            edit: Edit::CloneChannel { channel },
+            ..
+        } = command
+        else {
+            continue;
+        };
+        let clones = project
+            .channel(*channel)
+            .is_some_and(|channel| channel.kind != Some(model::ChannelKind::Automation));
+        let placed = project
+            .channels
+            .iter()
+            .any(|channel| !channel.order.is_empty());
+        let last = project.channels.iter().map(|channel| channel.index).max();
+        if let Some(index) = last.and_then(|last| last.checked_add(1))
+            && clones
+            && placed
+        {
+            channel_rack::select_channel(ctx, index);
+        }
+    }
 }
 
 /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo, Ctrl+S saves. On a Mac

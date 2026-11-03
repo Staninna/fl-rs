@@ -708,3 +708,52 @@ fn a_right_click_on_a_track_s_name_mutes_and_unmutes_the_track() {
     harness.run();
     assert!(harness.state().is_empty(), "{:?}", harness.state());
 }
+
+#[test]
+fn a_cloned_channel_is_the_selected_one_once_it_is_made() {
+    // Channels with events, which the model clones.
+    let mut project = fixture();
+    for (pos, channel) in project.channels.iter_mut().enumerate() {
+        channel.order = vec![model::Placed {
+            pos,
+            item: model::Item::Field(flp::event::Id::ChannelNew),
+        }];
+    }
+    // The state the harness draws, which the test changes as the app
+    // would.
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(UiState {
+        project: Arc::new(project.clone()),
+        playing: false,
+        ..state()
+    }));
+    let drawn = std::rc::Rc::clone(&shown);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 360.0))
+        .with_theme(egui::Theme::Dark)
+        .build_ui_state(
+            move |ui, out| ui::shell(ui, &drawn.borrow(), out),
+            Vec::new(),
+        );
+    harness.run();
+    harness.key_press(egui::Key::F5);
+    harness.key_press(egui::Key::F6);
+    harness.run();
+    // The graph names the selected channel.
+    harness.get_by_label("Graph").click();
+    harness.run();
+    assert!(harness.query_by_label("Kick velocity").is_some());
+    let name = harness.get_by_label("Kick").rect().center();
+    harness.hover_at(name);
+    button(&harness, name, true);
+    button(&harness, name, false);
+    harness.run();
+    // The app applies the edit before it draws the next frame.
+    harness.get_by_label("Clone").click();
+    harness.step();
+    assert_eq!(harness.state(), &[edit(Edit::CloneChannel { channel: 0 })]);
+    assert_eq!(project.clone_channel(0), Some(2));
+    shown.borrow_mut().project = Arc::new(project);
+    harness.run();
+    assert!(harness.query_by_label("Kick #2 velocity").is_some());
+    assert!(harness.query_by_label("Kick velocity").is_none());
+}
