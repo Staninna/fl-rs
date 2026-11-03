@@ -469,6 +469,14 @@ pub enum Edit {
     PasteItems {
         items: Vec<CopiedItem>,
     },
+    /// Switch the playlist track with this number, where the first is 1,
+    /// on or off, in the arrangement FL shows: see
+    /// [`model::Track::enabled`]. A track the file has no 238 for is
+    /// skipped.
+    SetTrackEnabled {
+        track: u32,
+        enabled: bool,
+    },
 }
 
 /// A playlist item as it was copied: its whole record. Two are the same

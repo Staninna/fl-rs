@@ -216,6 +216,31 @@ impl Arrangement {
         self.items.extend(pieces);
     }
 
+    /// Whether the track with this number, where the first is 1, plays:
+    /// see [`Track::enabled`]. A track the arrangement has no record for
+    /// plays.
+    pub fn track_enabled(&self, track: i32) -> bool {
+        let found = self
+            .tracks
+            .iter()
+            .find(|t| i64::from(t.index) == i64::from(track));
+        found.is_none_or(Track::enabled)
+    }
+
+    /// Switch the track with this number, where the first is 1, on or
+    /// off, in its 238's byte at @12. A track without a 238 is skipped:
+    /// every track of a file from FL 12.9 on has one, and no event of an
+    /// older file holds the switch.
+    pub fn set_track_enabled(&mut self, track: i32, enabled: bool) {
+        let found = self
+            .tracks
+            .iter_mut()
+            .find(|t| i64::from(t.index) == i64::from(track));
+        if let Some(data) = found.and_then(|t| t.data.as_mut()) {
+            data.unknown_12 = [u8::from(enabled)];
+        }
+    }
+
     /// Select the items, on top of the selection when `add` is set and in
     /// its place when not.
     pub fn select_items(&mut self, ids: &[usize], add: bool) {
@@ -397,6 +422,18 @@ object!(Track {
     one color_is_custom = TrackColorIsCustom;
 });
 
+impl Track {
+    /// Whether the track plays: the byte at @12 of its 238, which the
+    /// loader keeps at `trk+0x3c` (`docs/event-dictionary.md`, "238") and
+    /// PyFLP reads as the track's `enabled` flag. That it is the switch
+    /// in front of the track's name, and that FL plays none of a track's
+    /// items while it is 0, are PyFLP's name and inferred. A track without
+    /// a 238 plays.
+    pub fn enabled(&self) -> bool {
+        self.data.is_none_or(|data| data.unknown_12 != [0])
+    }
+}
+
 /// One time marker. 205 `TimeMarkerID.Name` closes it and takes along the
 /// marker events since the previous 205.
 ///
@@ -546,6 +583,42 @@ mod tests {
         let before = arrangement.clone();
         arrangement.move_items(&[1, 7], 96, 1, VERSION);
         arrangement.mute_items(&[1, 7], true);
+        assert_eq!(arrangement, before);
+    }
+
+    /// A 238 of 70 bytes for track `index`, switched on.
+    fn track(index: u32) -> Track {
+        let mut bytes = vec![0; 70];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        bytes[12] = 1;
+        Track {
+            index,
+            data: layout::Track::from_bytes(&bytes),
+            ..Track::default()
+        }
+    }
+
+    #[test]
+    fn a_track_s_switch_is_the_byte_at_12_of_its_238() {
+        let mut arrangement = arrangement(Vec::new());
+        let named = Track {
+            index: 3,
+            name: Some("Vox".to_owned()),
+            ..Track::default()
+        };
+        arrangement.tracks = vec![track(1), track(2), named];
+        arrangement.set_track_enabled(2, false);
+        assert_eq!(arrangement.tracks[1].data.unwrap().unknown_12, [0]);
+        let on: Vec<bool> = (1..=4).map(|t| arrangement.track_enabled(t)).collect();
+        assert_eq!(on, [true, false, true, true]);
+        arrangement.set_track_enabled(2, true);
+        assert_eq!(arrangement.tracks[1].data.unwrap().unknown_12, [1]);
+
+        // A track without a 238 has no byte to switch, and neither has one
+        // the arrangement does not have.
+        let before = arrangement.clone();
+        arrangement.set_track_enabled(3, false);
+        arrangement.set_track_enabled(9, false);
         assert_eq!(arrangement, before);
     }
 

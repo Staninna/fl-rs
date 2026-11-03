@@ -600,3 +600,51 @@ fn the_window_keys_show_and_hide_their_windows() {
     assert!(harness.query_by_label("No window is open").is_some());
     assert!(harness.state().is_empty());
 }
+
+/// The fixture with a 238 for its track 2, switched on or off.
+fn with_track_switch(on: bool) -> UiState {
+    let mut bytes = vec![0; 70];
+    bytes[..4].copy_from_slice(&2u32.to_le_bytes());
+    bytes[12] = u8::from(on);
+    let mut project = fixture();
+    project.arrangements[0].tracks[0].data = flp::event::layout::Track::from_bytes(&bytes);
+    UiState {
+        project: Arc::new(project),
+        ..state()
+    }
+}
+
+/// A right click at `pos`.
+fn right_click(harness: &mut Harness<'_, Vec<Command>>, pos: egui::Pos2) {
+    harness.hover_at(pos);
+    button(harness, pos, true);
+    button(harness, pos, false);
+    harness.run();
+}
+
+#[test]
+fn a_right_click_on_a_track_s_name_mutes_and_unmutes_the_track() {
+    for (on, entry) in [(true, "Mute track"), (false, "Unmute track")] {
+        let mut harness = harness(with_track_switch(on));
+        harness.run();
+        let name = egui::pos2(40.0, at(&harness, 0.0, 2).y);
+        right_click(&mut harness, name);
+        harness.get_by_label(entry).click();
+        harness.run();
+        let switched = Edit::SetTrackEnabled {
+            track: 2,
+            enabled: !on,
+        };
+        // The right click on the name mutes no item.
+        assert_eq!(harness.state(), &[edit(switched)]);
+    }
+
+    // Track 1 has no 238, so there is no switch to set.
+    let mut harness = harness(with_track_switch(true));
+    harness.run();
+    let name = egui::pos2(40.0, at(&harness, 0.0, 1).y);
+    right_click(&mut harness, name);
+    harness.get_by_label("Mute track").click();
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+}

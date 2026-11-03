@@ -4,7 +4,9 @@
 //! A click selects an item, and with Shift adds it to the selection. A drag
 //! moves the selection, a drag by an item's right edge resizes it, and
 //! Ctrl+drag moves a copy. A right click mutes or unmutes and Delete
-//! removes. A drag snaps to the grid unless Alt is held. Ctrl+wheel zooms
+//! removes. A right click on a track's name opens a menu that mutes the
+//! track or unmutes it, which FL does with a switch beside the name: a
+//! muted track's name and items are drawn faint. A drag snaps to the grid unless Alt is held. Ctrl+wheel zooms
 //! around the pointer, the wheel scrolls through the tracks and Shift+wheel
 //! along the timeline. A click on the ruler seeks.
 //!
@@ -641,6 +643,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                         Some(name) => (name.to_owned(), ui.visuals().text_color()),
                         None => (format!("Track {}", index + 1), weak),
                     };
+                    let ink = if track.is_some_and(|track| !track.enabled()) {
+                        ink.gamma_multiply(0.4)
+                    } else {
+                        ink
+                    };
                     let at = pos2(name.left() + 4.0, name.center().y);
                     painter.with_clip_rect(name).text(
                         at,
@@ -680,8 +687,11 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                // A muted item is a shade of its colour with faint text.
-                let (fill, text) = if block.muted {
+                // A muted item is a shade of its colour with faint text,
+                // and so is every item of a muted track.
+                let track = i32::try_from(block.row + 1).unwrap_or(i32::MAX);
+                let on = arrangement.is_none_or(|a| a.track_enabled(track));
+                let (fill, text) = if block.muted || !on {
                     (block.colour.gamma_multiply(0.3), weak)
                 } else {
                     (block.colour, text_on(block.colour))
@@ -854,6 +864,34 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
                     ids: targets(block),
                     muted: !block.muted,
                 }));
+            }
+
+            // The track names, on top of the rows. A click on one lets go
+            // of the items, as one beside them does, and a right click
+            // opens the track's menu.
+            for index in 0..rows {
+                let top = area.top() + index as f32 * row;
+                let name = Rect::from_min_size(pos2(area.left(), top), vec2(NAMES, row));
+                let header = ui.interact(name, ui.id().with(("track", index)), Sense::click());
+                if header.clicked() && !modifiers.shift && !selected().is_empty() {
+                    out.push(edit(Edit::SelectItems {
+                        ids: Vec::new(),
+                        add: false,
+                    }));
+                }
+                let track = (index + 1) as u32;
+                header.context_menu(|ui| {
+                    let own = names.iter().find(|t| t.index == track);
+                    let on = own.is_none_or(|track| track.enabled());
+                    let label = if on { "Mute track" } else { "Unmute track" };
+                    // Only a track with a 238 has the switch.
+                    let switch = egui::Button::new(label);
+                    let has = own.is_some_and(|track| track.data.is_some());
+                    if ui.add_enabled(has, switch).clicked() {
+                        let enabled = !on;
+                        out.push(edit(Edit::SetTrackEnabled { track, enabled }));
+                    }
+                });
             }
         });
     set_hovered(ui.ctx(), hover);

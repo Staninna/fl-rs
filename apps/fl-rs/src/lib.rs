@@ -297,7 +297,8 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         | Edit::DeleteItems { .. }
         | Edit::DuplicateItems { .. }
         | Edit::SelectItems { .. }
-        | Edit::PasteItems { .. } => {
+        | Edit::PasteItems { .. }
+        | Edit::SetTrackEnabled { .. } => {
             if let Some(playlist) = project.current_arrangement_mut() {
                 edit_playlist(playlist, version, edit);
             }
@@ -324,6 +325,11 @@ fn edit_playlist(playlist: &mut Arrangement, version: u32, edit: &Edit) {
         Edit::PasteItems { items } => {
             let items: Vec<PlaylistItem> = items.iter().map(|copied| copied.0).collect();
             playlist.paste_items(&items);
+        }
+        Edit::SetTrackEnabled { track, enabled } => {
+            if let Ok(track) = i32::try_from(*track) {
+                playlist.set_track_enabled(track, *enabled);
+            }
         }
         _ => {}
     }

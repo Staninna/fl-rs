@@ -680,6 +680,52 @@ fn a_paste_of_items_is_saved_reloaded_and_undone_in_one_step() {
 }
 
 #[test]
+fn a_muted_track_is_saved_reloaded_undone_and_plays_nothing() {
+    let dir = Dir::new("track");
+    let path = write_fixture(&dir.0);
+    // The fixture with a 238 for track 1, where its item is, behind the
+    // arrangement's events.
+    let mut project = fixture();
+    let mut bytes = vec![0; 70];
+    bytes[..4].copy_from_slice(&1u32.to_le_bytes());
+    bytes[12] = 1;
+    project.arrangements[0].tracks.push(model::Track {
+        index: 1,
+        data: flp::event::layout::Track::from_bytes(&bytes),
+        order: vec![Placed {
+            pos: 100,
+            item: Item::Field(Id::TrackData),
+        }],
+        ..model::Track::default()
+    });
+    fl_rs::save(&project, &path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut app = App::new(None);
+    app.apply(Command::Open(path.clone()));
+    settle(&mut app);
+    let on = |project: &Project| project.current_arrangement().unwrap().track_enabled(1);
+    assert!(on(app.project()));
+    assert!(rendered(app.project(), &dir.0).0 > 0.5);
+
+    let switch = |enabled| Edit::SetTrackEnabled { track: 1, enabled };
+    edit(&mut app, switch(false), None);
+    assert!(!on(app.project()));
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    assert!(!on(&saved));
+    assert_eq!(rendered(&saved, &dir.0), (0.0, 0));
+    // A track that is off already is no step.
+    edit(&mut app, switch(false), None);
+    assert!(!app.is_modified());
+
+    app.apply(Command::Undo);
+    assert!(on(app.project()));
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+}
+
+#[test]
 fn a_channel_s_name_is_saved_reloaded_and_undone() {
     let dir = Dir::new("rename");
     let (mut app, path) = open_fixture(&dir);
