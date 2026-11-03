@@ -170,9 +170,11 @@ pub(crate) fn snap_step(grid: Grid, scale: f32) -> u64 {
     step
 }
 
-/// The multiple of `step` nearest to `tick`.
+/// The multiple of `step` nearest to `tick`, or an end of an i64 for a
+/// tick past what one holds.
 pub(crate) fn snap(tick: f32, step: u64) -> i64 {
-    (tick / step as f32).round() as i64 * step as i64
+    let step = i64::try_from(step).unwrap_or(i64::MAX);
+    ((tick / step as f32).round() as i64).saturating_mul(step)
 }
 
 /// Where the timeline's ticks are on the screen.
@@ -341,7 +343,9 @@ impl Drag {
         let moved = tick - self.tick;
         let ids = self.ids.clone();
         if self.resizes {
-            let length = snap(self.end as f32 + moved, step) - self.start as i64;
+            // Saturating, as the piano roll's drags are.
+            let start = i64::try_from(self.start).unwrap_or(i64::MAX);
+            let length = snap(self.end as f32 + moved, step).saturating_sub(start);
             // An end dragged to the start or past it leaves one step.
             let length = if length < 1 { step as i64 } else { length };
             Edit::ResizeItems {
@@ -351,8 +355,9 @@ impl Drag {
         } else {
             Edit::MoveItems {
                 ids,
-                delta_ticks: snap(self.start as f32 + moved, step) - self.start as i64,
-                delta_tracks: row - self.row,
+                delta_ticks: snap(self.start as f32 + moved, step)
+                    .saturating_sub(i64::try_from(self.start).unwrap_or(i64::MAX)),
+                delta_tracks: row.saturating_sub(self.row),
             }
         }
     }
@@ -903,6 +908,8 @@ mod tests {
         assert_eq!(snap(229.0, 96), 192);
         assert_eq!(snap(-50.0, 96), -96);
         assert_eq!(snap(229.4, 1), 229);
+        assert_eq!(snap(f32::MAX, 96), i64::MAX);
+        assert_eq!(snap(f32::MIN, 96), i64::MIN);
     }
 
     #[test]

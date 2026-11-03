@@ -798,7 +798,8 @@ impl Rack<'_> {
         };
         let keys = own().map(|note| note.key);
         let (low, high) = (keys.clone().min().unwrap_or(0), keys.max().unwrap_or(0));
-        let span = f32::from((high - low).max(1));
+        // In i32: keys from a file can be the ends of an i16.
+        let span = (i32::from(high) - i32::from(low)).max(1) as f32;
         let x = |tick: i32| steps.origin + tick as f32 / steps.ticks as f32 * STEP;
         painter.rect_filled(
             area.shrink2(vec2(0.0, 1.0)),
@@ -806,7 +807,7 @@ impl Rack<'_> {
             Color32::from_rgb(44, 48, 52),
         );
         for note in own() {
-            let up = f32::from(note.key - low) / span;
+            let up = (i32::from(note.key) - i32::from(low)) as f32 / span;
             let y = area.bottom() - 4.0 - up * (area.height() - 8.0);
             let end = x(note.position.saturating_add(note.length.max(1)));
             let line = Rect::from_min_max(

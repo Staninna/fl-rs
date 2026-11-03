@@ -452,6 +452,9 @@ enum Gesture {
 impl Gesture {
     /// The edit that takes the notes to where the pointer is, snapped to
     /// `step` ticks, for the gestures that say one thing over and over.
+    ///
+    /// The sums saturate: a pointer far off a view zoomed out to a note at
+    /// the end of time is at a tick past what an i64 holds.
     fn edit(&self, tick: f32, key: i32, step: u64) -> Option<Edit> {
         match self {
             Gesture::Move {
@@ -461,8 +464,8 @@ impl Gesture {
                 key: from_key,
             } => Some(Edit::MoveNotes {
                 ids: ids.clone(),
-                delta_ticks: snap(*start as f32 + tick - from, step) - start,
-                delta_keys: key - from_key,
+                delta_ticks: snap(*start as f32 + tick - from, step).saturating_sub(*start),
+                delta_keys: key.saturating_sub(*from_key),
             }),
             Gesture::Resize {
                 ids,
@@ -471,12 +474,12 @@ impl Gesture {
                 length,
                 tick: from,
             } => {
-                let new = snap(*end as f32 + tick - from, step) - start;
+                let new = snap(*end as f32 + tick - from, step).saturating_sub(*start);
                 // An end dragged to the start or past it leaves one step.
                 let new = if new < 1 { step as i64 } else { new };
                 Some(Edit::ResizeNotes {
                     ids: ids.clone(),
-                    delta_ticks: new - length,
+                    delta_ticks: new.saturating_sub(*length),
                 })
             }
             Gesture::Draw {
@@ -484,7 +487,8 @@ impl Gesture {
                 position,
                 key,
             } => {
-                let length = snap(tick, step) - *position as i64;
+                let from = i64::try_from(*position).unwrap_or(i64::MAX);
+                let length = snap(tick, step).saturating_sub(from);
                 Some(Edit::AddNote {
                     channel: *channel,
                     position: *position,
@@ -587,9 +591,11 @@ impl View {
     }
 }
 
-/// The start of the grid's step that a tick is in.
+/// The start of the grid's step that a tick is in. A tick past what a
+/// u64 holds, which a view scrolled out to a note at the end of time can
+/// be at, gives the last step there is.
 fn floor(tick: f32, step: u64) -> u64 {
-    (tick.max(0.0) / step as f32).floor() as u64 * step
+    ((tick.max(0.0) / step as f32).floor() as u64).saturating_mul(step)
 }
 
 fn is_black(key: i32) -> bool {
@@ -1903,6 +1909,7 @@ mod tests {
         assert_eq!(floor(48.0, 24), 48);
         assert_eq!(floor(-5.0, 24), 0);
         assert_eq!(floor(47.9, 1), 47);
+        assert_eq!(floor(f32::MAX, 24), u64::MAX);
     }
 
     #[test]
