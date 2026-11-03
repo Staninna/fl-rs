@@ -16,11 +16,18 @@
 //! this app's key: FL cuts with its slice tool, and this playlist has no
 //! tools.
 //!
+//! Ctrl+C copies the selected items, and Ctrl+V pastes them at the play
+//! cursor, snapped to the step a drag snaps to, each on the track it was
+//! copied from, and selects them. The items are kept in the playlist, and
+//! the system's clipboard gets a line that says how many, as the piano
+//! roll does. Where FL's paste goes is inferred.
+//!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
 
+use crate::piano_roll::clipboard_key;
 use crate::widgets::next_drag_id;
-use crate::{Command, Edit, Grid, ItemId, UiState};
+use crate::{Command, CopiedItem, Edit, Grid, ItemId, UiState};
 use egui::{
     Align2, Color32, Context, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
     Shape, Stroke, StrokeKind, Ui, pos2, vec2,
@@ -221,6 +228,8 @@ struct Memory {
     /// Points per tick as the timeline was drawn last, for the step the
     /// arrows move by.
     scale: f32,
+    /// The items Ctrl+C took, as they were when it did.
+    clipboard: Vec<PlaylistItem>,
 }
 
 impl Default for Memory {
@@ -231,6 +240,7 @@ impl Default for Memory {
             drag: None,
             area: None,
             scale: 1.0,
+            clipboard: Vec::new(),
         }
     }
 }
@@ -243,7 +253,7 @@ fn memory_id() -> egui::Id {
 /// field has the keyboard. This runs before the windows are drawn, and
 /// what it takes no other window sees.
 pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
-    let memory: Memory = ui
+    let mut memory: Memory = ui
         .data(|data| data.get_temp(memory_id()))
         .unwrap_or_default();
     let Some((area, frame)) = memory.area else {
@@ -269,9 +279,32 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         let ids = blocks.iter().map(|block| block.id).collect();
         out.push(edit(Edit::SelectItems { ids, add: false }));
     }
+    let step = snap_step(Grid::of(&state.project), memory.scale);
+    if !memory.clipboard.is_empty() && clipboard_key(ui, Key::V) {
+        let first = memory.clipboard.iter().map(|item| item.position).min();
+        let first = i64::from(first.unwrap_or(0));
+        let at = (state.position + step / 2) / step * step;
+        let shift = i64::try_from(at).unwrap_or(i64::MAX) - first;
+        let items = shifted(&memory.clipboard, shift);
+        out.push(edit(Edit::PasteItems { items }));
+    }
     // Without a selection the other keys are another window's.
     if selected.is_empty() {
         return;
+    }
+    let records = state
+        .project
+        .current_arrangement()
+        .map_or(&[][..], |a| &a.items);
+    let chosen: Vec<PlaylistItem> = selected.iter().map(|id| records[*id]).collect();
+    if clipboard_key(ui, Key::C) {
+        // On the system's clipboard too, so that Ctrl+V comes back as a
+        // paste, which egui's integration sends only when the clipboard
+        // has something.
+        let text = format!("{} items of the fl-rs playlist", chosen.len());
+        ui.ctx().copy_text(text);
+        memory.clipboard.clone_from(&chosen);
+        ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
     }
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();
@@ -291,7 +324,7 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         }
     }
     // Each press is a step for Undo of its own.
-    let step = snap_step(Grid::of(&state.project), memory.scale) as i64;
+    let step = step as i64;
     for (key, delta_ticks, delta_tracks) in [
         (Key::ArrowLeft, -step, 0),
         (Key::ArrowRight, step, 0),
@@ -307,6 +340,19 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
             }));
         }
     }
+}
+
+/// Copies of the items `shift` ticks later, each held to where a position
+/// goes.
+fn shifted(items: &[PlaylistItem], shift: i64) -> Vec<CopiedItem> {
+    let moved = items.iter().map(|item| {
+        let position = i64::from(item.position).saturating_add(shift);
+        CopiedItem(PlaylistItem {
+            position: position.clamp(0, i64::from(i32::MAX)) as i32,
+            ..*item
+        })
+    });
+    moved.collect()
 }
 
 /// A drag of items that is under way.

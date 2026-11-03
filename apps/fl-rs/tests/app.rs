@@ -648,6 +648,38 @@ fn a_split_is_saved_reloaded_and_undone() {
 }
 
 #[test]
+fn a_paste_of_items_is_saved_reloaded_and_undone_in_one_step() {
+    let dir = Dir::new("paste-items");
+    let (mut app, path) = open_fixture(&dir);
+    let original = std::fs::read(&path).unwrap();
+    // Two copies of the one item, a bar and two bars on, a track down.
+    let item = app.project().current_arrangement().unwrap().items[0];
+    let copy = |bars: i32| {
+        ui::CopiedItem(PlaylistItem {
+            position: bars * 384,
+            track_word: item.track_word - 1,
+            ..item
+        })
+    };
+    let items = vec![copy(1), copy(2)];
+    edit(&mut app, Edit::PasteItems { items }, None);
+    let want = [(0, 1), (384, 2), (768, 2)];
+    assert_eq!(places(app.project()), want);
+    app.apply(Command::Save);
+    assert_eq!(app.error(), None);
+    let saved = fl_rs::read(&path).unwrap();
+    assert_eq!(places(&saved), want);
+    let items = &saved.current_arrangement().unwrap().items;
+    let selected: Vec<bool> = items.iter().map(PlaylistItem::selected).collect();
+    assert_eq!(selected, [false, true, true]);
+
+    app.apply(Command::Undo);
+    assert_eq!(places(app.project()), [(0, 1)]);
+    app.apply(Command::Save);
+    assert!(std::fs::read(&path).unwrap() == original);
+}
+
+#[test]
 fn a_channel_s_name_is_saved_reloaded_and_undone() {
     let dir = Dir::new("rename");
     let (mut app, path) = open_fixture(&dir);

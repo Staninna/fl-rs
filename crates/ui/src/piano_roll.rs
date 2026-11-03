@@ -779,7 +779,7 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
 /// Whether Ctrl+C, Ctrl+X or Ctrl+V, by `key`, was pressed: as the copy,
 /// cut or paste that egui's integration makes of it, or as the key itself.
 /// Either is taken.
-fn clipboard_key(ui: &Ui, key: Key) -> bool {
+pub(crate) fn clipboard_key(ui: &Ui, key: Key) -> bool {
     ui.input_mut(|input| {
         let before = input.events.len();
         input.events.retain(|event| {

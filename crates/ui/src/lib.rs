@@ -29,7 +29,7 @@ mod windows;
 pub use model::NoteField;
 pub use windows::Window;
 
-use model::{Note, Project};
+use model::{Note, PlaylistItem, Project};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -461,7 +461,29 @@ pub enum Edit {
         pattern: u16,
         name: String,
     },
+    /// Add copies of these items to the playlist of the arrangement FL
+    /// shows, at the end of its list in this order, with every field kept:
+    /// what a paste and a duplicate do. They become the selection, in
+    /// place of the items that were selected. See
+    /// [`model::Arrangement::paste_items`] for the items left out.
+    PasteItems {
+        items: Vec<CopiedItem>,
+    },
 }
+
+/// A playlist item as it was copied: its whole record. Two are the same
+/// when their bytes are, so that an [`Edit`] that carries one compares as
+/// a whole, a gain that is NaN included.
+#[derive(Debug, Clone, Copy)]
+pub struct CopiedItem(pub PlaylistItem);
+
+impl PartialEq for CopiedItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bytes() == other.0.to_bytes()
+    }
+}
+
+impl Eq for CopiedItem {}
 
 impl Edit {
     /// Whether, in a drag, this edit takes the place of the edit of its

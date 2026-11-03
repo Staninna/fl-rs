@@ -11,7 +11,7 @@
 //! goes on the undo stack.
 
 use engine::{Approximate, PreparedSamples, RenderOptions, Transport};
-use model::{Arrangement, Channel, ChannelKind, Note, Pattern, Project};
+use model::{Arrangement, Channel, ChannelKind, Note, Pattern, PlaylistItem, Project};
 use std::mem::{Discriminant, discriminant};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -296,7 +296,8 @@ fn apply_edit(project: &mut Project, pattern: u16, edit: &Edit, data_root: Optio
         | Edit::SetMuted { .. }
         | Edit::DeleteItems { .. }
         | Edit::DuplicateItems { .. }
-        | Edit::SelectItems { .. } => {
+        | Edit::SelectItems { .. }
+        | Edit::PasteItems { .. } => {
             if let Some(playlist) = project.current_arrangement_mut() {
                 edit_playlist(playlist, version, edit);
             }
@@ -320,6 +321,10 @@ fn edit_playlist(playlist: &mut Arrangement, version: u32, edit: &Edit) {
         Edit::DeleteItems { ids } => playlist.delete_items(ids),
         Edit::DuplicateItems { ids } => playlist.duplicate_items(ids),
         Edit::SelectItems { ids, add } => playlist.select_items(ids, *add),
+        Edit::PasteItems { items } => {
+            let items: Vec<PlaylistItem> = items.iter().map(|copied| copied.0).collect();
+            playlist.paste_items(&items);
+        }
         _ => {}
     }
 }
