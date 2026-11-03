@@ -208,6 +208,45 @@ fn a_drag_on_the_fader_is_one_drag_of_many_values() {
 }
 
 #[test]
+fn a_double_click_puts_each_knob_back_at_fl_s_default() {
+    let mut harness = harness();
+    select_bass(&mut harness);
+    let double_click = |harness: &mut Harness<'_, Vec<Command>>, label: &str| {
+        let at = harness.get_by_label(label).rect().center();
+        for _ in 0..2 {
+            harness.hover_at(at);
+            harness.drag_at(at);
+            harness.drop_at(at);
+        }
+        harness.run();
+        // Long enough that the next click starts a click of its own.
+        harness.run_steps(10);
+    };
+    // The drums' pan is half left, the bass sends to the reverb at half
+    // the fader and its plugin is at half its mix. A knob at its default
+    // already sends nothing.
+    for knob in ["Drums pan", "Send to Reverb", "Slot 1 mix", "Bass pan"] {
+        double_click(&mut harness, knob);
+    }
+    assert_eq!(
+        harness.state(),
+        &[
+            edit(Edit::SetInsertPan { insert: 1, pan: 0 }),
+            edit(Edit::SetSendLevel {
+                from: 2,
+                to: 4,
+                level: 12_800,
+            }),
+            edit(Edit::SetSlotMix {
+                insert: 2,
+                slot: 0,
+                mix: 12_800,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn the_led_switches_its_insert_and_the_knob_pans_it() {
     let mut harness = harness();
     let led = harness.get_by_label("Drums on");
