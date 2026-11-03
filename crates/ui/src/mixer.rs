@@ -4,7 +4,8 @@
 //! A strip has the insert's name, its pan knob, its peak meter beside its
 //! fader, and the LED that switches it on and off, and with Ctrl held or
 //! with the right button solos it. A click on a strip
-//! selects its insert, a click on its name renames it as well, and the
+//! selects its insert, and a click on its name renames it as well. F2
+//! renames the selected insert while the pointer is over the mixer. The
 //! left and right arrows move the selection. M switches the selected
 //! insert on or off and S solos it, and Ctrl+L links the channel the
 //! channel rack has selected to it: the channel plays into it from then on.
@@ -253,6 +254,16 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         // Ctrl+L links the channel the rack has selected to the selected
         // insert, FL's "Link selected channels" key (inferred from FL's
         // manual). A channel the insert has already sends nothing.
+        let over = crate::windows::under_pointer(ui.ctx());
+        if over == Some(crate::windows::Window::Mixer) && pressed(Key::F2) {
+            let own = project.insert_mix(insert).insert();
+            let own = own.and_then(|insert| insert.name.clone());
+            memory.rename = Some(Rename {
+                insert,
+                text: own.unwrap_or_default(),
+                focused: false,
+            });
+        }
         let link = ui.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
         if link
             && let Some(channel) = crate::channel_rack::selected_channel(ui.ctx(), project)

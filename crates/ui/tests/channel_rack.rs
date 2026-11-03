@@ -407,8 +407,11 @@ fn a_double_click_on_a_name_or_f2_renames_the_channel() {
     assert_eq!(harness.state(), &[named(1, "Snare 2")]);
     assert!(harness.query_by_role(Role::TextInput).is_none());
 
-    // F2 renames the selected channel, which the double click made the
-    // snare. Escape leaves the name, and so does an empty one.
+    // F2 with the pointer over the rack renames the selected channel,
+    // which the double click made the snare. Escape leaves the name, and
+    // so does an empty one.
+    harness.hover_at(snare);
+    harness.run();
     harness.key_press(egui::Key::F2);
     harness.run();
     harness.get_by_role(Role::TextInput).type_text("s");
@@ -438,6 +441,27 @@ fn a_double_click_on_a_name_or_f2_renames_the_channel() {
     click(&mut harness, elsewhere);
     assert_eq!(harness.state().last(), Some(&named(2, "Bass line")));
     assert!(harness.query_by_role(Role::TextInput).is_none());
+}
+
+#[test]
+fn f2_away_from_the_rack_renames_the_pattern() {
+    let mut harness = harness();
+    // No pointer is over the rack, so F2 is the pattern selector's.
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Beat"));
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    // Over the rack it is the selected channel's.
+    let kick = harness.get_by_label("Kick").rect().center();
+    harness.hover_at(kick);
+    harness.run();
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Kick"));
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
 }
 
 #[test]

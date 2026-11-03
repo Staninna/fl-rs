@@ -524,6 +524,38 @@ fn a_click_on_a_name_renames_the_insert() {
 }
 
 #[test]
+fn f2_over_the_mixer_renames_the_selected_insert() {
+    let mut harness = harness();
+    let bass = harness.get_by_label("Bass strip").rect().center();
+    harness.get_by_label("Bass strip").click();
+    harness.hover_at(bass);
+    harness.run();
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    assert_eq!(field.value().as_deref(), Some("Bass"));
+    field.type_text("es");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let name = "Basses".to_owned();
+    assert_eq!(
+        harness.state(),
+        &[edit(Edit::SetInsertName { insert: 2, name })]
+    );
+
+    // With the pointer elsewhere F2 is the pattern selector's, and the
+    // field takes the selector's place.
+    let combo = harness.get_by_role(Role::ComboBox).rect().center();
+    harness.hover_at(combo);
+    harness.run();
+    harness.key_press(egui::Key::F2);
+    harness.run();
+    assert!(harness.query_by_role(Role::ComboBox).is_none());
+    assert!(harness.query_by_label("Bass").is_some());
+}
+
+#[test]
 fn the_slots_are_those_of_the_selected_insert() {
     let mut harness = harness();
     // The master's slots are empty, and an empty slot has no switch.

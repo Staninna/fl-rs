@@ -11,7 +11,8 @@
 //! The graph button opens a lane under the rows with the velocity of each
 //! step of the selected channel, and a drag in it draws velocities. A
 //! click on a name selects its channel, and the up and down arrows move
-//! the selection. A double click on a name, or F2, renames the channel:
+//! the selection. A double click on a name, or F2 with the pointer over
+//! the rack, renames the channel:
 //! Enter and a click elsewhere take the name, and Escape leaves the old
 //! one. A right click on a channel's switch solos it, as in FL, and one
 //! on the switch of the channel that is soloed switches every channel back
@@ -312,7 +313,8 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         if pressed(Key::ArrowDown) && selected + 1 < project.channels.len() {
             (selected, moved) = (selected + 1, true);
         }
-        rename = pressed(Key::F2);
+        let over = crate::windows::under_pointer(ui.ctx());
+        rename = over == Some(crate::windows::Window::ChannelRack) && pressed(Key::F2);
     }
     memory.selected = Some(project.channels[selected].index);
     if rename {

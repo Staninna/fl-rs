@@ -75,6 +75,21 @@ pub(crate) fn shown(ctx: &egui::Context, window: Window) -> bool {
         .is_some_and(|layout| in_view(&layout, window))
 }
 
+/// The id the rect each window was drawn in last is kept under.
+fn rects_id() -> Id {
+    Id::new("fl-rs window rects")
+}
+
+/// The window the pointer is over, of those drawn in the last frame. The
+/// top bar is drawn before the windows, so it goes by the last frame, and
+/// so does every window, so that all of them agree on the answer.
+pub(crate) fn under_pointer(ctx: &egui::Context) -> Option<Window> {
+    let pointer = ctx.pointer_hover_pos()?;
+    let rects: Vec<(Window, egui::Rect)> = ctx.data(|data| data.get_temp(rects_id()))?;
+    let mut under = rects.into_iter().filter(|(_, rect)| rect.contains(pointer));
+    under.next().map(|(window, _)| window)
+}
+
 /// Whether the project has anything to show: a fresh app's has nothing.
 fn has_content(project: &model::Project) -> bool {
     !project.channels.is_empty()
@@ -124,6 +139,7 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         browser::keys(ui, out);
     }
 
+    let mut rects = Vec::new();
     if layout.panels().is_empty() {
         welcome(ui, &mut layout, out);
     } else {
@@ -138,12 +154,15 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             &style,
             |window| window.name().to_owned(),
             |_| Permissions::default(),
-            |ui, window| match window {
-                Window::Playlist => playlist::show(ui, state, out),
-                Window::ChannelRack => channel_rack::show(ui, state, out),
-                Window::Mixer => mixer::show(ui, state, out),
-                Window::PianoRoll => piano_roll::show(ui, state, out),
-                Window::Browser => browser::show(ui, state, out),
+            |ui, window| {
+                rects.push((*window, ui.max_rect()));
+                match window {
+                    Window::Playlist => playlist::show(ui, state, out),
+                    Window::ChannelRack => channel_rack::show(ui, state, out),
+                    Window::Mixer => mixer::show(ui, state, out),
+                    Window::PianoRoll => piano_roll::show(ui, state, out),
+                    Window::Browser => browser::show(ui, state, out),
+                }
             },
         );
         for action in drawn.actions {
@@ -151,7 +170,10 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
             let _ = layout.apply(action);
         }
     }
-    ui.data_mut(|data| data.insert_temp(id, layout));
+    ui.data_mut(|data| {
+        data.insert_temp(id, layout);
+        data.insert_temp(rects_id(), rects);
+    });
 }
 
 /// The screen with no window open: the keys that open each one, which

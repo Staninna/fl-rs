@@ -6,9 +6,10 @@
 //! empty pattern, which F4 makes too (FL's key for the next empty pattern,
 //! inferred), and a clone of the selected pattern. Either goes at the
 //! lowest index the project has free, and is selected. The last entry, and
-//! F2 (inferred too), give the selected pattern a new name: a field takes
-//! the selector's place, Enter and a click elsewhere take the name, and
-//! Escape leaves it.
+//! F2 (inferred too) with the pointer anywhere but over the channel rack
+//! or the mixer, which rename their own, give the selected pattern a new
+//! name: a field takes the selector's place, Enter and a click elsewhere
+//! take the name, and Escape leaves it.
 //!
 //! A drag up or down on the tempo changes it, a BPM a point and a tenth of
 //! that with Ctrl held, and a double click on it opens a field to type it
@@ -249,10 +250,14 @@ fn pattern_selector(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
     let keys = !ui.ctx().egui_wants_keyboard_input();
     let pressed = |ui: &mut Ui, key| keys && ui.input_mut(|i| i.consume_key(Modifiers::NONE, key));
     let mut add = pressed(ui, Key::F4);
-    // F2 is the channel rack's, for its selected channel, while the rack
-    // is shown.
-    let rack = crate::windows::shown(ui.ctx(), crate::windows::Window::ChannelRack);
-    let mut rename = !rack && pressed(ui, Key::F2);
+    // F2 renames what the pointer is over: the channel rack's channel and
+    // the mixer's insert are theirs, and anywhere else it is the pattern.
+    use crate::windows::{Window, under_pointer};
+    let theirs = matches!(
+        under_pointer(ui.ctx()),
+        Some(Window::ChannelRack | Window::Mixer)
+    );
+    let mut rename = !theirs && pressed(ui, Key::F2);
     let mut clone = false;
     let has = state.project.pattern(state.pattern).is_some();
     egui::ComboBox::from_id_salt("pattern")
