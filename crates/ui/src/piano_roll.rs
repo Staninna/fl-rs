@@ -695,7 +695,7 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         let first = memory.clipboard.iter().map(|note| note.position);
         let first = i64::from(first.min().unwrap_or(0));
         let shift = if state.playing && !state.song_mode {
-            snap(state.position as f32, step) - first
+            snap(state.position as f32, step).saturating_sub(first)
         } else {
             after(&memory.clipboard, step, sixteenth)
         };
@@ -817,10 +817,12 @@ fn after(notes: &[Note], step: u64, sixteenth: i64) -> i64 {
     (span.max(1) + step - 1) / step * step
 }
 
-/// Copies of the notes `shift` ticks later, for this channel.
+/// Copies of the notes `shift` ticks later, for this channel, each at
+/// the end of time at most.
 fn shifted(notes: &[Note], shift: i64, channel: u16) -> Vec<Note> {
     let moved = notes.iter().map(|note| {
-        let position = (i64::from(note.position) + shift).clamp(0, i64::from(i32::MAX));
+        let position = i64::from(note.position).saturating_add(shift);
+        let position = position.clamp(0, i64::from(i32::MAX));
         Note {
             position: position as i32,
             channel,
@@ -1901,6 +1903,15 @@ mod tests {
         assert_eq!(key_name(58), "A#4");
         assert_ne!(group_colour(0), group_colour(1));
         assert_eq!(group_colour(16), group_colour(0));
+    }
+
+    #[test]
+    fn a_paste_at_a_far_shift_lands_at_the_end_of_time() {
+        let notes = [note(10, 24, 60), note(i32::MAX, 24, 62)];
+        let pasted = shifted(&notes, i64::MAX, 3);
+        let places: Vec<(i32, u16)> = pasted.iter().map(|n| (n.position, n.channel)).collect();
+        assert_eq!(places, [(i32::MAX, 3), (i32::MAX, 3)]);
+        assert_eq!(shifted(&notes, i64::MIN, 3)[1].position, 0);
     }
 
     #[test]
