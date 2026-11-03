@@ -240,15 +240,33 @@ impl Pattern {
     /// replace the channel's steps, and do not add to them, is not taken
     /// from FL's code). An `every` of 0 changes nothing.
     ///
-    /// A pattern whose 224 the model could not read is left as it is.
+    /// A pattern whose 224 the model could not read is left as it is, and
+    /// so is one where `count` is past [`MAX_STEPS`] or its last step past
+    /// a note's reach: such a count comes from a pattern length in a file,
+    /// not from FL's rack, and would ask for billions of notes.
     pub fn fill_steps(&mut self, channel: u16, every: u32, count: u32, ppq: u16) {
-        if every == 0 || !self.writes_notes() {
+        let fits = i64::from(count) * step_ticks(ppq) <= i64::from(i32::MAX);
+        if every == 0 || !self.writes_notes() || count as usize > MAX_STEPS || !fits {
             return;
         }
         self.clear_steps(channel);
-        for step in (0..count).step_by(every as usize) {
-            self.set_step(channel, step, true, ppq);
+        let lit = (0..count).step_by(every as usize).map(|step| layout::Note {
+            position: (i64::from(step) * step_ticks(ppq)) as i32,
+            channel,
+            key: STEP_KEY,
+            ..layout::Note::default()
+        });
+        // Each new note goes in front of the notes that start where it
+        // does, as `set_step` puts it.
+        let old = std::mem::take(&mut self.notes);
+        let mut old = old.into_iter().peekable();
+        for note in lit {
+            while let Some(before) = old.next_if(|old| old.position < note.position) {
+                self.notes.push(before);
+            }
+            self.notes.push(note);
         }
+        self.notes.extend(old);
     }
 
     /// Clear every step of the channel: remove all its notes, the muted
@@ -1037,6 +1055,21 @@ mod tests {
         let mut project = from_flp(&file);
         project.pattern_to_edit(1).fill_steps(0, 2, 16, PPQ);
         assert_eq!(to_flp(&project), Ok(file));
+    }
+
+    #[test]
+    fn a_fill_past_the_steps_a_pattern_can_have_is_turned_down() {
+        let mut project = project();
+        let pattern = project.pattern_to_edit(1);
+        let before = pattern.clone();
+        // A pattern length from a file, at PPQ 1, would be 2^32 notes.
+        pattern.fill_steps(0, 1, u32::MAX, 1);
+        pattern.fill_steps(0, 1, MAX_STEPS as u32 + 1, PPQ);
+        assert_eq!(*pattern, before);
+        // The most there can be is built at once, in order.
+        pattern.fill_steps(0, 1, MAX_STEPS as u32, PPQ);
+        assert_eq!(lit(pattern, 0).len(), MAX_STEPS);
+        assert!(pattern.notes.is_sorted_by_key(|note| note.position));
     }
 
     #[test]
