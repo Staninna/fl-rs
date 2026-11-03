@@ -292,7 +292,10 @@ impl Pattern {
         };
         for id in ids {
             let note = &mut self.notes[id];
-            note.key = low + high - note.key;
+            // In i32: a key from a file can be any i16, and two near the
+            // top overflow the sum though their mirrors fit.
+            let key = i32::from(low) + i32::from(high) - i32::from(note.key);
+            note.key = key as i16;
         }
     }
 
@@ -316,7 +319,9 @@ impl Pattern {
             let starts = &starts[&note.channel];
             let next = starts.get(starts.partition_point(|at| *at <= note.position));
             if let Some(next) = next.filter(|_| note.length > 0) {
-                note.length = next - note.position;
+                // In i64: positions from a file can be the ends of an i32.
+                let length = i64::from(*next) - i64::from(note.position);
+                note.length = length.min(i64::from(i32::MAX)) as i32;
             }
         }
     }
@@ -591,6 +596,16 @@ mod tests {
             placed(&notes),
             [(0, 96, 60), (4, 92, 64), (8, 88, 67), (12, 1, 70)]
         );
+    }
+
+    #[test]
+    fn flip_and_legato_take_keys_and_positions_at_the_ends_of_their_types() {
+        let mut notes = pattern(&[note(0, 10, 30_000), note(5, 10, 30_001)]);
+        notes.flip_notes(&[0, 1]);
+        assert_eq!(placed(&notes), [(0, 10, 30_001), (5, 10, 30_000)]);
+        let mut notes = pattern(&[note(i32::MIN, 10, 60), note(i32::MAX, 10, 62)]);
+        notes.legato_notes(&[0, 1]);
+        assert_eq!(placed(&notes)[0], (i32::MIN, i32::MAX, 60));
     }
 
     #[test]
