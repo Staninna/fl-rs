@@ -292,6 +292,34 @@ fn m_switches_the_selected_insert_and_s_solos_it() {
 }
 
 #[test]
+fn ctrl_l_links_the_rack_s_channel_to_the_selected_insert() {
+    let mut harness = harness();
+    let ctrl = egui::Modifiers::COMMAND;
+    // The rack has selected the first channel, which plays into insert 3.
+    harness.get_by_label("Insert 3 strip").click();
+    harness.run();
+    harness.key_press_modifiers(ctrl, egui::Key::L);
+    harness.run();
+    assert!(harness.state().is_empty(), "{:?}", harness.state());
+    harness.get_by_label("Bass strip").click();
+    harness.run();
+    harness.key_press_modifiers(ctrl, egui::Key::L);
+    harness.run();
+    let link = edit(Edit::SetChannelInsert {
+        channel: 0,
+        insert: 2,
+    });
+    assert_eq!(harness.state(), &[link]);
+
+    // While a name is typed the keys are the field's.
+    harness.get_by_label("Drums").click();
+    harness.run();
+    harness.key_press_modifiers(ctrl, egui::Key::L);
+    harness.run();
+    assert_eq!(harness.state().len(), 1);
+}
+
+#[test]
 fn the_strip_s_menu_sets_polarity_swap_and_separation() {
     let mut harness = harness();
     assert!(harness.query_by_label("Reverse polarity").is_none());

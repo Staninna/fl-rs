@@ -6,7 +6,8 @@
 //! with the right button solos it. A click on a strip
 //! selects its insert, a click on its name renames it as well, and the
 //! left and right arrows move the selection. M switches the selected
-//! insert on or off and S solos it.
+//! insert on or off and S solos it, and Ctrl+L links the channel the
+//! channel rack has selected to it: the channel plays into it from then on.
 //!
 //! A right-click on a strip or on its name opens a menu with what the
 //! strip has no room for: the solo, the insert's polarity, the swap of its
@@ -248,6 +249,17 @@ pub(crate) fn show(ui: &mut Ui, state: &UiState, out: &mut Vec<Command>) {
         }
         if pressed(Key::S) {
             out.push(edit(Edit::SoloInsert { insert }, None));
+        }
+        // Ctrl+L links the channel the rack has selected to the selected
+        // insert, FL's "Link selected channels" key (inferred from FL's
+        // manual). A channel the insert has already sends nothing.
+        let link = ui.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::L));
+        if link
+            && let Some(channel) = crate::channel_rack::selected_channel(ui.ctx(), project)
+            && channel.insert().unwrap_or(0) != i32::from(insert)
+        {
+            let channel = channel.index;
+            out.push(edit(Edit::SetChannelInsert { channel, insert }, None));
         }
     }
 
