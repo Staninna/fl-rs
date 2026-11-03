@@ -278,3 +278,28 @@ fn a_copy_is_the_playlist_s_only_with_the_pointer_over_it() {
     harness.run();
     assert!(harness.state().is_empty(), "{:?}", harness.state());
 }
+
+#[test]
+fn ctrl_b_duplicates_the_selection_right_after_itself() {
+    // The selection covers bar 2 to the end of bar 7, six bars, which are
+    // whole beats already.
+    let mut harness = harness(fixture());
+    harness.key_press_modifiers(CTRL, egui::Key::B);
+    harness.run();
+    assert_eq!(harness.state(), &[edit(copies(&[2, 4], 6 * 384))]);
+
+    // A span off the beat is rounded up to the next one.
+    let mut project = fixture();
+    project.arrangements[0].items[4].length = 6 * 384 - 10;
+    project.arrangements[0].items[2].flags = 0;
+    let mut harness = self::harness(project.clone());
+    harness.key_press_modifiers(CTRL, egui::Key::B);
+    harness.run();
+    let vocal = project.arrangements[0].items[4];
+    let copy = PlaylistItem {
+        position: vocal.position + 6 * 384,
+        ..vocal
+    };
+    let items = vec![CopiedItem(copy)];
+    assert_eq!(harness.state(), &[edit(Edit::PasteItems { items })]);
+}

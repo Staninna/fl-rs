@@ -20,7 +20,10 @@
 //! cursor, snapped to the step a drag snaps to, each on the track it was
 //! copied from, and selects them. The items are kept in the playlist, and
 //! the system's clipboard gets a line that says how many, as the piano
-//! roll does. Where FL's paste goes is inferred.
+//! roll does. Ctrl+B duplicates the selection, as FL's does: the copies go
+//! right after it, moved by the span it covers rounded up to that step,
+//! and become the selection. Where FL's paste goes and that its Ctrl+B
+//! rounds to the snap are inferred.
 //!
 //! Nothing here changes the project. An edit goes out as a
 //! [`Command::Edit`], and the next frame draws what the app made of it.
@@ -305,6 +308,15 @@ pub(crate) fn keys(ui: &Ui, state: &UiState, out: &mut Vec<Command>) {
         ui.ctx().copy_text(text);
         memory.clipboard.clone_from(&chosen);
         ui.data_mut(|data| data.insert_temp(memory_id(), memory.clone()));
+    }
+    if pressed(ctrl, Key::B) {
+        let chosen_blocks = blocks.iter().filter(|block| block.selected);
+        let start = chosen_blocks.clone().map(|block| block.start).min();
+        let end = chosen_blocks.map(|block| block.end).max();
+        let span = end.unwrap_or(0) - start.unwrap_or(0);
+        let shift = span.max(1).div_ceil(step) * step;
+        let items = shifted(&chosen, i64::try_from(shift).unwrap_or(i64::MAX));
+        out.push(edit(Edit::PasteItems { items }));
     }
     if pressed(ctrl, Key::D) {
         let ids = Vec::new();
