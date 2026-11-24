@@ -34,6 +34,7 @@ pub mod delay_3;
 pub mod delay_bank;
 pub mod directwave;
 mod directwave_fx;
+pub mod distructor;
 pub mod drumaxx;
 pub mod drumpad;
 mod drumpad_voice;
@@ -424,6 +425,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_2::Delay2::default()))
     } else if is(delay_3::NAME) {
         Some(Box::new(delay_3::Delay3::default()))
+    } else if is(distructor::NAME) {
+        Some(Box::new(distructor::Distructor::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
     } else if is(edison::NAME) {
@@ -885,6 +888,7 @@ mod tests {
             "fruity wrapper",
             // Counted in their own tests.
             "control surface",
+            "distructor",
             "fruity formula controller",
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
