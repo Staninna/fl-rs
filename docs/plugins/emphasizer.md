@@ -10,9 +10,9 @@ to the sound, so it shares no code with Fruity Limiter or Maximus.
 
 Recovered from `Emphasizer_x64.dll` (FL Studio 2026, Delphi native plugin,
 image base 0x400000), headless Ghidra (project `emphasizer`, decompiles in
-`/root/gh/out/emphasizer/`). The install this was read from has no
-`Shared/` directory: `ildsp_x64.dll` is missing, so the limiter itself is
-not mapped and not built. Corpus: 1 project state (`Templates/Minimal/Basic
+`/root/gh/out/emphasizer/`); the limiter from FL 26.1.7's
+`Shared/ildsp_x64.dll` (MSVC, image base 0x180000000), section 4.
+Corpus: 1 project state (`Templates/Minimal/Basic
 with limiter`, 29 bytes, version 2) and 5 presets of 25 bytes (version 1:
 the plugin's "Default" and the four plugin databases' "Emphasizer", all
 the same bytes).
@@ -122,19 +122,84 @@ peaks of Dest -> +0x194, +0x198; meters from slots +0x48, +0x50, +0x70
 Everything that touches the sound is inside `LimiterLite`. The shell adds
 nothing: no gain, no dry path, no ramp.
 
-## 4. What stays unknown
+## 4. The limiter: `LimiterLite` in `ildsp_x64.dll`
 
-- All of `LimiterLite`: its stages, times, the emphasis and clipping
-  curves, level matching, its latency, its defaults and what the switch
-  byte turns on. It needs `Shared/ildsp_x64.dll`, which an FL install has
-  and this one lacks. `docs/plugins/emphasis.md` maps that DLL's `Limiter`
-  class, whose stages (`GRAdaptiveRel`, `GRStatic8`) LimiterLite may well
-  share; that is to be read, not assumed.
+`LimiterLite_CreateInstance` @ `0x1801aa540` makes a 0x10-byte wrapper
+(vtable `0x1803dfd80`) around a 0x240500-byte `LimiterLite` (vtable
+`0x1803dfd30`, constructor `0x1801aa5e0`, zeroed first). `asm`
+`emulator`. The wrapper's slots:
 
-## Implementation notes (crates/plugins/src/emphasizer.rs)
+| slot | does | address |
+|---|---|---|
+| +0x08 | `prepare(rate, block)` | `0x1801aaba0` -> `0x180173610` |
+| +0x10 | `setParam(index, value)` | `0x1801aabb0` |
+| +0x18 | `getParam(index)`: the stored dB, emphasis, switches; -1 past 6 | `0x1801aade0` |
+| +0x20 | `process(in, out, frames)` | `0x1801aae60` -> `0x180173940` |
+| +0x28 | flush: `reset` (`0x180173880`): the delays, the holds and the level's one-pole empty | `0x1801aae70` |
+| +0x30 | LUFS reset | `0x1801aae80` |
+| +0x58 / +0x60 | set / get the LUFS meter's switch (`+0x14008c`) | `0x1801aaf20` / `0x1801aaf30` |
+| +0x68 | latency `roundf(rate * 0.002)`: 88 frames at 44.1 kHz | `0x1801aaf40` |
+
+`setParam`:
+
+```
+0 input gain   +0x40 = dB; +0x44 = expf(dB * 0.11512925)            // ln 10 / 20, 0x1803e0454
+1 emphasis     q = e^2; +0x58 = q; +0x6c = 1 - q / 2                  // the level's share
+               release Tr = float(double((1 - q) * 3) + 0.1) s, attack Ta = 4 q + 0.002 s
+               the one-pole: up  exp(-2 pi / (rate Ta)), down exp(-2 pi / (rate Tr))  (double exp)
+               holds 3.125 ms each (rate * 0.003125)
+               releases r0 = expf(float(-2 pi / (rate Tr))), r1 the same over Tr / 4
+2 clipping     +0x140080 (0 hard)
+3 level match  +0x14007c
+4 bypass       +0x140084
+5 output gain  +0x4c = dB; +0x50 = expf(dB * 0.11512925)
+6 the switch   +0x14008c
+```
+
+`prepare` (`0x180173610`) zeroes the input gain, the emphasis, the
+switches and every state, sets the glides' pole `exp(-40 pi / rate)` (20
+Hz, `+0x70`), both pairs of delays to `trunc(rate * 0.002)` frames (rings
+of 2^16, `0x180163db0`), the soft clip's knee 0.8414, span 0.1586 and slope
+6.305 (`+0x240350`), and the gain stage `GRStatic1Lite` (`+0x2401f0`,
+`0x1801643d0`): eight peak holds (`PeakHold8Lite`, `+0x240230`,
+`0x180165d20`) and a one-pole (`ExpSmoother1Lite`, `+0x2402e0`) whose
+times are the last the emphasis set (0.01 s up, 0.1 s down before any).
+
+`process` (`0x180173940`, with MXCSR's flush-to-zero and
+denormals-are-zero on), per frame unless said:
+
+1. Dry: each side through a 2 ms delay.
+2. The input gain glides at 20 Hz; both sides times it.
+3. Level: `share * max(|L|, |R|)`.
+4. Gain: the eight holds, each keeping the largest it saw for up to its
+   length; the one-pole, up when the held level is over its state; `g =
+   0.98855 / max(level, 0.98855)` (-0.1 dB). `deepest` is `g` whenever
+   `g` did not rise; the one-pole's down coefficient becomes `r1` when
+   `deepest / max(held / (2 share deepest), 1) > g^2`, else `r0`.
+5. Wet: each gained side through its own 2 ms delay, times `g`.
+6. Clip: hard to [-1, 1] (`0x1801658e0`), or soft past the knee,
+   `knee + span y / sqrt(y^2 + 1)` with `y = (x - knee) slope`
+   (`0x180165330`).
+7. The output gain glides at 20 Hz and multiplies both sides.
+8. LUFS meters (K-weighting at `+0x240368`, `+0x2403d8`) when the switch
+   is on: display only.
+9. Level matching: both sides times `1 / input gain` as the glide stands at
+   the end of the block.
+10. Bypass: a 20 Hz glide to 0 when on, 1 when off (starting at 0), `out =
+    ((out - dry) b + dry) * 0.9999`; RMS meters, display only.
+
+## Implementation notes (crates/plugins/src/emphasizer.rs, limiter_lite.rs)
 
 - Every corpus state parses: the project's and the five presets.
-- The parameters and the values the shell gives the limiter are built and
-  tested; the sound passes through untouched, and `fidelity()` says
-  `Approximate` for every state. The port level is Gaps: the limiter is
-  the named part left out.
+- The limiter matches `tools/plugstate/limiter_lite_emu.py` bit for bit
+  over three seconds in four settings (the default preset; soft clipping
+  with level matching; 24 dB into hard clipping; bypassed), the runtime's
+  `expf` taken from its FMA3 path as `low_lifter.rs` transcribes it.
+- Left out: the meters (display only), and the flush of denormals that
+  the DLL's MXCSR does, which only ever makes a value under 2^-126 zero.
+  Level matching reads the input gain at the end of each block of at most
+  0x800 frames, the block the shell declares; FL's own blocks are its
+  host's.
+- A rate change sets the limiter up again and sends every value
+  (`inferred`: the shell's rate handler sends them through `ProcessParam`
+  as the loader does).

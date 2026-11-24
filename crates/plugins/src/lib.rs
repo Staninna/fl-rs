@@ -80,6 +80,7 @@ pub mod kepler;
 pub mod kepler_exo;
 pub mod keyboard_controller;
 pub mod limiter;
+mod limiter_lite;
 mod linear_phase;
 pub mod love_philter;
 pub mod low_lifter;
