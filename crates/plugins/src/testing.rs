@@ -237,3 +237,70 @@ pub(crate) fn follows_note_pitch(make: impl Fn() -> Box<dyn crate::Generator>, r
     assert_eq!(outs[0][..4096], outs[2][..4096]);
     assert_ne!(outs[0][4096..], outs[2][4096..], "an octave up");
 }
+
+/// Check that a generator plays the same to the bit with workers to render
+/// its voices on as without: two of it from `make`, one with three
+/// threads, play chords that overlap and end, in blocks of odd lengths,
+/// with each of `states` (none for its defaults).
+pub(crate) fn same_on_workers(
+    make: impl Fn() -> Box<dyn crate::Generator>,
+    states: &[Vec<u8>],
+    rate: f32,
+) {
+    let defaults = [None];
+    let states: Vec<Option<&[u8]>> = if states.is_empty() {
+        defaults.to_vec()
+    } else {
+        states.iter().map(|s| Some(&s[..])).collect()
+    };
+    for (n, state) in states.into_iter().enumerate() {
+        let mut outs = Vec::new();
+        for workers in [
+            None,
+            Some(&crate::workers::tests::THREE as &dyn crate::Workers),
+        ] {
+            let mut plugin = make();
+            plugin.set_sample_rate(rate);
+            // A state the plugin turns down is no test of its voices.
+            if let Some(state) = state
+                && plugin.set_state(state).is_err()
+            {
+                continue;
+            }
+            plugin.set_workers(workers);
+            let mut out = Vec::new();
+            let lengths = [512, 37, 256, 1, 700, 300];
+            let mut next = 1;
+            for block in 0..24 {
+                // A chord every fourth block, the oldest let go of after
+                // eight, and everything let go of at the end.
+                if block % 4 == 0 && block < 16 {
+                    for key in [48, 55, 60, 64] {
+                        plugin.note_on(crate::NoteOn {
+                            voice: next,
+                            key: key + block as i16,
+                            ..crate::NoteOn::default()
+                        });
+                        next += 1;
+                    }
+                }
+                if block >= 8 && block % 2 == 0 {
+                    plugin.note_off(next.saturating_sub(10));
+                }
+                if block == 18 {
+                    plugin.all_notes_off();
+                }
+                let len = lengths[block % lengths.len()];
+                let (mut left, mut right) = (vec![0.0; len], vec![0.0; len]);
+                plugin.process(&mut left, &mut right);
+                out.extend(bits(&left));
+                out.extend(bits(&right));
+            }
+            outs.push(out);
+        }
+        assert!(
+            outs.windows(2).all(|w| w[0] == w[1]),
+            "state {n} plays otherwise on workers"
+        );
+    }
+}
