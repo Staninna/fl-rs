@@ -35,7 +35,7 @@ render. The levels are explained under the plugin list below.
 | The 165 projects that come with FL | done | of | |
 |---|---:|---:|---|
 | Projects that make any sound | 123 | 165 | `███████████████░░░░░` 74% |
-| Projects that play with nothing missing | 92 | 165 | `███████████░░░░░░░░░` 55% |
+| Projects that play with nothing missing | 79 | 165 | `██████████░░░░░░░░░░` 47% |
 | Plugins they load that are rebuilt | 973 | 1006 | `███████████████████░` 96% |
 | Instrument channels with notes that play | 210 | 227 | `███████████████████░` 92% |
 | Mixer effects that run, on tracks audio reaches | 1112 | 1117 | `████████████████████` 99% |
@@ -110,7 +110,11 @@ This repo holds none of Image-Line's files. The corpus tests, the corpus render,
 
        WINEPREFIX="$HOME/fl-studio" wine flstudio_win64_26.1.7.5654.exe
 
-   FL then sits in `$HOME/fl-studio/drive_c/Program Files/Image-Line/FL Studio 2026`. The installer is NSIS in a form 7-Zip cannot unpack, so installing it is the only way in.
+   FL then sits in `$HOME/fl-studio/drive_c/Program Files/Image-Line/FL Studio 2026`. Or skip Wine and unpack the installer directly, which needs only Python:
+
+       python3 -I tools/fl-extract.py flstudio_win64_26.1.7.5654.exe "$HOME/fl-studio-26"
+
+   The installer is NSIS with two changes that stop 7-Zip (8 bytes of padding after the first header, and script entries of 9 words where stock NSIS has 7); the script reads past both and writes the install directory as the installer would.
 3. Check that its `Data/` directory is the one this repo is pinned to:
 
        tools/check-corpus.sh "<FL Studio>/Data"
