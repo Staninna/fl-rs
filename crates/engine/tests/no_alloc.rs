@@ -4,11 +4,13 @@
 //! The project is built in code, as `fixtures.rs` builds its own: a
 //! sampler channel playing a click into insert 1, which holds Fruity Fast
 //! Dist, Fruity Delay 2 and Fruity Peak Controller, and TestSine on a
-//! second channel into the master. The song loops, so the clock goes back
-//! and the voices start and end while it is counted.
+//! second channel into the master, with Harmless and Sytrus playing its
+//! chords on two more. The song loops, so the clock goes back and the
+//! voices start and end while it is counted.
 //!
-//! The engine runs inserts on a pool of worker threads, so the count here
-//! is for the whole process while the engine plays, and not one thread's.
+//! The engine runs inserts on a pool of worker threads, and Harmless and
+//! Sytrus render their voices on the same workers, so the count here is
+//! for the whole process while the engine plays, and not one thread's.
 
 use engine::Engine;
 use flp::event::Id;
@@ -138,7 +140,7 @@ fn wrapper(insert: i32, slot: i32, plugin_kind: i32, flags: u32) -> PluginWrappe
 fn song() -> Project {
     let mut project = Project::new(flp::Header {
         format: 0,
-        channel_count: 2,
+        channel_count: 4,
         ppq: BEAT as u16,
     });
     project.writer_version = Some("20.8.4.2576".to_owned());
@@ -154,13 +156,16 @@ fn song() -> Project {
             ..Note::default()
         })
         .collect();
-    notes.extend((0..6).map(|n| Note {
-        position: n * BEAT / 2 + 3,
-        length: BEAT,
-        key: 57 + 5 * n as i16,
-        channel: 1,
-        ..Note::default()
-    }));
+    // The same chords on the sine, Harmless and Sytrus.
+    for channel in 1..4 {
+        notes.extend((0..6).map(|n| Note {
+            position: n * BEAT / 2 + 3,
+            length: BEAT,
+            key: 57 + 5 * n as i16,
+            channel,
+            ..Note::default()
+        }));
+    }
     project.patterns.push(Pattern {
         index: 1,
         notes,
@@ -219,6 +224,30 @@ fn song() -> Project {
         .collect(),
         ..Channel::default()
     });
+    // Harmless and Sytrus as FL makes them, into the master.
+    for (index, name) in [(2, "Harmless"), (3, "Sytrus")] {
+        project.channels.push(Channel {
+            index,
+            kind: Some(ChannelKind::Plugin),
+            levels: Some(levels),
+            routed_to: Some(0),
+            plugin_name: Some(name.to_owned()),
+            wrapper: Some(wrapper(0, 0, -1, 0x50)),
+            order: [
+                Id::ChannelNew,
+                Id::ChannelType,
+                Id::Levels,
+                Id::RoutedTo,
+                Id::PluginInternalName,
+                Id::PluginWrapper,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(n, id)| placed(100 + 10 * usize::from(index) + n, id))
+            .collect(),
+            ..Channel::default()
+        });
+    }
     project.arrangements.push(Arrangement {
         index: 0,
         items: [0, BAR]
