@@ -142,7 +142,7 @@ Corpus render at `a2e02e4`: 123 of 165 shipped projects have sound with the stoc
 | Generator | Plucked! | 3610 |  | 0 | |
 | Generator | ReWired | 3898 |  | 0 | |
 | Generator | Sawer | 4209 | yes | 0 | |
-| Generator | SimSynth | 3760 | yes | 0 | |
+| Generator | SimSynth | 3760 | yes | 0 | implemented in crates/plugins (state with the engine's fixes for old versions, the 58 parameters, the wavetables, both envelopes, the LFO, the two-stage SVF, the twelve detuned voices and the chorus, bit for bit against SimSynth_Eng_x64.dll run under an emulator for every corpus state at key 48 and every third at key 72; gaps: the oscillators' starting phases come from a noise position FL shares between every SimSynth and moves with every voice build, so they are one fresh instance's; a parameter moved while notes sound reaches the next notes only, where FL rebuilds the sounding voices; the runtime's pow and sin are Rust's), docs/plugins/simsynth.md |
 | Generator | Soundfont Player | 4444 |  | 0 | |
 | Generator | Transistor Bass | 3961 |  | 0 | |
 | Generator | Wasp | 3513 |  | 0 | |

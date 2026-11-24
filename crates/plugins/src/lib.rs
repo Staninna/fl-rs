@@ -118,6 +118,7 @@ mod sakura_fx;
 mod sampler;
 pub mod send;
 pub mod seven_band_eq;
+pub mod simsynth;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
