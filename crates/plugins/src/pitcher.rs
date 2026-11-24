@@ -130,6 +130,11 @@ const MARK_LEAD: i32 = 70;
 /// The four voices of one side.
 const VOICES: usize = 4;
 
+/// The detector sums its differences this many samples at a time.
+const BLOCK: usize = 64;
+/// And this many lags side by side.
+const LAGS: usize = 16;
+
 /// Pitcher.
 #[derive(Debug, Clone)]
 pub struct Pitcher {
@@ -189,9 +194,10 @@ struct Side {
     // The detector.
     dc: f32,
     stages: [f64; STAGES],
-    /// The last `frame` band-passed samples, oldest first from `history_at`.
-    history: Vec<f32>,
-    history_at: usize,
+    /// The band-passed samples, oldest first: the `frame` before the
+    /// first one still to be summed, then the `pending` ones still to be.
+    line: Vec<f32>,
+    pending: usize,
     /// The difference summed for each lag over the frame.
     sums: Vec<f32>,
     /// The pitch found, 0 for none, and its period in samples.
@@ -218,6 +224,44 @@ struct Side {
     marks: Vec<f32>,
     out: Vec<f32>,
     countdown: [i32; VOICES],
+}
+
+impl Side {
+    /// Add the pending samples' differences to the sums (`FUN_18001e030`'s
+    /// inner loop, which FL runs a sample at a time). Each sum takes its
+    /// samples' differences one by one in the order they came, as FL's
+    /// does; a run of samples at a time only keeps a sum in a register
+    /// between them. The `j`th sum is of the lag `frame - j`: it pairs each
+    /// sample with the `j`th oldest of the `frame` before it.
+    fn sum_pending(&mut self, frame: usize) {
+        let pending = self.pending;
+        if pending == 0 {
+            return;
+        }
+        let line = &self.line[..frame + pending];
+        let ys = &line[frame..];
+        let sums = &mut self.sums[..frame];
+        let mut chunks = sums.chunks_exact_mut(LAGS);
+        for (c, chunk) in chunks.by_ref().enumerate() {
+            let j = c * LAGS;
+            let mut acc: [f32; LAGS] = (&*chunk).try_into().unwrap();
+            for (q, y) in ys.iter().enumerate() {
+                let past: &[f32; LAGS] = line[q + j..][..LAGS].try_into().unwrap();
+                for (sum, past) in acc.iter_mut().zip(past) {
+                    *sum += (past - y).abs();
+                }
+            }
+            chunk.copy_from_slice(&acc);
+        }
+        let j = frame - frame % LAGS;
+        for (i, sum) in chunks.into_remainder().iter_mut().enumerate() {
+            for (q, y) in ys.iter().enumerate() {
+                *sum += (line[q + j + i] - y).abs();
+            }
+        }
+        self.line.copy_within(pending..pending + frame, 0);
+        self.pending = 0;
+    }
 }
 
 impl Default for Pitcher {
@@ -271,7 +315,7 @@ impl Pitcher {
         self.grain_ring_len = grain_ring.max(1) as usize;
         self.grain = vec![0.0; (2 * most + 2).max(PLAIN_GRAIN)];
         for side in &mut self.sides {
-            side.history = vec![0.0; most];
+            side.line = vec![0.0; most + BLOCK];
             side.sums = vec![0.0; most];
             side.ring = vec![0.0; 2 * most];
             side.input = vec![0.0; self.grain_ring_len];
@@ -301,8 +345,8 @@ impl Pitcher {
         for side in &mut self.sides {
             side.dc = 0.0;
             side.stages = [0.0; STAGES];
-            side.history.fill(0.0);
-            side.history_at = 0;
+            side.line.fill(0.0);
+            side.pending = 0;
             side.sums.fill(0.0);
             side.freq = 0.0;
             side.period = 0.0;
@@ -529,17 +573,11 @@ impl Pitcher {
         }
         state.marks[grain_write] = y;
         let frame = self.frame;
-        let at = state.history_at;
-        let (newer, older) = state.history[..frame].split_at(at);
-        let (sums_old, sums_new) = state.sums[..frame].split_at_mut(frame - at);
-        for (sum, past) in sums_old.iter_mut().zip(older) {
-            *sum += (past - y).abs();
+        state.line[frame + state.pending] = y;
+        state.pending += 1;
+        if state.pending == BLOCK {
+            state.sum_pending(frame);
         }
-        for (sum, past) in sums_new.iter_mut().zip(newer) {
-            *sum += (past - y).abs();
-        }
-        state.history[at] = y;
-        state.history_at = if at + 1 == frame { 0 } else { at + 1 };
         state.correction = if state.freq == 0.0 {
             0.0
         } else {
@@ -551,6 +589,7 @@ impl Pitcher {
     fn find_periods(&mut self) {
         let frame = self.frame;
         for state in &mut self.sides {
+            state.sum_pending(frame);
             let sums = &mut state.sums[..frame];
             let most = sums.iter().fold(0.0f32, |most, v| most.max(*v));
             state.period = 0.0;
