@@ -248,13 +248,16 @@ impl SineBank {
                 self.restart(k);
             }
         }
-        // The groups, a pass of samples at a time.
+        // The groups, a pass of samples at a time, two groups at once
+        // where there are two: the earlier group's sums go first.
         let mut group = [0; GROUP];
+        let mut held = [0; GROUP];
         for chunk in out.chunks_mut(PASS) {
             let len = chunk.len();
             // The first group sets the sums: its `low + 0` is `low`.
             self.sums[..len].fill([0.0; 4]);
             let mut found = 0;
+            let mut holding = false;
             let mut any = false;
             for k in 0..self.len {
                 if !self.sounding[k] {
@@ -263,14 +266,24 @@ impl SineBank {
                 group[found] = k;
                 found += 1;
                 if found == GROUP {
-                    self.render_group(&group, len);
+                    if holding {
+                        self.render_pair(&held, &group, len);
+                    } else {
+                        held = group;
+                    }
+                    holding = !holding;
                     found = 0;
                     any = true;
                 }
             }
-            if found > 0 {
-                self.render_group(&group[..found], len);
-                any = true;
+            match (holding, found) {
+                (true, 0) => self.render_group(&held, len),
+                (true, _) => self.render_pair(&held, &group[..found], len),
+                (false, 0) => {}
+                (false, _) => {
+                    self.render_group(&group[..found], len);
+                    any = true;
+                }
             }
             if any {
                 for (out, sums) in chunk.iter_mut().zip(&self.sums[..len]) {
@@ -290,8 +303,41 @@ impl SineBank {
     /// zero, which leaves a sum as it is.
     fn render_group(&mut self, ks: &[usize], len: usize) {
         let k_smooth = self.smoothing;
-        // The low four lanes and the high four, so that each half runs as
-        // one vector.
+        let [mut low, mut high] = self.lanes(ks);
+        for sums in &mut self.sums[..len] {
+            let p_low = low.step(k_smooth);
+            let p_high = high.step(k_smooth);
+            for j in 0..4 {
+                sums[j] = (p_low[j] + sums[j]) + p_high[j];
+            }
+        }
+        self.keep(ks, [low, high]);
+    }
+
+    /// [`SineBank::render_group`] for the group `a` and then the group
+    /// `b`, run side by side so that their recursions overlap: each sum
+    /// takes `a`'s two halves and then `b`'s, as two passes would.
+    fn render_pair(&mut self, a: &[usize], b: &[usize], len: usize) {
+        let k_smooth = self.smoothing;
+        let [mut a_low, mut a_high] = self.lanes(a);
+        let [mut b_low, mut b_high] = self.lanes(b);
+        for sums in &mut self.sums[..len] {
+            let pa_low = a_low.step(k_smooth);
+            let pa_high = a_high.step(k_smooth);
+            let pb_low = b_low.step(k_smooth);
+            let pb_high = b_high.step(k_smooth);
+            for j in 0..4 {
+                let sum = (pa_low[j] + sums[j]) + pa_high[j];
+                sums[j] = (pb_low[j] + sum) + pb_high[j];
+            }
+        }
+        self.keep(a, [a_low, a_high]);
+        self.keep(b, [b_low, b_high]);
+    }
+
+    /// The partials `ks`, eight at most, as the low four lanes and the high
+    /// four, so that each half runs as one vector.
+    fn lanes(&self, ks: &[usize]) -> [Lanes; 2] {
         let mut lanes = [Lanes::default(); 2];
         for (lane, &k) in ks.iter().enumerate() {
             let (half, j) = (&mut lanes[lane / 4], lane % 4);
@@ -302,14 +348,11 @@ impl SineBank {
             half.away[j] = self.level[k] - self.target[k];
             half.heard[j] = 1.0;
         }
-        let [mut low, mut high] = lanes;
-        for sums in &mut self.sums[..len] {
-            let p_low = low.step(k_smooth);
-            let p_high = high.step(k_smooth);
-            for j in 0..4 {
-                sums[j] = (p_low[j] + sums[j]) + p_high[j];
-            }
-        }
+        lanes
+    }
+
+    /// Put the lanes of the partials `ks` back.
+    fn keep(&mut self, ks: &[usize], [low, high]: [Lanes; 2]) {
         for (lane, &k) in ks.iter().enumerate() {
             let (half, j) = if lane < 4 {
                 (&low, lane)
