@@ -288,6 +288,8 @@ pending recomputes: 0x5a8 -> FUN_00787b40 (timbre EQ into the harmonic image); 0
 legato: last voice 0x338 -> 0x6dc pitch target
 voices: single-threaded: for each voice FUN_00784a10(voice) then FUN_00788620 (sum)
         threaded (0x2f8 != 0, >= 2 voices): a worker pool renders voices in parallel, then the sum
+        (the port does as much on the host's workers, Generator::set_workers, with >= 2 voices:
+        each voice keeps its chunk and they are summed in voice order, the same to the bit as one thread)
 voice cleanup: finished voices (state +0x11c == 10, refcount +0xa8 == 0) -> Host.Voice_Kill
 chorus  0x7c0: 0x7b8 < 1: FUN_0074b0b0 (LFOs on); else FUN_0074b0f0 then kernel +0x60 into scratch; sum *= dry 0x7c8 when != 1.0; sum += scratch
 delay   0x7d0: 0x7b8 > 0: scratch = sum * 0x7e4, added into the ring per side at offsets 0x7dc / 0x7e0 (FUN_00747510); always kernel +0x40 or +0x60 by 0x7d8 into scratch; sum += scratch

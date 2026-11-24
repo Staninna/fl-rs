@@ -71,6 +71,7 @@ use crate::fl_fx::{
     Delay32, DelayKernel, FlangerSettings, FruityReverb, ReverbSettings, StereoFlanger,
 };
 use crate::three_osc::pan_law;
+use crate::workers::{self, Workers};
 use crate::{Effect, Fidelity, Generator, NoteOn, StateError, knob_value, maximus::Maximus, parts};
 use dsp::additive::{ShapeTable, SineBank};
 use std::f64::consts::{LN_2, PI, TAU};
@@ -1194,6 +1195,11 @@ struct Voice {
     gains: [f32; 2],
     mono: [f32; CHUNK],
     env_buf: [f32; CHUNK],
+    /// What the voice put into the left and the right in its last chunk
+    /// when it rendered on a worker; `rendered` says it did and its chunk
+    /// is still to be summed.
+    out: [[f32; CHUNK]; 2],
+    rendered: bool,
 }
 
 impl Voice {
@@ -1260,6 +1266,8 @@ impl Voice {
             gains: [0.0; 2],
             mono: [0.0; CHUNK],
             env_buf: [0.0; CHUNK],
+            out: [[0.0; CHUNK]; 2],
+            rendered: false,
         }
     }
 }
@@ -1447,6 +1455,8 @@ pub struct Harmless {
     mono_in: [f32; CHUNK],
     wet_left: [f32; CHUNK],
     wet_right: [f32; CHUNK],
+    /// The threads the voices may render on.
+    workers: Option<&'static dyn Workers>,
 }
 
 impl Default for Harmless {
@@ -1496,6 +1506,7 @@ impl Default for Harmless {
             mono_in: [0.0; CHUNK],
             wet_left: [0.0; CHUNK],
             wet_right: [0.0; CHUNK],
+            workers: None,
         };
         plugin.load();
         plugin
@@ -2592,10 +2603,17 @@ impl Harmless {
         voice.vib_att = (voice.vib_att + d.vib_attack * tick).min(1.0);
     }
 
-    /// Render one chunk of a voice into the stereo sum.
-    fn render_voice(&self, voice: &mut Voice, left: &mut [f32], right: &mut [f32], trem: bool) {
+    /// Render one chunk of `len` frames of a voice and add it to the
+    /// stereo sum, or with none keep what it would add in its
+    /// [`Voice::out`]. This reads nothing but the voice that it changes.
+    fn render_voice(
+        &self,
+        voice: &mut Voice,
+        len: usize,
+        mut sum: Option<(&mut [f32], &mut [f32])>,
+        trem: bool,
+    ) {
         let d = &*self.d;
-        let len = left.len();
         // The host's gains for the block, from the note's levels as the
         // block starts (`FUN_00784a10` asks `ComputeLRVol`, host slot 31):
         // a new voice starts at them, a sounding one ramps to them.
@@ -2664,9 +2682,18 @@ impl Harmless {
                     sr *= tr;
                 }
             }
-            left[i] += sl;
-            right[i] += sr;
+            match &mut sum {
+                Some((left, right)) => {
+                    left[i] += sl;
+                    right[i] += sr;
+                }
+                None => {
+                    voice.out[0][i] = sl;
+                    voice.out[1][i] = sr;
+                }
+            }
         }
+        voice.rendered = sum.is_none();
         self.end_voice(voice, len);
     }
 
@@ -3013,6 +3040,10 @@ impl Generator for Harmless {
         }
     }
 
+    fn set_workers(&mut self, workers: Option<&'static dyn Workers>) {
+        self.workers = workers;
+    }
+
     fn set_resource_dir(&mut self, dir: &Path) {
         for n in 0..4 {
             let path = dir.join(COMPRESSION).join(format!("{}.fst", n + 1));
@@ -3129,8 +3160,34 @@ impl Generator for Harmless {
                 voices.iter().filter(|v| v.active).count() + self.held_len + self.filters_len;
             self.follow_filter_note();
             let trem = self.tremolo(len, sounding);
-            for voice in voices.iter_mut().filter(|v| v.active) {
-                self.render_voice(voice, &mut l[..len], &mut r[..len], trem);
+            let active = voices.iter().filter(|v| v.active).count();
+            match self.workers {
+                // Every voice on its own, on the workers, then summed in
+                // the order one thread adds them in. A voice that put
+                // nothing out adds nothing, not even a 0.
+                Some(workers) if active >= 2 => {
+                    let this = &*self;
+                    let each = voices.iter_mut().filter(|v| v.active);
+                    workers::for_each(Some(workers), (each, active), 2, |voice| {
+                        this.render_voice(voice, len, None, trem);
+                    });
+                    for voice in voices.iter_mut().filter(|v| v.rendered) {
+                        voice.rendered = false;
+                        let [out_l, out_r] = &voice.out;
+                        for (l, x) in l[..len].iter_mut().zip(&out_l[..len]) {
+                            *l += x;
+                        }
+                        for (r, x) in r[..len].iter_mut().zip(&out_r[..len]) {
+                            *r += x;
+                        }
+                    }
+                }
+                _ => {
+                    for voice in voices.iter_mut().filter(|v| v.active) {
+                        let sum = Some((&mut l[..len], &mut r[..len]));
+                        self.render_voice(voice, len, sum, trem);
+                    }
+                }
             }
             self.voices = voices;
             self.effects(sounding, &mut l[..len], &mut r[..len]);
@@ -3266,6 +3323,20 @@ mod tests {
         bytes.extend(0i32.to_le_bytes());
         bytes.push(1);
         bytes
+    }
+
+    #[test]
+    fn the_voices_play_the_same_on_workers() {
+        crate::testing::same_on_workers(|| Box::new(Harmless::default()), &[], 44_100.0);
+        // And the corpus's states, every one with its compression and
+        // unison as the project has them.
+        let Some(root) = crate::testing::corpus() else {
+            return;
+        };
+        let mut states = crate::testing::projects(&root);
+        states.retain(|s| s.plugin.eq_ignore_ascii_case(NAME));
+        let states: Vec<_> = states.into_iter().map(|s| s.state).collect();
+        crate::testing::same_on_workers(|| Box::new(Harmless::default()), &states, 44_100.0);
     }
 
     #[test]
