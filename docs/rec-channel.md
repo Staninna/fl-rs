@@ -53,7 +53,7 @@ multiplies @0 and @4 by 100 for writers below 5.3.7).
 | 11 | fine time shift | `chan+0x21c` | 0..1024 (`ShiftWheel`) | | no | loader, dfm |
 | 12 | swing mix | `chan+0x220` | 0..128 (`SwingMixWheel`) | | no | loader, dfm |
 | 13 | sample start offset | f64 `chan+0x314` | 0..16384 | | no | loader, dfm |
-| 14 | time stretch (time) | f32 `chan+0x2e4` | 0..36864 (`StretchTimeWheel`) | VMT +0x130 | no | loader, dfm |
+| 14 | time stretch (time) | f32 `chan+0x2e4` | 0..36864 (`StretchTimeWheel`), 48ths of a step | VMT +0x130 = `FUN_00fea570` | the stored time plays (below, "Time stretch"); a clip on it does not | loader, dfm |
 | 15 | formant shift | f64 `chan+0x324` | 0..2400, 1200 centre (`FormantShiftWheel`) | | no | loader, dfm |
 | 0x10 | pan offset | 229 @0, `chan+0x184` | -6400..6400 (`PanOfsWheel`) | `FUN_00fe9bf0` | plays | loader, dfm, corpus |
 | 0x11 | volume multiplier | 229 @4, `chan+0x188` | 0..25600, 12800 unity (`VolOfsWheel`) | `FUN_00fe9d20` | plays | loader, dfm, corpus |
@@ -111,11 +111,11 @@ parameters 0, 0x12, 0x13 and 0x226).
   BooBass, Fruity Granulizer, Harmless, Harmor, Sakura, Sytrus, 3x Osc and
   Fruity Envelope Controller take it, and Patcher hands it to the
   generators inside it. The other generators keep the pitch their notes
-  started with. An audio clip channel set
-  to time stretch re-stretches its sample when the pitch moves
-  (`FUN_00ff86f0`, `chan+0x2f0` not -1 or -2); the engine stretches nothing
-  and plays a clip's pitch by its speed, the knob's included, as it did
-  before.
+  started with. A channel with a time stretch queues its sample to be
+  stretched again when the pitch moves (`FUN_00ff86f0`, `chan+0x2f0` not
+  -1 or -2, and no time); the engine stretches a voice for the pitch it
+  starts at (below, "Time stretch"), and a pitch clip then moves its
+  speed, as on any other voice.
 - Pan offset (0x10) and volume multiplier (0x11), with the channel's volume
   and pan, as the formulas above. The pan offset now goes on every channel
   from its 229, automated or not; before, the engine read only the volume
@@ -141,11 +141,13 @@ Left out, and why:
   no level. Where a plugin channel's `+0x164` is set was not found, so the
   engine plays none of the four on a plugin channel: `Square a Saw -
   Oxygen` channel 51 (3x Osc) keeps its two clips on mod X unsupported.
-- Time stretch and formant (14, 15), the instrument envelopes
-  (0x1000..), the tracking of mod X and Y on a sampler whose filter does
-  not run, the echo delay (0x200..), TS404 (0x103..): the engine plays
-  none of these parts of a channel, and counts the channels that turn
-  each on (below, "Channel parts the engine counts"). Nor the arpeggiator's direction, range, chord and repeat
+- A clip or a link on the stretch time (14), Stretch Pro's formant shift
+  (15), the instrument envelopes (0x1000..), the tracking of mod X and Y
+  on a sampler whose filter does not run, the echo delay (0x200..), TS404
+  (0x103..): the engine plays none of these parts of a channel, and counts
+  the channels that turn each on (below, "Channel parts the engine
+  counts"). The stretch itself is played, as FL's lengths, speeds and
+  pitches with a stand-in for élastique (below, "Time stretch"). Nor the arpeggiator's direction, range, chord and repeat
   (0x300..0x302, 0x305) from a clip, which no corpus clip drives, nor its
   time and gate from a controller link: the arpeggios are worked out from
   the song before it plays.
@@ -173,10 +175,69 @@ What turns each part on is a reading of what moves the sound, in
 | part | events and layout | on when | confidence |
 |---|---|---|---|
 | instrument envelopes and LFOs (`envelope_on`) | five 218 `EnvelopeLFO`, 68 bytes each, one per target in order pan, volume, mod X, mod Y, pitch. i32s: @0 flags (a byte), @4 the envelope's switch, @8 predelay, @12 attack, @16 hold, @20 decay, @24 sustain, @28 release, @32 amount, @36 LFO predelay, @40 LFO attack, @44 LFO amount, @48 LFO speed, @52 LFO shape, @56..@67 tensions. The loader copies each to `smp+0x198 + 0xa0 e`, and control `0x1000 + 0x100 e + f` is the i32 at `4 f` | an envelope's switch is on and its amount is off 0, or its switch is on and it is the volume's; or an LFO's amount is off 0 | fields 2 to 9 loader and dfm (the map above); the switch @4, the LFO fields and the order of the targets PyFLP and inferred. A new sampler (`model`'s `NEW_SAMPLER`, from FL's `Empty.flp`) has every switch off and every amount 0, and its second record alone has other flags and a tension, which fits the volume being second. That the volume envelope works at amount 0 is inferred |
-| time stretch and formant (`time_stretch_on`), sampler and audio clip channels only | 215 `Parameters`: @96 the stretch time (control 14, `chan+0x2e4`; an f32 with 169 bit 0, an integer otherwise), @100 i32 the stretch pitch in cents (`chan+0x2e8`), @104 i32 the multiplier (`chan+0x2ec`), @108 i32 the mode (`chan+0x2f0`), @160 f64 the formant (control 15, `chan+0x324`) | the time, the pitch or the multiplier is off 0, or the formant is in the payload and off 0.5. The mode alone moves nothing | offsets loader (the 215 base `chan+0x284` and the struct offsets above); pitch and multiplier names PyFLP; the multiplier's 0 for 1x and the formant's 0.5 for its centre inferred from a new sampler, which has 0, 0, 0, 0 and 0.5. An audio clip stretched to its own length at the project's tempo counts, though it may sound the same |
+| Stretch Pro's formant shift (`crate::stretch::unplayed`), sampler and audio clip channels only | 215 `Parameters` @160 f64 the formant (control 15, `chan+0x324`), with @108 the mode (`chan+0x2f0`) | the mode is Stretch Pro (-2) and the formant is in the payload and off 0.5. The rest of the stretch is played (below, "Time stretch"); before, any time, pitch, multiplier or formant counted (`model::Channel::time_stretch_on`), 52 channels in the render at `5d3f1b8` | `FUN_0067db90` takes the formant as a factor of `2^(1 - 2 formant)` on the pitch; that only élastique Pro shifts formants is the DLL's string "Elastique Pro with formant shifting" for the mode. 0.5 for the centre inferred from a new sampler |
 | tracking of mod X and Y (`tracks_mods`), sampler channels whose filter does not run | two 228 `Tracking`, 16 bytes each, the velocity's then the key's: i32 @0 the middle, @4 pan, @8 mod X, @12 mod Y. The loader copies record `r` to `chan+0x1ac + 0x20 r`, so control `0x500 + 0x10 r + f` is the knob at @`4 + 4 f` | a mod X or mod Y knob of either record is off 0, on a sampler whose voices do not run the filter (no clip or link drives its mod X, mod Y or their offsets). Pan tracking is played on every channel, and a plugin is handed its tracked mods (`crates/engine/src/levels.rs`) | loader and dfm for the knobs; the middle and the velocity-then-key order as `levels.rs` reads them. A new sampler has middles 100 and 60 and every knob 0 |
 | echo delay (`echo_delay_on`) | 209 `Delay`, 20 bytes, five i32: @0 feedback, @4 pan, @8 pitch, @12 echoes, @16 time, copied to `chan+0x200`, controls 0x200..0x204 in that order | feedback above 0 and at least one echo | loader and dfm for the order; the legacy 130 writes echoes to `chan+0x20c` (@12) and a feedback that grows with them to `chan+0x200` (@0). That feedback 0 makes no echo is inferred: a new sampler has feedback 0, 4 echoes and time 144 |
 | TS404 (`is_ts404`) | 21 `ChannelID.Type` 1, whose controls 0x103..0x125 address the object at `chan+0x358` (210 `LegacySampleState` fills it) | the channel is of type 1 | inferred: FL 3's TS404 was a channel type, and no corpus project has type 1 or a 210. No filter type is a TS404: 219 @20 has the eight kinds of the table at 0x1510e40 |
+
+## Time stretch (crates/engine/src/stretch.rs)
+
+A sampler or audio clip channel's 215 holds a stretch: @96 the time
+(`chan+0x2e4`), @100 the pitch in cents (`chan+0x2e8`), @104 the
+multiplier (`chan+0x2ec`), @108 the mode (`chan+0x2f0`) and @160 the
+formant (`chan+0x324`). FL keeps `chan+0x6f4 = 2^(mult / 10000)`
+(`FUN_00fea570`, the time setter at VMT +0x130, through `FUN_01186110`),
+so 10000 is twice as long. The time is in 48ths of a step: `FUN_00d26890`
+and `FUN_00ff0640` make ticks of it as `time * (PPQ >> 2) / 48` (`0x15d89c0`
+is the PPQ and `0x15d89c4` a quarter of it, both set by `FUN_013111e0`), and
+output samples with the samples a tick lasts (`0x15d8980`, 196.875 at
+44.1 kHz, 140 BPM and PPQ 96). Corpus: `Broken Crash.wav` is 3.0142 s long
+and its channel in `Ookay - Thief` (150 BPM) has a time of 1447, 3.0146 s.
+Writers before 169 bit 0 store an integer; the engine, which does not keep
+169, reads one below 2^23 as an integer and any other as an f32.
+
+The modes, in the order of their names in the DLL ("stretch pro",
+"stretch", "resample", "e3 generic", "e3 mono", "slice stretch", "slice
+map", "auto", "e2 generic", "e2 transient", "e2 mono", "e2 speech"): -2 to
+9. The loader remaps them for old writers (`FUN_00f46490`): below 6.1.5 a
+mode above 2 moves up 4 and 1 and 2 move up 2, and below 11.5.13 the mode,
+held to 0..9, goes through the table `0, 6, 6, 7, 7, 8, 9, 3, 4, 5` at
+`0x14e01fb`, and a 5 out of it becomes 6.
+
+How a voice plays, with `R` the sample's rate over the output's, `M` the
+multiplier, `D` the time in output samples times `M`, `N` the voice's
+pitch from the sample's own speed in cents and `P` the stretch pitch:
+
+| mode | with a time | without |
+|---|---|---|
+| Stretch, Stretch Pro (below 0) | élastique as the voice plays (`FUN_00d26890` into `FUN_0067db90`): the sample is read at `len / D` and stretched to `D`, and shifted `N + P` cents without a change of length | the same at `R / M`: `M` times as long, shifted `N + P` |
+| Resample (0) | read at `len / D` (`FUN_0067d9b0`), whatever `N` | read at `R / M * 2^(N / 1200)` (`FUN_0067db00`) |
+| e3, e2, slice and auto (above 0) | stretched once to `round(D R)` frames and shifted `P` (`FUN_00ff0640` into `FUN_00a97410`), then read at that over `D`, whatever `N` | stretched to `M` times its length and shifted `P`, read at `R * 2^(N / 1200)` |
+
+In Resample, `FUN_00ff0640` also shifts the sample by `P` once, keeping
+its length (`FUN_00a97410` with mode 5). `FUN_00fea6e0` is what decides
+on a load-time stretch: a mode above 0 with a time, a pitch or a
+multiplier. A mode above 0 with none of them plays as a channel with no
+stretch, and so does Resample with none; Stretch and Stretch Pro always
+run élastique, so their notes keep the sample's length on every key. In
+auto with `chan+0x370` at 2 FL slices the sample instead (`FUN_00f36060`).
+
+What the engine builds of it: every length, speed and pitch above. The
+stretch is not FL's: élastique (`Shared/elastique_x64.dll`, zplane's) and
+FL's slicer are stood in for by a WSOLA, 40 ms Hann frames at half overlap,
+each taken from within 5 ms of where the stretch puts it at the offset that
+best continues the frame before, and a pitch shift `p` is a stretch by `p`
+more read `p` times as fast. A stretch under 0.2% with no pitch shift is
+played by speed alone, 3.5 cents off at most: that is most audio clips,
+stretched to their own length at the project's tempo. The stretch is made
+when the graph is built, once for each sample, length and pitch, so a
+voice plays a stretched sample and the audio thread does nothing new; a
+pitch clip or a slide on a stretched voice changes its speed, where FL's
+élastique would shift its pitch. A clip's start offset is moved to the
+same place in the stretched sample. Left out: Stretch Pro's formant
+(counted), a clip or link on the time, the auto mode's slicing (stretched
+as the others), and an item's own stretch (`Rendered::unsupported_stretch`,
+which reads `voice+0x39c` into `M` in `FUN_00d26890`).
 
 ## Corpus
 
@@ -196,7 +257,13 @@ and 4800..8000 an octave either way. Every volume multiplier clip has
 | `FUN_01046a70` | REC dispatcher, channel branch (decompile lines 998 to 2030) |
 | `FUN_01046a30` | `min + round(v * 2^-30 * (max - min))` (disassembly) |
 | `FUN_00fe9d20`, `FUN_00fe9bf0`, `FUN_00fea140` | channel volume, pan, mod X/Y |
-| `FUN_00ff86f0` | channel VMT +0x128, after a pitch change |
+| `FUN_00ff86f0` | channel VMT +0x128, after a pitch change: queues a stretch again |
+| `FUN_00fea570` | channel VMT +0x130, sets the stretch time and `chan+0x6f4` |
+| `FUN_00fea6e0`, `FUN_00fea720` | whether a load-time stretch is on; whether one plays as the voice runs |
+| `FUN_00ff0640` | the load-time stretch: its length and pitch, into `FUN_00a97410` |
+| `FUN_00d26890` | a sampler voice's speed and élastique settings |
+| `FUN_0067d9b0`, `FUN_0067db00`, `FUN_0067db90` | the voice's resampler speed; speed with a pitch; élastique's time, pitch and formant |
+| `FUN_01186110` | `2^(mult / 10000)` |
 | `FUN_00f46490` | loader: 226/227 branch, 229 branch, version gates |
 | `FUN_012cb6c0` | runs an ID rewrite over the links and the other ID lists |
 | `FUN_00f45960`, `FUN_00f45980`, `FUN_00f459e0`, `FUN_00f45a40` | link and ID rewrites for writers below 10.1.0, 11.5.6, 12.9.0 and 12.9.1 |

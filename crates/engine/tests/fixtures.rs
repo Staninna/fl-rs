@@ -4887,9 +4887,9 @@ fn clips_drive_an_insert_s_separation_and_eq() {
 
 /// Channel 0 with the parts the engine leaves out in its events, at 150:
 /// an echo delay with this feedback, the five envelopes with the volume's
-/// switched on or not, key tracking of mod X by this much, and a 215
-/// whose time stretch moves the pitch by this many cents.
-fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, stretch: i32) {
+/// switched on or not, key tracking of mod X by this much, and a 215 with
+/// this formant, in Stretch Pro when it is off its middle.
+fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, formant: f64) {
     let channel = &mut project.channels[0];
     channel.delay = Some(layout::Delay {
         feedback,
@@ -4910,8 +4910,8 @@ fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, st
     };
     channel.tracking = vec![record(100, 0), record(60, mod_x)];
     let mut parameters = layout::Parameters::from_bytes(&[0; 168]).unwrap();
-    parameters.stretch_pitch = stretch;
-    parameters.formant = 0.5f64.to_le_bytes();
+    parameters.stretch_mode = if formant == 0.5 { 0 } else { -2 };
+    parameters.formant = formant.to_le_bytes();
     channel.parameters = Some(parameters);
     let ids = [Id::Delay, Id::Parameters, Id::Tracking, Id::Tracking]
         .into_iter()
@@ -4933,13 +4933,15 @@ fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
 
     // As a new sampler has them, none is on.
     let mut new = tone(BAR);
-    with_parts(&mut new, 0, false, 0, 0);
+    with_parts(&mut new, 0, false, 0, 0.5);
     let out = render(&new, &dir);
     assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
 
-    // Each on, the sound is the same and each is counted once.
+    // Each on, the sound is the same and each is counted once. Stretch
+    // Pro on the root key with no time, pitch or multiplier plays the
+    // sample as it is, and its formant is what is left out.
     let mut on = tone(BAR);
-    with_parts(&mut on, 6400, true, 128, -1200);
+    with_parts(&mut on, 6400, true, 128, 0.75);
     let out = render(&on, &dir);
     assert!(out.left == plain.left);
     let counted = engine::UnplayedParts {
@@ -4965,7 +4967,7 @@ fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
     // A channel with no note that sounds is not counted: here its sample
     // is missing.
     let mut missing = tone(BAR);
-    with_parts(&mut missing, 6400, true, 128, -1200);
+    with_parts(&mut missing, 6400, true, 128, 0.75);
     missing.channels[0].sample_path = Some("nowhere.wav".to_owned());
     let out = render(&missing, &dir);
     assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
@@ -4980,4 +4982,80 @@ fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
     let out = render(&ts404, &dir);
     assert_eq!(out.unplayed_parts.ts404, 1);
     assert!(out.left == plain.left);
+}
+
+/// The tone fixture with channel 0's time stretch: its mode, time (an
+/// f32, in 48ths of a step), pitch in cents and multiplier.
+fn stretched(ticks: i32, mode: i32, time: f32, pitch: i32, multiplier: i32) -> Project {
+    let mut project = tone(ticks);
+    let channel = &mut project.channels[0];
+    let mut parameters = layout::Parameters::from_bytes(&[0; 168]).unwrap();
+    parameters.stretch_mode = mode;
+    parameters.stretch_time = time.to_le_bytes();
+    parameters.stretch_pitch = pitch;
+    parameters.stretch_multiplier = multiplier;
+    parameters.formant = 0.5f64.to_le_bytes();
+    channel.parameters = Some(parameters);
+    channel.order.push(Placed {
+        pos: 150,
+        item: Item::Field(Id::Parameters),
+    });
+    project
+}
+
+/// The frame after the last that sounds, and the pitch in Hz of the
+/// middle of what sounds, from its zero crossings.
+fn sounds(out: &Rendered) -> (usize, f64) {
+    let end = out
+        .left
+        .iter()
+        .rposition(|x| x.abs() > 1e-3)
+        .map_or(0, |i| i + 1);
+    let body = &out.left[end / 8..end * 7 / 8];
+    let crossings = body
+        .windows(2)
+        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+        .count();
+    (
+        end,
+        crossings as f64 * f64::from(RATE) / body.len() as f64 / 2.0,
+    )
+}
+
+#[test]
+fn a_channel_s_time_stretch_plays_fl_s_lengths_and_pitches() {
+    let dir = Dir::new("time-stretch");
+    // A second of 100 Hz, held for a bar of two seconds at 120 BPM.
+    dir.sine(48_000);
+    let near = |(end, hz): (usize, f64), want: (usize, f64)| {
+        let long = end.abs_diff(want.0) < 400;
+        assert!(
+            long && (hz - want.1).abs() < 2.0,
+            "{end} {hz}, want {want:?}"
+        );
+    };
+    let plain = render(&tone(BAR), &dir);
+    near(sounds(&plain), (48_000, 100.0));
+    let play = |mode, time, pitch, multiplier| {
+        let out = render(&stretched(BAR, mode, time, pitch, multiplier), &dir);
+        assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
+        assert!(out.left.iter().all(|x| x.is_finite()));
+        sounds(&out)
+    };
+    // Resample: the stretch pitch shifts the sample and keeps its length,
+    // the multiplier slows it down.
+    near(play(0, 0.0, -1200, 0), (48_000, 50.0));
+    near(play(0, 0.0, 0, 10_000), (96_000, 50.0));
+    // Stretch: twice as long at the same pitch, and an octave down at the
+    // same length.
+    near(play(-1, 0.0, 0, 10_000), (96_000, 100.0));
+    near(play(-1, 0.0, -1200, 0), (48_000, 50.0));
+    // A time of 192 is a beat, half a second here: e3 stretches the sample
+    // to it and keeps the pitch, Resample plays it that fast.
+    near(play(1, 192.0, 0, 0), (24_000, 100.0));
+    near(play(0, 192.0, 0, 0), (24_000, 200.0));
+    // Stretch on a key an octave up keeps the length.
+    let mut up = stretched(BAR, -1, 0.0, 0, 0);
+    up.patterns[0].notes[0].key = 72;
+    near(sounds(&render(&up, &dir)), (48_000, 200.0));
 }

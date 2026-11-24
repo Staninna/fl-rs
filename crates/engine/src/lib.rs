@@ -80,13 +80,15 @@
 //! block ends where the next note on or note off of a hosted channel is
 //! due. The controls are not read again there. A step sequencer note is a
 //! note on and a note off on one sample. Of an automation clip only
-//! the envelope is played, and its LFO is not. An audio clip is not
-//! time-stretched: its item's stretch is counted in
-//! [`Rendered::unsupported_stretch`] and the channel's own stretch settings
-//! are not played. Nor are a channel's instrument envelopes and LFOs, its
-//! time stretch and formant, its tracking of mod X and Y on a sampler whose
-//! filter does not run, its echo delay, or a TS404 channel:
-//! [`Rendered::unplayed_parts`] counts the channels that turn each on.
+//! the envelope is played, and its LFO is not. A sampler or audio clip
+//! channel's time stretch plays at FL's lengths, speeds and pitches, with a
+//! WSOLA in place of élastique (`docs/rec-channel.md`, "Time stretch"); an
+//! audio clip item's own stretch is not played and is counted in
+//! [`Rendered::unsupported_stretch`]. Nor are a channel's instrument
+//! envelopes and LFOs, Stretch Pro's formant shift, its tracking of mod X
+//! and Y on a sampler whose filter does not run, its echo delay, or a TS404
+//! channel: [`Rendered::unplayed_parts`] counts the channels that turn each
+//! on.
 //!
 //! An effect slot plays its plugin when the [`plugins`] crate has it, which
 //! [`Rendered::hosted_slots`] counts. Any other slot passes its input
@@ -136,6 +138,7 @@ mod priority;
 mod sample;
 mod sequence;
 mod slide;
+mod stretch;
 mod transport;
 mod voice;
 

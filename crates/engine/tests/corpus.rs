@@ -49,7 +49,8 @@
 //! 10 seconds whose arpeggiator asks for a part the engine does not build.
 //! Their notes play as they are.
 //!
-//! Its unplayed envelopes, time stretch, tracking and echo delays are its
+//! Its unplayed envelopes, time stretch (Stretch Pro's formant shift, the
+//! one part of the stretch left out), tracking and echo delays are its
 //! channels with a note or a clip in the 10 seconds that sounds and that
 //! turn on that part of FL's channel, which the engine does not play, and
 //! its TS404s its TS404 channels with a note there (`docs/rec-channel.md`,

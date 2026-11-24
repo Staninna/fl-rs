@@ -12,6 +12,7 @@ use crate::parts::UnplayedParts;
 use crate::sample::Sample;
 use crate::sequence::{self, Song};
 use crate::slide::Slides;
+use crate::stretch::Stretcher;
 use crate::voice::{self, Voice};
 use crate::{Curves, Error, levels};
 use model::{Channel, ChannelKind, Project};
@@ -191,6 +192,7 @@ impl Graph {
         // The slides of the sampler channels' notes, by channel and by
         // the note's place in `events`.
         let mut slides = Slides::default();
+        let mut stretcher = Stretcher::default();
         let mut notes = 0;
         let mut len = clock.sample(song.end).min(limit);
         for (at, note) in song.notes.iter().enumerate() {
@@ -261,6 +263,20 @@ impl Graph {
             let semitones = f64::from(levels.pitch - levels::root(channel)) / 100.0;
             let step =
                 curves.pitch_ratio(semitones) * f64::from(sample.rate) / f64::from(sample_rate);
+            // A channel's time stretch plays another sample, or the same at
+            // another speed (`crate::stretch`).
+            let per_tick = clock.per_tick(note.tick);
+            let (sample, step) = match stretcher.voice(
+                project,
+                channel,
+                &sample,
+                sample_rate,
+                per_tick,
+                semitones * 100.0,
+            ) {
+                Some(played) => (played.sample, played.step),
+                None => (sample, step),
+            };
             let held = note
                 .length
                 .map(|length| clock.sample(note.tick + length).saturating_sub(start));
@@ -311,7 +327,7 @@ impl Graph {
 
         // A clip plays its channel's sample for as long as the item is, at
         // the item's gain, pan and pitch on top of the channel's own. The
-        // item's stretch and the channel's time stretching are not applied.
+        // item's stretch is not applied; the channel's time stretch is.
         let (mut clips, mut stretched) = (0, 0);
         for clip in &song.clips {
             let start = clock.sample(clip.tick);
@@ -335,7 +351,17 @@ impl Graph {
             let step =
                 curves.pitch_ratio(semitones) * f64::from(sample.rate) / f64::from(sample_rate);
             let held = clock.sample(clip.tick + clip.length).saturating_sub(start);
-            let offset = f64::from(clip.offset_ms) * f64::from(sample.rate) / 1000.0;
+            let mut offset = f64::from(clip.offset_ms) * f64::from(sample.rate) / 1000.0;
+            let per_tick = clock.per_tick(clip.tick);
+            let cents = semitones * 100.0;
+            let (sample, step) =
+                match stretcher.voice(project, channel, &sample, sample_rate, per_tick, cents) {
+                    Some(played) => {
+                        offset *= played.scale;
+                        (played.sample, played.step)
+                    }
+                    None => (sample, step),
+                };
             let insert = target_insert(channel);
             let adjust = curves.volume_adjust_gain(voice::adjust(project, channel));
             let own = settings.gain * curves.clip_gain();

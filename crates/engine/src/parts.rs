@@ -15,7 +15,8 @@ pub struct UnplayedParts {
     /// envelope or LFO (218, controls 0x1000..) is on.
     pub envelopes: usize,
     /// Sampler and audio clip channels with a note or a clip that sounds
-    /// whose time stretch or formant shift (215, controls 14 and 15) is on.
+    /// whose Stretch Pro formant shift (215 @160, control 15) is on. The
+    /// engine plays the rest of the time stretch ([`crate::stretch`]).
     pub time_stretch: usize,
     /// Sampler channels with a note that sounds whose velocity or key
     /// tracking moves mod X or mod Y (228, controls 0x501, 0x502, 0x511,
@@ -51,7 +52,9 @@ impl UnplayedParts {
         };
         UnplayedParts {
             envelopes: count(&sounding, &Channel::envelope_on),
-            time_stretch: count(&sounding, &Channel::time_stretch_on),
+            time_stretch: count(&sounding, &|channel| {
+                crate::stretch::unplayed(project, channel)
+            }),
             tracking: count(&noted, &|channel| {
                 channel.kind == Some(ChannelKind::Sampler)
                     && channel.tracks_mods()
