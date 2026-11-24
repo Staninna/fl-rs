@@ -174,10 +174,10 @@ const LFO_SHAPE: usize = 13;
 const TENSIONS: usize = 14;
 
 /// The blocks of the tab, in the order the state has them.
-pub(crate) const VOLUME: usize = 1;
-pub(crate) const MOD_X: usize = 2;
-pub(crate) const MOD_Y: usize = 3;
-pub(crate) const PITCH: usize = 4;
+pub const VOLUME: usize = 1;
+pub const MOD_X: usize = 2;
+pub const MOD_Y: usize = 3;
+pub const PITCH: usize = 4;
 
 /// The parameter the instrument tab's start at. FL's tab handler
 /// (`0x7378a0`) takes 23 to 113: `0x73ad35` hands 23 to `0x72c440`, which
@@ -238,12 +238,12 @@ const GLOBAL_LFO: i32 = 0x20;
 
 /// The stages of an envelope, as FL numbers them.
 const WAIT: u8 = 0;
-pub(crate) const RISE: u8 = 1;
+pub const RISE: u8 = 1;
 const HELD: u8 = 2;
 const FALL: u8 = 3;
 const SUSTAINED: u8 = 4;
 const RELEASED: u8 = 6;
-pub(crate) const OVER: u8 = 9;
+pub const OVER: u8 = 9;
 
 /// An envelope under this is over.
 const TINY: f32 = 5.960_464_5e-8;
@@ -267,7 +267,7 @@ pub(crate) fn new_tab() -> Articulation {
 /// The six tables FL's host makes when it starts: sine, triangle, square,
 /// saw, rounded saw and noise.
 #[derive(Debug, PartialEq)]
-pub(crate) struct HostTables {
+pub struct HostTables {
     shapes: [Vec<f32>; 6],
 }
 
@@ -350,7 +350,7 @@ impl HostTables {
     }
 
     /// The tables, made once.
-    pub(crate) fn get() -> &'static HostTables {
+    pub fn get() -> &'static HostTables {
         static TABLES: OnceLock<HostTables> = OnceLock::new();
         TABLES.get_or_init(HostTables::new)
     }
@@ -724,36 +724,36 @@ impl Tension {
 
 /// One block of the tab, worked out for a tempo.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub(crate) struct Block {
-    pub(crate) enabled: bool,
-    pub(crate) full_when_off: bool,
-    pub(crate) global_lfo: bool,
+pub struct Block {
+    pub enabled: bool,
+    pub full_when_off: bool,
+    pub global_lfo: bool,
     /// The attack knob is at no time at all.
-    pub(crate) no_attack: bool,
+    pub no_attack: bool,
     /// Ticks.
-    pub(crate) predelay: i32,
-    pub(crate) hold: i32,
+    pub predelay: i32,
+    pub hold: i32,
     /// What a tick adds to the straight envelope in each stretch.
-    pub(crate) attack: f32,
-    pub(crate) decay: f32,
-    pub(crate) release: f32,
-    pub(crate) sustain: f32,
+    pub attack: f32,
+    pub decay: f32,
+    pub release: f32,
+    pub sustain: f32,
     tensions: [Tension; 3],
     /// How far the envelope and the LFO move their target: of 128, and for
     /// the pitch as they are, in cents.
-    pub(crate) amount: f32,
-    pub(crate) lfo_amount: f32,
-    pub(crate) cents: f32,
-    pub(crate) lfo_cents: f32,
-    pub(crate) lfo_predelay: i32,
-    pub(crate) lfo_attack: f32,
+    pub amount: f32,
+    pub lfo_amount: f32,
+    pub cents: f32,
+    pub lfo_cents: f32,
+    pub lfo_predelay: i32,
+    pub lfo_attack: f32,
     /// What a tick adds to the LFO's 32-bit phase.
-    pub(crate) lfo_step: u32,
-    pub(crate) lfo_shape: usize,
+    pub lfo_step: u32,
+    pub lfo_shape: usize,
 }
 
 impl Block {
-    pub(crate) fn of(raw: &[i32; 17], tempo: f64, ppq: f64) -> Self {
+    pub fn of(raw: &[i32; 17], tempo: f64, ppq: f64) -> Self {
         let unit = ppq / 4.0 / 48.0 * 24_576.0 / 1000.0;
         let unit_for = |fixed: i32| match raw[FLAGS] & fixed {
             0 => unit * tempo / 120.0,
@@ -789,23 +789,23 @@ impl Block {
 
 /// One envelope and LFO of a note.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub(crate) struct Envelope {
-    pub(crate) stage: u8,
+pub struct Envelope {
+    pub stage: u8,
     /// The ticks the stage has lasted, for the two that are counted.
-    pub(crate) count: i32,
+    pub count: i32,
     /// The straight envelope, and what its stretch's bend makes of it.
-    pub(crate) value: f32,
-    pub(crate) level: f32,
-    pub(crate) lfo_phase: u32,
+    pub value: f32,
+    pub level: f32,
+    pub lfo_phase: u32,
     /// The ticks the LFO still waits, how far it has faded in, and what
     /// it is at.
-    pub(crate) lfo_waits: i32,
-    pub(crate) lfo_fade: f32,
-    pub(crate) lfo: f32,
+    pub lfo_waits: i32,
+    pub lfo_fade: f32,
+    pub lfo: f32,
 }
 
 impl Envelope {
-    pub(crate) fn new(block: &Block) -> Self {
+    pub fn new(block: &Block) -> Self {
         let mut envelope = Envelope {
             lfo_waits: block.lfo_predelay,
             ..Envelope::default()
@@ -828,7 +828,7 @@ impl Envelope {
     }
 
     /// One tick on. `global` is the phase of an LFO the notes share.
-    pub(crate) fn step(&mut self, block: &Block, global: u32, shapes: &HostTables) {
+    pub fn step(&mut self, block: &Block, global: u32, shapes: &HostTables) {
         if block.enabled {
             match self.stage {
                 WAIT => {
@@ -893,7 +893,7 @@ impl Envelope {
     }
 
     /// The note off: the release starts from the level the envelope is at.
-    pub(crate) fn release(&mut self, block: &Block) {
+    pub fn release(&mut self, block: &Block) {
         if self.stage <= RELEASED {
             self.value = block.tensions[2].unshape(self.level);
             (self.stage, self.count) = (RELEASED, 0);
@@ -1017,7 +1017,7 @@ pub fn svf(cut: f32, res: f32, s: f32) -> (f32, f32) {
 /// What a sample adds to a value that is headed for `target` from `from`
 /// over `len` samples, at no more than `limit` a sample, and where that
 /// gets it.
-pub(crate) fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
+pub fn ramp(target: f32, from: f32, limit: f32, len: usize) -> (f32, f32) {
     let mut step = target - from;
     if step == 0.0 {
         return (0.0, target);

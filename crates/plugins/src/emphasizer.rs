@@ -4,10 +4,7 @@
 //! `Emphasizer_x64.dll` is a shell: it keeps six parameters, turns them
 //! into the values of the limiter `LimiterLite` that
 //! `LimiterLite_CreateInstance` of `Shared/ildsp_x64.dll` makes, and hands
-//! it the sound. The install this was read from has no `Shared/`
-//! directory, so the limiter is not built: the state, the parameters and
-//! the values the shell gives the limiter are, and the sound passes
-//! through as it is. [`Effect::fidelity`] says so for every state.
+//! it the sound. `limiter_lite.rs` rebuilds the limiter.
 //!
 //! The state is a version (2 now), the parameters as i32 (five before
 //! version 2, six from it) and a byte: a switch of the limiter's that the
@@ -25,7 +22,8 @@
 //!
 //! `n` is the wheel's value over 10000.
 
-use crate::{Effect, Fidelity, StateError, knob_value, state_version};
+use crate::limiter_lite::LimiterLite;
+use crate::{Effect, StateError, knob_value, state_version};
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Emphasizer";
@@ -50,10 +48,6 @@ const DEFAULTS: [i32; PARAMS] = [0, 5013, 0, 0, 0, 10_000];
 const NEWEST: i32 = 2;
 const LEN_1: usize = 4 + 4 * 5 + 1;
 const LEN_2: usize = 4 + 4 * PARAMS + 1;
-
-/// What the sound misses.
-const MISSING: &str =
-    "Emphasizer's limiter, LimiterLite in Shared/ildsp_x64.dll, is not built: the sound passes";
 
 /// A wheel's share of its way, as `ProcessParam` (`0x006c2980`) works it
 /// out and hands it on as a float.
@@ -87,23 +81,46 @@ fn output_db(share: f32) -> f32 {
 }
 
 /// Emphasizer. A new one has FL's "Default" preset.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Emphasizer {
     params: [i32; PARAMS],
     /// The byte after the parameters.
     switch: u8,
+    hz: f32,
+    limiter: Box<LimiterLite>,
+}
+
+impl PartialEq for Emphasizer {
+    /// Two are the same plugin when their state is.
+    fn eq(&self, other: &Self) -> bool {
+        self.params == other.params && self.switch == other.switch
+    }
 }
 
 impl Default for Emphasizer {
+    /// At 44.1 kHz, as the constructor makes the limiter: `init(rate,
+    /// 0x800)`, then every wheel. This allocates.
     fn default() -> Self {
-        Emphasizer {
+        let mut plugin = Emphasizer {
             params: DEFAULTS,
             switch: 1,
-        }
+            hz: 44_100.0,
+            limiter: Box::new(LimiterLite::new(44_100.0)),
+        };
+        plugin.send_all();
+        plugin
     }
 }
 
 impl Emphasizer {
+    /// Hand the limiter every value and the switch, as a load does.
+    fn send_all(&mut self) {
+        for (index, value) in self.limiter_values().into_iter().enumerate() {
+            self.limiter.set_param(index, value);
+        }
+        self.limiter.set_param(6, f32::from(self.switch));
+    }
+
     /// The values the shell hands the limiter's six parameters
     /// (`0x006c2bd0`), in the limiter's units: input gain in dB, the
     /// emphasis share, clipping, level matching, bypass, and output gain
@@ -154,13 +171,24 @@ impl Effect for Emphasizer {
         }
         self.params = params;
         self.switch = bytes[len - 1];
+        self.send_all();
         Ok(())
     }
 
-    fn set_sample_rate(&mut self, _hz: f32) {}
+    /// The limiter is set up anew at the rate, and every wheel sent again.
+    /// This allocates nothing.
+    fn set_sample_rate(&mut self, hz: f32) {
+        if hz.is_finite() && hz >= 1.0 && hz != self.hz {
+            self.hz = hz;
+            self.limiter.prepare(hz);
+            self.send_all();
+        }
+    }
 
     /// The limiter is not built: the sound passes as it is.
-    fn process(&mut self, _left: &mut [f32], _right: &mut [f32]) {}
+    fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.limiter.process(left, right);
+    }
 
     fn param_count(&self) -> usize {
         PARAMS
@@ -173,13 +201,19 @@ impl Effect for Emphasizer {
     fn set_param(&mut self, index: usize, value: f32) {
         if let Some(range) = RANGES.get(index) {
             self.params[index] = knob_value(value, *range);
+            let value = self.limiter_values()[index];
+            self.limiter.set_param(index, value);
         }
     }
 
-    fn reset(&mut self) {}
+    /// `FPD_Flush`: the limiter's delays and holds empty.
+    fn reset(&mut self) {
+        self.limiter.reset();
+    }
 
-    fn fidelity(&self) -> Fidelity {
-        Fidelity::Approximate(MISSING)
+    /// The limiter's 2 ms lookahead, which the shell reports to FL.
+    fn latency(&self) -> usize {
+        self.limiter.latency()
     }
 }
 
@@ -211,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn both_versions_load_and_the_sound_passes() {
+    fn both_versions_load_and_bypass_passes_the_sound_late() {
         let mut plugin = Emphasizer::default();
         plugin
             .set_state(&bytes(1, &[2500, 10_000, 1, 1, 0], 0))
@@ -222,11 +256,16 @@ mod tests {
             .set_state(&bytes(2, &[0, 5013, 0, 0, 1, 7000], 1))
             .unwrap();
         assert_eq!(plugin.params, [0, 5013, 0, 0, 1, 7000]);
+        // Bypassed, the dry sound comes out 2 ms late, at 0.9999.
+        assert_eq!(plugin.latency(), 88);
         let tone = sine(0.01, 500);
         let (mut l, mut r) = (tone.clone(), tone.clone());
         plugin.process(&mut l, &mut r);
-        assert_eq!((l, r), (tone.clone(), tone));
-        assert_eq!(plugin.fidelity(), Fidelity::Approximate(MISSING));
+        for (at, out) in l.iter().enumerate().skip(88) {
+            assert_eq!(*out, tone[at - 88] * 0.9999, "{at}");
+        }
+        assert_eq!(l, r);
+        assert_eq!(plugin.fidelity(), crate::Fidelity::Exact);
     }
 
     #[test]

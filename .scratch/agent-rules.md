@@ -20,6 +20,18 @@ Other agents edit other files in this same working tree right now.
 - Git is read-only for you (status, diff, log, show). The coordinator commits. Add, commit, stash, checkout, restore or reset can destroy other agents' work.
 - The repo is public on GitHub (`Staninna/fl-rs`), and people outside this tree work on it too. Before you start, run `gh issue list --state all --search "<plugin>"` and `gh pr list --state all --search "<plugin>"`, and put what you find in your report. When someone has the plugin in flight, stop and report before you write code. `gh` is read-only for you too: open, comment on or close nothing.
 
+## Worktree mode (2026-11-24 onward)
+
+When the coordinator starts you in your own git worktree (your cwd is not the main checkout), the "Shared tree" rules above give way to these:
+
+- Your worktree is yours. Commit there, atomically, as you go (`git add <files>`, `git commit`), with the attribution lines the coordinator gives you. Never push, never switch branches, never touch the main checkout or another worktree.
+- Still keep edits outside your own files minimal (registration lines, one `docs/plugins.md` row, one `port.rs` line): other agents edit the same shared files on their branches and the coordinator merges them all.
+- Leave `README.md`'s generated progress block alone; the coordinator runs `tools/progress.py`.
+- FL's install, unpacked by `tools/fl-extract.py`, is at `/root/fl-install` (also reachable as the `/shared/code/fl-studio-target/...` path the docs name). `FL_RS_CORPUS=/root/fl-install/Data`.
+- Ghidra 11.4.2: `/root/re/ghidra_11.4.2_PUBLIC/support/analyzeHeadless`, JDK 21 installed. Keep projects under `/root/ghidra-projects/<your task>/`; set `MAXMEM=2G`. Python has capstone, unicorn and pefile (`tools/plugstate/` has emulator scripts to copy).
+- The machine has 4 cores and 15 GB shared by several agents: build with `CARGO_BUILD_JOBS=2`, run the full corpus render only when you need its numbers (it takes about 4 minutes alone), and prefer `cargo test -p plugins <filter>` and single-project renders while iterating.
+- Your worktree has its own `target/`; the first build takes a while.
+
 ## Headless
 
 The user is working at this machine. Open no windows and play no sound: no `cargo run -p fl-rs`, no browsers, no wine, no GUI capture tools, no sudo.

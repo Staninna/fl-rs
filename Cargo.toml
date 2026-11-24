@@ -25,6 +25,11 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 dbg_macro = "warn"
 todo = "warn"
+# The ports index several arrays in step, in the order FL's loops do, so
+# that their sums stay bit for bit; clippy 1.100's wider range-loop and
+# as_chunks lints would have each one rewritten as an iterator.
+needless_range_loop = "allow"
+chunks_exact_to_as_chunks = "allow"
 
 # An unoptimised symphonia takes five seconds to decode the samples of a
 # demo song, and an optimised one takes one.

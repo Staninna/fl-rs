@@ -311,24 +311,28 @@ impl Highest {
     /// window that ends with it.
     pub(crate) fn push(&mut self, level: f32) -> f32 {
         let window = self.levels.len();
+        // Every place is under `window` and every sum of two under twice
+        // it, so one subtraction takes a place round: `%` without its
+        // division.
+        let wrap = |at: usize| if at >= window { at - window } else { at };
         // The level this one takes the place of has left the window.
         if self.count > 0 && self.queue[self.first] as usize == self.at {
-            self.first = (self.first + 1) % window;
+            self.first = wrap(self.first + 1);
             self.count -= 1;
         }
         // Nothing that came before and is no higher can be the highest
         // again.
         while self.count > 0 {
-            let last = (self.first + self.count - 1) % window;
+            let last = wrap(self.first + self.count - 1);
             if self.levels[self.queue[last] as usize] > level {
                 break;
             }
             self.count -= 1;
         }
-        self.queue[(self.first + self.count) % window] = self.at as u32;
+        self.queue[wrap(self.first + self.count)] = self.at as u32;
         self.count += 1;
         self.levels[self.at] = level;
-        self.at = (self.at + 1) % window;
+        self.at = wrap(self.at + 1);
         self.levels[self.queue[self.first] as usize]
     }
 }
@@ -358,7 +362,10 @@ impl Mean {
         let place = &mut self.values[self.at];
         self.sum += f64::from(value) - f64::from(*place);
         *place = value;
-        self.at = (self.at + 1) % self.values.len();
+        self.at += 1;
+        if self.at == self.values.len() {
+            self.at = 0;
+        }
         self.sum / self.values.len() as f64
     }
 }

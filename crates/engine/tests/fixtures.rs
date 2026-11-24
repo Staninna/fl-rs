@@ -1431,11 +1431,13 @@ fn fl_s_curves_track_a_note_s_key_and_velocity_into_its_pan() {
     // The middle key at the middle velocity stays in the centre.
     let new = new_channel();
     assert_gains(&out, 0, circular(0.0, new));
-    // 1200 cents of the 6000 that a whole knob pans all the way for.
-    assert_gains(&out, 24_000, circular(0.2, new));
-    // Half the volume that the note is under the middle one, to the left.
+    // A whole key knob pans all the way for an octave (1 / 307200 of a
+    // knob step a cent, `FUN_00fea360`).
+    assert_gains(&out, 24_000, circular(1.0, new));
+    // A velocity knob half way up pans by the volume the note is under the
+    // middle one (a 128th of a knob step), to the left.
     let soft = (11f64.powf(0.64) - 1.0) / 10.0 * new;
-    assert_gains(&out, 48_000, circular((soft - new) / 2.0, soft));
+    assert_gains(&out, 48_000, circular(soft - new, soft));
     assert!(out.left[48_000] > out.right[48_000]);
 
     // The other curves leave tracking out.
@@ -4067,7 +4069,7 @@ fn a_clip_on_a_generator_s_parameter_and_on_its_channel_s_volume_moves_them() {
     let out = render(&none, &dir);
     assert_eq!((out.automation_clips, out.unsupported_targets), (0, 1));
     let mut unhosted = sine_song(&[sine_note(0, BAR, 69)]);
-    unhosted.channels[1].plugin_name = Some("FLEX".to_owned());
+    unhosted.channels[1].plugin_name = Some("Soundfont Player".to_owned());
     for target in [1 << 16, (1 << 16) + PARAM] {
         let clip = add_automation(&mut unhosted, &steps, FULL);
         bind(&mut unhosted, clip, target);
@@ -4132,15 +4134,15 @@ fn a_generator_the_engine_does_not_host_is_silent_and_counted() {
     let mut song = sine_song(&notes);
     // No plugin of this name is hosted, so the channel is passed over for
     // its name and not for a state its plugin turns down.
-    assert!(plugins::generator_by_name("FLEX").is_none());
-    song.channels[1].plugin_name = Some("FLEX".to_owned());
+    assert!(plugins::generator_by_name("Soundfont Player").is_none());
+    song.channels[1].plugin_name = Some("Soundfont Player".to_owned());
     let out = render(&song, &dir);
     assert_impulses(&out.left, &[0]);
     assert_eq!((out.notes, out.voices, out.skipped), (3, 1, 1));
     assert_eq!(out.hosted_generators, 0);
     // The channel is counted once, however many notes it has.
     let unhosted: Vec<_> = out.unhosted_generators.iter().collect();
-    assert_eq!(unhosted, [(&"FLEX".to_owned(), &1)]);
+    assert_eq!(unhosted, [(&"Soundfont Player".to_owned(), &1)]);
 
     // A hosted generator that turns the channel's state down is counted
     // with the others: TestSine's level stops at 100, and its state is 4
@@ -4163,7 +4165,7 @@ fn a_generator_the_engine_does_not_host_is_silent_and_counted() {
         item: Item::Field(Id::IsEnabled),
     });
     let mut idle = sine_song(&[note(0)]);
-    idle.channels[1].plugin_name = Some("FLEX".to_owned());
+    idle.channels[1].plugin_name = Some("Soundfont Player".to_owned());
     for song in [off, idle] {
         let out = render(&song, &dir);
         assert_impulses(&out.left, &[0]);
@@ -4885,11 +4887,11 @@ fn clips_drive_an_insert_s_separation_and_eq() {
     assert_eq!(out.left[40_000], out.right[40_000]);
 }
 
-/// Channel 0 with the parts the engine leaves out in its events, at 150:
-/// an echo delay with this feedback, the five envelopes with the volume's
-/// switched on or not, key tracking of mod X by this much, and a 215
-/// whose time stretch moves the pitch by this many cents.
-fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, stretch: i32) {
+/// Channel 0 with the parts of FL's channel in its events, at 150: an
+/// echo delay with this feedback, the five envelopes with the volume's
+/// switched on or not, key tracking of mod X by this much, and a 215 with
+/// this formant, in Stretch Pro when it is off its middle.
+fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, formant: f64) {
     let channel = &mut project.channels[0];
     channel.delay = Some(layout::Delay {
         feedback,
@@ -4910,8 +4912,8 @@ fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, st
     };
     channel.tracking = vec![record(100, 0), record(60, mod_x)];
     let mut parameters = layout::Parameters::from_bytes(&[0; 168]).unwrap();
-    parameters.stretch_pitch = stretch;
-    parameters.formant = 0.5f64.to_le_bytes();
+    parameters.stretch_mode = if formant == 0.5 { 0 } else { -2 };
+    parameters.formant = formant.to_le_bytes();
     channel.parameters = Some(parameters);
     let ids = [Id::Delay, Id::Parameters, Id::Tracking, Id::Tracking]
         .into_iter()
@@ -4933,39 +4935,29 @@ fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
 
     // As a new sampler has them, none is on.
     let mut new = tone(BAR);
-    with_parts(&mut new, 0, false, 0, 0);
+    with_parts(&mut new, 0, false, 0, 0.5);
     let out = render(&new, &dir);
     assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
 
-    // Each on, the sound is the same and each is counted once.
+    // Each on, the formant alone is counted: the envelopes, the tracking
+    // and the echo delay play, and the sound is not the same. Stretch Pro
+    // on the root key with no time, pitch or multiplier plays the sample
+    // as it is, and its formant is what is left out.
     let mut on = tone(BAR);
-    with_parts(&mut on, 6400, true, 128, -1200);
+    with_parts(&mut on, 6400, true, 128, 0.75);
     let out = render(&on, &dir);
-    assert!(out.left == plain.left);
+    assert!(out.left != plain.left);
     let counted = engine::UnplayedParts {
-        envelopes: 1,
         time_stretch: 1,
-        tracking: 1,
-        echo_delay: 1,
         ts404: 0,
     };
     assert_eq!(out.unplayed_parts, counted);
-    assert_eq!(out.unplayed_parts.total(), 4);
-
-    // Tracking of mod X is played where a clip runs the filter.
-    let open = [Point::new(0.0, 1.0), Point::new(4.0, 1.0)];
-    let clip = add_automation(&mut on, &open, FULL);
-    bind(&mut on, clip, 2);
-    place(&mut on, clip, 0, BAR);
-    on.channels[0].levels = Some(filter_levels(256, 0, 0));
-    let out = render(&on, &dir);
-    assert_eq!(out.unplayed_parts.tracking, 0);
-    assert_eq!(out.unplayed_parts.echo_delay, 1);
+    assert_eq!(out.unplayed_parts.total(), 1);
 
     // A channel with no note that sounds is not counted: here its sample
     // is missing.
     let mut missing = tone(BAR);
-    with_parts(&mut missing, 6400, true, 128, -1200);
+    with_parts(&mut missing, 6400, true, 128, 0.75);
     missing.channels[0].sample_path = Some("nowhere.wav".to_owned());
     let out = render(&missing, &dir);
     assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
@@ -4980,4 +4972,143 @@ fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
     let out = render(&ts404, &dir);
     assert_eq!(out.unplayed_parts.ts404, 1);
     assert!(out.left == plain.left);
+}
+
+/// The tone fixture with channel 0's time stretch: its mode, time (an
+/// f32, in 48ths of a step), pitch in cents and multiplier.
+fn stretched(ticks: i32, mode: i32, time: f32, pitch: i32, multiplier: i32) -> Project {
+    let mut project = tone(ticks);
+    let channel = &mut project.channels[0];
+    let mut parameters = layout::Parameters::from_bytes(&[0; 168]).unwrap();
+    parameters.stretch_mode = mode;
+    parameters.stretch_time = time.to_le_bytes();
+    parameters.stretch_pitch = pitch;
+    parameters.stretch_multiplier = multiplier;
+    parameters.formant = 0.5f64.to_le_bytes();
+    channel.parameters = Some(parameters);
+    channel.order.push(Placed {
+        pos: 150,
+        item: Item::Field(Id::Parameters),
+    });
+    project
+}
+
+/// The frame after the last that sounds, and the pitch in Hz of the
+/// middle of what sounds, from its zero crossings.
+fn sounds(out: &Rendered) -> (usize, f64) {
+    let end = out
+        .left
+        .iter()
+        .rposition(|x| x.abs() > 1e-3)
+        .map_or(0, |i| i + 1);
+    let body = &out.left[end / 8..end * 7 / 8];
+    let crossings = body
+        .windows(2)
+        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+        .count();
+    (
+        end,
+        crossings as f64 * f64::from(RATE) / body.len() as f64 / 2.0,
+    )
+}
+
+#[test]
+fn a_channel_s_time_stretch_plays_fl_s_lengths_and_pitches() {
+    let dir = Dir::new("time-stretch");
+    // A second of 100 Hz, held for a bar of two seconds at 120 BPM.
+    dir.sine(48_000);
+    let near = |(end, hz): (usize, f64), want: (usize, f64)| {
+        let long = end.abs_diff(want.0) < 400;
+        assert!(
+            long && (hz - want.1).abs() < 2.0,
+            "{end} {hz}, want {want:?}"
+        );
+    };
+    let plain = render(&tone(BAR), &dir);
+    near(sounds(&plain), (48_000, 100.0));
+    let play = |mode, time, pitch, multiplier| {
+        let out = render(&stretched(BAR, mode, time, pitch, multiplier), &dir);
+        assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
+        assert!(out.left.iter().all(|x| x.is_finite()));
+        sounds(&out)
+    };
+    // Resample: the stretch pitch shifts the sample and keeps its length,
+    // the multiplier slows it down.
+    near(play(0, 0.0, -1200, 0), (48_000, 50.0));
+    near(play(0, 0.0, 0, 10_000), (96_000, 50.0));
+    // Stretch: twice as long at the same pitch, and an octave down at the
+    // same length.
+    near(play(-1, 0.0, 0, 10_000), (96_000, 100.0));
+    near(play(-1, 0.0, -1200, 0), (48_000, 50.0));
+    // A time of 192 is a beat, half a second here: e3 stretches the sample
+    // to it and keeps the pitch, Resample plays it that fast.
+    near(play(1, 192.0, 0, 0), (24_000, 100.0));
+    near(play(0, 192.0, 0, 0), (24_000, 200.0));
+    // Stretch on a key an octave up keeps the length.
+    let mut up = stretched(BAR, -1, 0.0, 0, 0);
+    up.patterns[0].notes[0].key = 72;
+    near(sounds(&render(&up, &dir)), (48_000, 200.0));
+}
+
+#[test]
+fn an_echo_delay_plays_a_note_again_quieter_each_time() {
+    let dir = Dir::new("echo-delay");
+    let mut song = one_click();
+    // Half as loud each time, three times, three sixteenths apart: 72
+    // ticks of 250 samples.
+    song.channels[0].delay = Some(layout::Delay {
+        feedback: 6400,
+        pan: 6400,
+        pitch: 0,
+        echoes: 3,
+        time: 144,
+    });
+    song.channels[0].order.push(Placed {
+        pos: 150,
+        item: Item::Field(Id::Delay),
+    });
+    let out = render(&song, &dir);
+    assert_eq!(impulses(&out.left), [0, 18_000, 36_000, 54_000]);
+    let heard = [0, 18_000, 36_000, 54_000].map(|at| out.left[at]);
+    assert_eq!(heard, [1.0, 0.5, 0.25, 0.125]);
+    assert_eq!(out.left, out.right);
+    // A feedback of 0 echoes nothing.
+    song.channels[0].delay.as_mut().unwrap().feedback = 0;
+    assert_eq!(impulses(&render(&song, &dir).left), [0]);
+}
+
+#[test]
+fn a_volume_envelope_shapes_a_note_and_rings_past_its_end() {
+    let dir = Dir::new("volume-envelope");
+    dir.tone(2 * 96_000);
+    let plain = render(&tone(BEAT), &dir);
+    // The note is cut at its end, and the render with it.
+    assert_eq!((plain.left.len(), plain.left[23_999]), (24_000, 1.0));
+    let mut song = tone(BEAT);
+    // At once to the top and down to half, then a release of 10 ticks.
+    let mut records = vec![layout::EnvelopeLfo::from_bytes(&[0; 68]).unwrap(); 5];
+    let volume = &mut records[1];
+    (volume.flags, volume.enabled) = (4, 1);
+    (volume.attack, volume.hold, volume.decay) = (100, 100, 100);
+    (volume.sustain, volume.release) = (64, 5_648);
+    song.channels[0].envelopes = records;
+    for _ in 0..5 {
+        song.channels[0].order.push(Placed {
+            pos: 150,
+            item: Item::Field(Id::EnvelopeLFO),
+        });
+    }
+    let out = render(&song, &dir);
+    // Half as loud for the note's length, at once.
+    assert!((0..24_000).all(|at| out.left[at] == 0.5 * plain.left[at]));
+    // Then the release takes it down over the ticks after the note off,
+    // and the voice ends at the end of the tick that gets it there.
+    assert!(out.left[24_100] > 0.0 && out.left[24_100] < 0.5);
+    let last = out.left.iter().rposition(|v| *v != 0.0).unwrap() + 1;
+    assert!(
+        (24_000 + 4 * 250..24_000 + 8 * 250).contains(&last),
+        "{last}"
+    );
+    assert_eq!(last % 250, 0, "{last}");
+    assert!(out.left[24_000..last].windows(2).all(|w| w[1] <= w[0]));
 }

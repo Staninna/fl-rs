@@ -8,9 +8,18 @@
 //! worker the same job, runs it on the calling thread too, and returns
 //! once every worker is out of it, so the job may borrow from the caller's
 //! stack. Nothing here allocates once the pool is up.
+//!
+//! The same workers also lend a hand to a plugin that renders its voices
+//! side by side ([`plugins::Workers`]): such a plugin, on whatever thread
+//! it plays, puts its job on a desk of the pool's board, runs it itself,
+//! and waits only for the calls of it that other threads have already
+//! taken. A worker between rounds, or the caller of [`Pool::run`] while
+//! it waits for the workers, takes such a call. Nobody ever waits for a
+//! call that has not started, so a plugin playing on a worker in the
+//! middle of a round cannot lock the pool up.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread::{self, Thread};
 
@@ -39,6 +48,89 @@ struct Shared {
     running: AtomicUsize,
     /// Whether a worker's call of the job panicked.
     panicked: AtomicBool,
+    /// The plugins' jobs that are open for any idle thread to join.
+    board: Board,
+}
+
+/// How many plugins can share their voices out at once. One more waits
+/// for no desk: it renders its voices on its own thread.
+const DESKS: usize = 8;
+
+/// The low half of [`Desk::calls`]: how many more calls of the job other
+/// threads may take.
+const LEFT: u64 = 0xffff_ffff;
+/// One call running, in the high half of [`Desk::calls`].
+const RUNNING: u64 = 1 << 32;
+
+/// One plugin's open job.
+struct Desk {
+    /// The plugin that has the desk.
+    taken: AtomicBool,
+    /// The calls the job may still take ([`LEFT`]) and the calls of it
+    /// running on other threads ([`RUNNING`]), in one word so that a
+    /// thread joins only a job that is still open, and the plugin knows
+    /// when the last one is out.
+    calls: AtomicU64,
+    job: Mutex<Option<Job>>,
+    panicked: AtomicBool,
+}
+
+struct Board {
+    desks: [Desk; DESKS],
+    /// How many desks have a job open, so that an idle thread looks at
+    /// one word and not at every desk.
+    open: AtomicUsize,
+}
+
+impl Board {
+    fn new() -> Self {
+        Board {
+            desks: std::array::from_fn(|_| Desk {
+                taken: AtomicBool::new(false),
+                calls: AtomicU64::new(0),
+                job: Mutex::new(None),
+                panicked: AtomicBool::new(false),
+            }),
+            open: AtomicUsize::new(0),
+        }
+    }
+
+    /// Take one call of an open job and run it. Whether there was one.
+    fn help(&self) -> bool {
+        if self.open.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        for desk in &self.desks {
+            let mut calls = desk.calls.load(Ordering::Acquire);
+            while calls & LEFT != 0 {
+                let joined = calls - 1 + RUNNING;
+                match desk.calls.compare_exchange_weak(
+                    calls,
+                    joined,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        let job = *lock(&desk.job);
+                        if let Some(Job(job)) = job {
+                            #[allow(unsafe_code)]
+                            // SAFETY: `Pool::fan` keeps the closure alive
+                            // until no call is running, and this one is
+                            // counted until the decrement below.
+                            let job = unsafe { &*job };
+                            if catch_unwind(AssertUnwindSafe(job)).is_err() {
+                                desk.panicked.store(true, Ordering::Release);
+                            }
+                        }
+                        desk.calls.fetch_sub(RUNNING, Ordering::AcqRel);
+                        return true;
+                    }
+                    Err(now) => calls = now,
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Worker threads, and a lock that lets one caller at a time hand them a
@@ -59,7 +151,14 @@ impl Pool {
             round: AtomicUsize::new(0),
             running: AtomicUsize::new(0),
             panicked: AtomicBool::new(false),
+            board: Board::new(),
         });
+        // On macOS a `Mutex` allocates its pthread mutex on its first lock,
+        // so every lock the audio path takes is taken once here.
+        drop(lock(&shared.job));
+        for desk in &shared.board.desks {
+            drop(lock(&desk.job));
+        }
         let threads = (0..workers)
             .filter_map(|n| {
                 let shared = Arc::clone(&shared);
@@ -68,10 +167,12 @@ impl Pool {
                 worker.ok().map(|handle| handle.thread().clone())
             })
             .collect();
+        let busy = Mutex::new(());
+        drop(lock(&busy));
         Pool {
             shared,
             threads,
-            busy: Mutex::new(()),
+            busy,
         }
     }
 
@@ -112,7 +213,10 @@ impl Pool {
         // A panic here waits for the workers too before it goes on up.
         let mine = catch_unwind(AssertUnwindSafe(job));
         while shared.running.load(Ordering::Acquire) != 0 {
-            std::hint::spin_loop();
+            // A plugin on a worker may be sharing its voices out.
+            if !shared.board.help() {
+                std::hint::spin_loop();
+            }
         }
         *lock(&shared.job) = None;
         if let Err(panic) = mine {
@@ -122,6 +226,75 @@ impl Pool {
             panic!("a mixer worker panicked");
         }
     }
+}
+
+impl plugins::Workers for Pool {
+    fn helpers(&self) -> usize {
+        self.threads.len()
+    }
+
+    fn run(&self, helpers: usize, job: &(dyn Fn() + Sync)) {
+        self.fan(helpers, job);
+    }
+}
+
+impl Pool {
+    /// Open `job` to up to `helpers` threads of the pool besides this one,
+    /// run it here, and return once every call of it is over. The workers
+    /// join it between rounds; with none free, or no desk free, it runs
+    /// here alone.
+    fn fan(&self, helpers: usize, job: &(dyn Fn() + Sync)) {
+        let helpers = helpers.min(self.threads.len());
+        let board = &self.shared.board;
+        let free = |desk: &&Desk| {
+            let taken = &desk.taken;
+            let won = taken.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed);
+            won.is_ok()
+        };
+        let Some(desk) = (helpers > 0)
+            .then(|| board.desks.iter().find(free))
+            .flatten()
+        else {
+            return job();
+        };
+        #[allow(unsafe_code)]
+        // SAFETY: only the lifetime changes. The pointer is taken back out
+        // of the desk below, after no call of it is running and none can
+        // start, and `job` outlives this call.
+        let erased: *const (dyn Fn() + Sync + 'static) = unsafe {
+            std::mem::transmute::<*const (dyn Fn() + Sync + '_), *const (dyn Fn() + Sync + 'static)>(
+                job,
+            )
+        };
+        *lock(&desk.job) = Some(Job(erased));
+        desk.calls.store(helpers as u64, Ordering::Release);
+        board.open.fetch_add(1, Ordering::AcqRel);
+        for thread in &self.threads {
+            thread.unpark();
+        }
+        let mine = catch_unwind(AssertUnwindSafe(job));
+        // Close the job to latecomers, and wait for those in it.
+        desk.calls.fetch_and(!LEFT, Ordering::AcqRel);
+        board.open.fetch_sub(1, Ordering::AcqRel);
+        while desk.calls.load(Ordering::Acquire) != 0 {
+            std::hint::spin_loop();
+        }
+        *lock(&desk.job) = None;
+        let panicked = desk.panicked.swap(false, Ordering::AcqRel);
+        desk.taken.store(false, Ordering::Release);
+        if let Err(panic) = mine {
+            std::panic::resume_unwind(panic);
+        }
+        if panicked {
+            panic!("a voice worker panicked");
+        }
+    }
+}
+
+/// The pool as the generators take it, when it has workers.
+pub(crate) fn workers() -> Option<&'static dyn plugins::Workers> {
+    let pool = shared();
+    (pool.workers() > 0).then_some(pool as &dyn plugins::Workers)
 }
 
 /// The process's pool, with as many workers as `FL_RS_THREADS` says or one
@@ -169,7 +342,9 @@ fn work(shared: &Shared) {
                 seen = round;
                 break;
             }
-            if spins < SPIN {
+            if shared.board.help() {
+                spins = 0;
+            } else if spins < SPIN {
                 spins += 1;
                 std::hint::spin_loop();
             } else {
@@ -206,6 +381,44 @@ mod tests {
                 }
             });
             assert!(pieces.iter().all(|n| *n == round));
+        }
+    }
+
+    #[test]
+    fn a_job_fanned_out_from_inside_a_round_takes_every_piece_once() {
+        use plugins::Workers;
+        let pool = Pool::new(3);
+        let mut pieces = [[0u32; 40]; 6];
+        for round in 1..=50 {
+            // Each strip of the round fans its own pieces out, as a
+            // plugin on a worker does with its voices.
+            let strips = Mutex::new(pieces.iter_mut());
+            pool.run(&|| {
+                while let Some(strip) = lock(&strips).next() {
+                    let left = Mutex::new(strip.iter_mut());
+                    pool.run_fanned(&left);
+                }
+            });
+            assert!(pieces.iter().flatten().all(|n| *n == round));
+            // And from outside a round.
+            let left = Mutex::new(pieces.iter_mut().flatten());
+            Workers::run(&pool, 3, &|| {
+                while let Some(piece) = lock(&left).next() {
+                    *piece += 1;
+                }
+            });
+            assert!(pieces.iter().flatten().all(|n| *n == round + 1));
+            pieces.iter_mut().flatten().for_each(|n| *n -= 1);
+        }
+    }
+
+    impl Pool {
+        fn run_fanned<'a>(&self, left: &Mutex<impl Iterator<Item = &'a mut u32> + Send>) {
+            plugins::Workers::run(self, 3, &|| {
+                while let Some(piece) = lock(left).next() {
+                    *piece += 1;
+                }
+            });
         }
     }
 

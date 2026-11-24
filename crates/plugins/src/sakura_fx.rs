@@ -183,15 +183,15 @@ struct Half {
 /// is a phase from 0 to 1; what is written in one turn is read in the
 /// next, at the same phase.
 #[derive(Debug, Clone, Default)]
-struct Stamped {
+pub(crate) struct Stamped {
     halves: [Half; 2],
     /// Which half is written to.
     write: usize,
-    phase: f64,
+    pub(crate) phase: f64,
 }
 
 impl Stamped {
-    fn new(points: usize) -> Self {
+    pub(crate) fn new(points: usize) -> Self {
         let half = || Half {
             value: vec![0.0; points + 256],
             stamp: vec![0.0; points + 256],
@@ -205,7 +205,7 @@ impl Stamped {
         }
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         for half in &mut self.halves {
             half.value.fill(0.0);
             half.stamp.fill(0.0);
@@ -215,7 +215,7 @@ impl Stamped {
     }
 
     /// What was written a turn ago, between the samples either side.
-    fn read(&mut self) -> f32 {
+    pub(crate) fn read(&mut self) -> f32 {
         let phase = self.phase;
         let half = &mut self.halves[1 - self.write];
         if half.count == 0 {
@@ -245,7 +245,7 @@ impl Stamped {
 
     /// Move the phase on by `step` and write `value` at it, turning over
     /// to the other half at 1.
-    fn write(&mut self, value: f32, step: f64) {
+    pub(crate) fn write(&mut self, value: f32, step: f64) {
         self.phase += step;
         if self.phase >= 1.0 {
             let (w, r) = (self.write, 1 - self.write);
@@ -273,7 +273,7 @@ impl Stamped {
 /// The step a line of `points` moves by for a delay of `position` of its
 /// length (`0x1800257e0`, `0x180023d50`): `position * (points - 2) + 2`
 /// samples.
-fn step_for(position: f64, points: f64) -> f64 {
+pub(crate) fn step_for(position: f64, points: f64) -> f64 {
     let position = position.clamp(0.0, 0.99);
     let two = 2.0 / points;
     1.0 / ((position * (1.0 - two) + two) * points)
@@ -530,6 +530,16 @@ impl Chorus {
         self.depth = v;
         for line in &mut self.lines {
             line.set_depth(f64::from(v * v * v));
+        }
+    }
+
+    /// The depth as PoiZone's chorus takes it (`0x180026bf0` there): the
+    /// cube in f64.
+    pub(crate) fn set_depth_f64(&mut self, v: f32) {
+        self.depth = v;
+        let d = f64::from(v);
+        for line in &mut self.lines {
+            line.set_depth(d * d * d);
         }
     }
 

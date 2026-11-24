@@ -22,11 +22,11 @@ The app as it looks now, playing FL's Future House demo song. `crates/ui/tests/s
 <!-- progress:start -->
 | FL's own plugins | done | of | |
 |---|---:|---:|---|
-| Instruments rebuilt | 32 | 51 | `█████████████░░░░░░░` 62% |
-| Effects rebuilt | 69 | 90 | `███████████████░░░░░` 76% |
-| Rebuilt and proven to sound identical to FL | 0 | 101 | `░░░░░░░░░░░░░░░░░░░░` 0% |
-| Rebuilt with nothing known to be missing | 41 | 101 | `████████░░░░░░░░░░░░` 40% |
-| Rebuilt and documented | 101 | 101 | `████████████████████` 100% |
+| Instruments rebuilt | 37 | 51 | `███████████████░░░░░` 72% |
+| Effects rebuilt | 73 | 90 | `████████████████░░░░` 81% |
+| Rebuilt and proven to sound identical to FL | 0 | 110 | `░░░░░░░░░░░░░░░░░░░░` 0% |
+| Rebuilt with nothing known to be missing | 41 | 110 | `███████░░░░░░░░░░░░░` 37% |
+| Rebuilt and documented | 110 | 110 | `████████████████████` 100% |
 
 Rebuilt means read out of FL's plugin binary and written again in Rust. No
 plugin is proven identical yet: that needs a null test against FL's own
@@ -34,11 +34,11 @@ render. The levels are explained under the plugin list below.
 
 | The 165 projects that come with FL | done | of | |
 |---|---:|---:|---|
-| Projects that make any sound | 123 | 165 | `███████████████░░░░░` 74% |
-| Projects that play with nothing missing | 92 | 165 | `███████████░░░░░░░░░` 55% |
-| Plugins they load that are rebuilt | 973 | 1006 | `███████████████████░` 96% |
-| Instrument channels with notes that play | 210 | 227 | `███████████████████░` 92% |
-| Mixer effects that run, on tracks audio reaches | 1112 | 1117 | `████████████████████` 99% |
+| Projects that make any sound | 127 | 165 | `███████████████░░░░░` 76% |
+| Projects that play with nothing missing | 99 | 165 | `████████████░░░░░░░░` 60% |
+| Plugins they load that are rebuilt | 998 | 1006 | `████████████████████` 99% |
+| Instrument channels with notes that play | 227 | 227 | `████████████████████` 100% |
+| Mixer effects that run, on tracks audio reaches | 1145 | 1145 | `████████████████████` 100% |
 | Projects saved back unchanged, byte for byte | 165 | 165 | `████████████████████` 100% |
 
 These count only what FL's own projects contain, so 100% here is not 100%
@@ -71,9 +71,9 @@ most first:
 
 - **Identical** (0), a null test against FL's own render matches sample for sample: none yet.
 - **Exact** (41), every part read from the binary and rebuilt, nothing known to be missing: Fruity Limiter, Maximus, Fruity Reeverb 2, Fruity Delay 3, Fruity WaveShaper, Fruity Stereo Shaper, Fruity Soft Clipper, Fruity PanOMatic, Fruity Flangus, Fruity Fast Dist, Fruity Delay 2, Fruity Compressor, Transient Processor, Fruity Balance, Fruity Multiband Compressor, Fruity Blood Overdrive, Fruity Chorus, Fruity Stereo Enhancer, Spreader, Wave Candy, Fruity NoteBook 2, Fruity Filter, Fruity Flanger, Fruity Parametric EQ, Fruity Phaser, Low Lifter, BassDrum, Fruity Fast LP, Fruity Free Filter, Fruity NoteBook, Fruity Bass Boost, Fruity Delay, Fruity HTML NoteBook, Fruity Reeverb, Fruity Squeeze, Fruity dB Meter, Razer Chroma, Fruity 7 Band EQ, Fruity Center, Fruity Mute 2, Fruity Phase Inverter.
-- **Exact with gaps** (56), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, 3x Osc, Fruity Peak Controller, Sytrus, Harmless, FPC, Fruity Love Philter, DirectWave, Slicex, Control Surface, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Patcher effect, Patcher generator, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, ZGameEditor Visualizer, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Emphasis, Vintage Chorus, Fruity Slicer, GMS, Edison, Frequency Shifter, Morphine, Frequency Splitter, Fruity X-Y Controller, BooBass, Fruit Kick, Fruity Envelope Controller, Kepler, Sakura, Fruity Wrapper effect, Drumpad, Fruity Granulizer, Minisynth, Wave Traveller, Emphasizer, Fruity Formula Controller, Fruity Send, Vintage Phaser, BeepMap, Drumaxx, Fruity DrumSynth Live, Fruity Keyboard Controller, Fruity X-Y-Z Controller, FL Slayer, Fruity Slicer 2.
-- **Approximate** (4), the sound itself is an approximation: Harmor, Autogun, Ogun, Kepler Exo.
-- **Not rebuilt** (11), with how many of FL's projects use each: FLEX (15), Distructor (3), MIDI Out (3), Hardcore (2), Transporter (2), Fruity Wrapper generator (2), Toxic Biohazard (2), Fruity Scratcher (1), Fruity Vocoder (1), Fruity Voltage Controller (1), PoiZone (1). 29 more no project uses.
+- **Exact with gaps** (64), exact but for the parts its row in `docs/plugins.md` names as approximate or left out: Fruity Parametric EQ 2, 3x Osc, Fruity Peak Controller, Sytrus, Harmless, FPC, Fruity Love Philter, DirectWave, Slicex, Control Surface, Pitcher, Gross Beat, Fruity Delay Bank, Effector, Patcher effect, Patcher generator, Soundgoodizer, Vocodex, Fruity Convolver, Luxeverb, ZGameEditor Visualizer, FL Keys, EQUO, Hyper Chorus, Pitch Shifter, Fruity DX10, Emphasis, Vintage Chorus, Fruity Slicer, GMS, Edison, Frequency Shifter, Morphine, Distructor, Frequency Splitter, Fruity X-Y Controller, BooBass, Fruit Kick, Fruity Envelope Controller, Kepler, Sakura, Fruity Wrapper effect, Hardcore, Transporter, Drumpad, Fruity Granulizer, Minisynth, Wave Traveller, Emphasizer, Fruity Formula Controller, Fruity Send, Fruity Vocoder, Vintage Phaser, BeepMap, Drumaxx, Fruity DrumSynth Live, Fruity Keyboard Controller, Fruity Voltage Controller, PoiZone, Fruity X-Y-Z Controller, FL Slayer, Fruity Slicer 2, Sawer, SimSynth.
+- **Approximate** (5), the sound itself is an approximation: Harmor, FLEX, Autogun, Ogun, Kepler Exo.
+- **Not rebuilt** (4), with how many of FL's projects use each: MIDI Out (3), Fruity Wrapper generator (2), Toxic Biohazard (2), Fruity Scratcher (1). 27 more no project uses.
 
 The levels live in `crates/plugins/src/port.rs`, and CI fails when it and
 `docs/plugins.md` disagree on what is rebuilt.
@@ -110,7 +110,11 @@ This repo holds none of Image-Line's files. The corpus tests, the corpus render,
 
        WINEPREFIX="$HOME/fl-studio" wine flstudio_win64_26.1.7.5654.exe
 
-   FL then sits in `$HOME/fl-studio/drive_c/Program Files/Image-Line/FL Studio 2026`. The installer is NSIS in a form 7-Zip cannot unpack, so installing it is the only way in.
+   FL then sits in `$HOME/fl-studio/drive_c/Program Files/Image-Line/FL Studio 2026`. Or skip Wine and unpack the installer directly, which needs only Python:
+
+       python3 -I tools/fl-extract.py flstudio_win64_26.1.7.5654.exe "$HOME/fl-studio-26"
+
+   The installer is NSIS with two changes that stop 7-Zip (8 bytes of padding after the first header, and script entries of 9 words where stock NSIS has 7); the script reads past both and writes the install directory as the installer would.
 3. Check that its `Data/` directory is the one this repo is pinned to:
 
        tools/check-corpus.sh "<FL Studio>/Data"

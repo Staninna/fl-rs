@@ -265,6 +265,19 @@ Effects (addresses): reverb `FUN_00841060` (process) / `FUN_00841020`
 `MixEQType` low shelf / peaking / high shelf per band); chorus in the main
 part recompute `FUN_0086a130`.
 
+The port renders the voices on the host's workers
+(`Generator::set_workers`, `crates/plugins/src/workers.rs`) when it can do
+so without changing a bit: each voice keeps what it would add to the dry
+and send buses, row by row heard, and the plugin adds them in its voice
+order and row order afterwards. A unison that shares its filters renders
+on one thread, its slaves and then its master. A block renders on one
+thread when a voice starts (it takes a band-limited copy from the shared
+pool), an operator is plucked (it takes and plays a string from the
+shared pool), or a master of a shared unison is released: it may end
+before it has taken what its slaves summed for it, and the voice loop
+hands what is left to the next master that renders, as it does on one
+thread.
+
 ## 4. What an implementation needs next
 
 1. `FUN_00870820` (the per-operator tick kernel: FM / RM input summing,

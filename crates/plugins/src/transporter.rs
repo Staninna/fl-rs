@@ -1,15 +1,14 @@
-//! Transporter: the shell of it only, its state and what it hands the
-//! engine, as `docs/plugins/transporter.md` has it. It is no
-//! [`crate::Effect`] yet and nothing hosts it.
+//! Transporter: FL's transient looper, as `docs/plugins/transporter.md`
+//! has it.
 //!
-//! `Transporter_x64.dll` is a Delphi shell. The sound is made by
-//! `TransientLooper`, an object it gets from `TransientLooper_CreateInstance`
-//! in `Shared/ildsp_x64.dll`: a looper that cuts the input at its
+//! `Transporter_x64.dll` is a Delphi shell ([`Shell`]: the state, and the
+//! values it hands its engine). The sound is made by `TransientLooper`,
+//! an object it gets from `TransientLooper_CreateInstance` in
+//! `Shared/ildsp_x64.dll`: a Faust program that cuts the input at its
 //! transients (or on the song's beat) into two loops, A and B, and plays
-//! them back reversed, an octave up or down and panned, at random or in
-//! turn. The install this was read from has no `Shared/` directory, so
-//! that object is not mapped; `.scratch/notes/transporter.md` says what
-//! is left.
+//! them back reversed, an octave up or down and panned, by chance or in
+//! turn, under the dry signal. `transient_looper.rs` rebuilds it, matched
+//! to the DLL's own code under an emulator.
 //!
 //! The state is a little-endian i32 version, 8 the newest FL reads, and
 //! the 22 parameters as i32 (20 under version 8), then a byte for "Flush
@@ -35,8 +34,18 @@
 //! | 21 Ignore bias | 0 to 10000 | `v` |
 //!
 //! `v` is the wheel over its range, from 0 to 1.
+//!
+//! # Sound
+//!
+//! The shell's `Eff_Render` (`0x00714700`) hands the engine the block,
+//! the transient source (the input send track's sound, or its own input
+//! when it has none), and the place in a 4-beat bar, which only Tempo mode
+//! with a ratio trigger reads; the engine writes the block back and its
+//! two loops to the second output, which goes to the output send track.
+//! The engine is late by its 5 ms lookahead, which the shell reports.
 
-use crate::StateError;
+use crate::transient_looper::TransientLooper;
+use crate::{Effect, Fidelity, Sidechain, StateError, knob_value};
 
 /// The plugin's event 201 name.
 pub const NAME: &str = "Transporter";
@@ -71,11 +80,11 @@ pub const RANGES: [(i32, i32); PARAMS] = [
 ];
 
 /// The parameters of the render-test project, which a new plugin saves.
-/// The last two are not in a state of that version: 20 is the editor's
-/// default, as the engine's own is not known, and 21 is what the loader
+/// The last two are not in a state of that version: 20 is the engine's
+/// default (its tempo multiplier's 21, Off), and 21 is what the loader
 /// sets for an older state.
 pub const DEFAULTS: [i32; PARAMS] = [
-    12_800, 12_800, 12_800, 0, 0, 0, 512, 500, 8, 512, 512, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    12_800, 12_800, 12_800, 0, 0, 0, 512, 500, 8, 512, 512, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0,
 ];
 
 /// The newest version FL reads, and the one it writes.
@@ -89,7 +98,7 @@ const LEN: usize = 4 + 4 * PARAMS + 2 + 4 * 4;
 
 /// What the plugin keeps from its state.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Transporter {
+pub struct Shell {
     /// The parameters, as the controls have them.
     pub params: [i32; PARAMS],
     /// "Flush on pause/stop".
@@ -107,7 +116,7 @@ pub struct Transporter {
     pub sidechain_in: i32,
 }
 
-impl Default for Transporter {
+impl Default for Shell {
     /// As the constructor (`FUN_00712760`) leaves the shell.
     fn default() -> Self {
         Self {
@@ -128,7 +137,7 @@ fn word(bytes: &[u8], at: usize) -> Option<i32> {
     Some(i32::from_le_bytes(word.try_into().ok()?))
 }
 
-impl Transporter {
+impl Shell {
     /// Take the bytes of the plugin's event 213 as `SaveRestoreState`
     /// (`FUN_00713760`) reads them. A version over 8 is left alone. What a
     /// short state lacks stays as it was, as FL's stream reads leave it,
@@ -197,7 +206,7 @@ impl Transporter {
 /// A control's value over its range, from 0 to 1, as the shell works it
 /// out in doubles and hands it on as an f32.
 fn normal(value: i32, (min, max): (i32, i32)) -> f32 {
-    let v = f64::from(value - min) * (1.0 / f64::from(max - min));
+    let v = (f64::from(value) - f64::from(min)) * (1.0 / f64::from(max - min));
     v.clamp(0.0, 1.0) as f32
 }
 
@@ -218,15 +227,211 @@ fn level(v: f32) -> f32 {
     }
 }
 
+/// The longest block the plugin keeps its second output for without
+/// asking for memory. A longer one asks once.
+const ROOM: usize = 0x4000;
+
+/// Transporter, the shell over its engine.
+pub struct Transporter {
+    shell: Shell,
+    engine: Box<TransientLooper>,
+    hz: f32,
+    ppq: u16,
+    /// The place in a 4-beat bar the shell hands the engine, in beats.
+    beat: f32,
+    /// Flush as last sent (`0x130`), -1 before.
+    flush: i32,
+    side: Sidechain,
+    aux: [Vec<f32>; 2],
+}
+
+impl Default for Transporter {
+    /// A new plugin at 44.1 kHz: the render test's state. This allocates
+    /// the loops, 20 seconds each.
+    fn default() -> Self {
+        let mut plugin = Transporter {
+            shell: Shell::default(),
+            engine: Box::new(TransientLooper::new()),
+            hz: 44_100.0,
+            ppq: 96,
+            beat: 0.0,
+            flush: -1,
+            side: Sidechain::default(),
+            aux: [Vec::with_capacity(ROOM), Vec::with_capacity(ROOM)],
+        };
+        plugin.engine.set_rate(plugin.hz);
+        plugin.apply();
+        plugin
+    }
+}
+
+impl Transporter {
+    /// `ProcessParam` hands the engine parameter `index`. Flush goes only
+    /// when it has changed and Bypass is off.
+    fn send(&mut self, index: usize) {
+        if index == 12 {
+            let value = self.shell.params[12];
+            if self.shell.params[14] != 0 || value == self.flush {
+                return;
+            }
+            self.flush = value;
+        }
+        let value = self.shell.engine_value(index);
+        self.engine.set_param(index, value);
+    }
+
+    /// What a load does after the state is read: the transient source and
+    /// the architecture, then every parameter.
+    fn apply(&mut self) {
+        self.engine
+            .set_param(24, self.shell.transient_source as f32);
+        self.engine.set_param(25, self.shell.architecture as f32);
+        for index in 0..PARAMS {
+            self.send(index);
+        }
+    }
+
+    /// Whether the tempo's beat starts loops: Tempo mode with a ratio
+    /// trigger that is not Off.
+    fn on_the_beat(&self) -> bool {
+        self.shell.params[13] == 3 && self.shell.params[20] != 21
+    }
+}
+
+impl Effect for Transporter {
+    /// The loops keep their sound, as FL's do.
+    fn set_state(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        self.shell.set_state(bytes)?;
+        self.apply();
+        Ok(())
+    }
+
+    /// The engine anew at the rate, which empties the loops and turns its
+    /// lookahead on, then the state's source and architecture again
+    /// (`inferred`: the shell's rate handler is not read). This allocates.
+    fn set_sample_rate(&mut self, hz: f32) {
+        if hz.is_finite() && hz >= 1.0 && hz != self.hz {
+            self.hz = hz;
+            self.engine.set_rate(hz);
+            self.engine
+                .set_param(24, self.shell.transient_source as f32);
+            self.engine.set_param(25, self.shell.architecture as f32);
+        }
+    }
+
+    /// Engine parameter 22, which Tempo mode's loop length follows.
+    fn set_tempo(&mut self, bpm: f64) {
+        if bpm > 0.0 && bpm.is_finite() {
+            self.engine.set_param(22, bpm as f32);
+        }
+    }
+
+    fn set_ppq(&mut self, ppq: u16) {
+        if ppq > 0 {
+            self.ppq = ppq;
+        }
+    }
+
+    /// The song's place in ticks over the PPQ and 4, its fraction times 4:
+    /// the beat in the bar, which the shell fills the engine's beat input
+    /// with for the block (`inferred`: the fill routine is not read).
+    fn tick(&mut self, ppq_tick: u64, _tempo: f64) {
+        let bars = ppq_tick as f64 / f64::from(self.ppq) / 4.0;
+        self.beat = (bars.fract() * 4.0) as f32;
+    }
+
+    fn follows_song(&self) -> bool {
+        self.on_the_beat()
+    }
+
+    fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let len = left.len().min(right.len());
+        let (left, right) = (&mut left[..len], &mut right[..len]);
+        let [aux_l, aux_r] = &mut self.aux;
+        aux_l.resize(len, 0.0);
+        aux_r.resize(len, 0.0);
+        let side = (self.shell.sidechain_in > 0 && self.side.left.len() >= len)
+            .then(|| (&self.side.left[..len], &self.side.right[..len]));
+        self.engine
+            .render(left, right, side, self.beat, (aux_l, aux_r));
+        self.side.clear();
+    }
+
+    fn param_count(&self) -> usize {
+        PARAMS
+    }
+
+    fn param(&self, index: usize) -> f32 {
+        self.shell
+            .params
+            .get(index)
+            .map_or(0.0, |value| *value as f32)
+    }
+
+    fn set_param(&mut self, index: usize, value: f32) {
+        if let Some(range) = RANGES.get(index) {
+            self.shell.params[index] = knob_value(value, *range);
+            self.send(index);
+        }
+    }
+
+    /// The song stops: with "Flush on pause/stop" the engine is flushed
+    /// and both loops fade out and empty (`FUN_007133a0`).
+    fn reset(&mut self) {
+        self.side.clear();
+        if self.shell.flush_on_stop {
+            self.engine.clear();
+            self.engine.set_param(12, 1.0);
+        }
+    }
+
+    fn fidelity(&self) -> Fidelity {
+        if self.on_the_beat() {
+            Fidelity::Approximate(
+                "Transporter's tempo trigger reads the bar's place once a block, as inferred",
+            )
+        } else {
+            Fidelity::Exact
+        }
+    }
+
+    fn latency(&self) -> usize {
+        self.engine.latency()
+    }
+
+    fn max_latency(&self) -> usize {
+        self.engine.max_latency()
+    }
+
+    fn aux_output(&self) -> Option<(&[f32], &[f32])> {
+        (self.shell.sidechain_out > 0).then(|| (self.aux[0].as_slice(), self.aux[1].as_slice()))
+    }
+
+    fn sidechain_output(&self) -> usize {
+        self.shell.sidechain_out.max(0) as usize
+    }
+
+    fn sidechain_input(&self) -> usize {
+        self.shell.sidechain_in.max(0) as usize
+    }
+
+    fn set_sidechain(&mut self, index: usize, left: &[f32], right: &[f32]) {
+        if index > 0 && index == self.sidechain_input() {
+            self.side.keep(left, right);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::{corpus, every_preset, presets, projects, state};
+    use crate::{Effect, Fidelity};
 
     #[test]
     fn the_levels_follow_fl_s_volume_curve() {
         let at = |value: i32| {
-            let mut plugin = Transporter::default();
+            let mut plugin = Shell::default();
             plugin.params[0] = value;
             plugin.engine_value(0)
         };
@@ -239,7 +444,7 @@ mod tests {
 
     #[test]
     fn the_other_wheels_scale_as_the_shell_scales_them() {
-        let mut plugin = Transporter::default();
+        let mut plugin = Shell::default();
         assert!((plugin.engine_value(7) - 0.5).abs() < 1e-6);
         assert_eq!(plugin.engine_value(8), 3.0);
         assert_eq!(plugin.engine_value(6), 0.0);
@@ -254,7 +459,7 @@ mod tests {
 
     #[test]
     fn a_short_state_leaves_what_it_lacks() {
-        let mut plugin = Transporter::default();
+        let mut plugin = Shell::default();
         plugin.params[20] = 7;
         plugin.params[21] = 3000;
         plugin.transient_source = 0;
@@ -274,6 +479,70 @@ mod tests {
         assert_eq!(plugin, before);
     }
 
+    /// Bursts of noise a quarter second apart over a quiet tone.
+    fn bursts(len: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut seed = 1u32;
+        (0..len)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 - 1.0;
+                let env = (-((i % 11025) as f32) / 600.0).exp();
+                let v = 0.4 * env * noise + 0.05 * (i as f32 * 0.02).sin();
+                (v, v * 0.8)
+            })
+            .unzip()
+    }
+
+    #[test]
+    fn the_render_test_plays_its_loops_under_the_input_late_by_the_lookahead() {
+        let mut plugin = Transporter::default();
+        assert_eq!(plugin.latency(), 220);
+        assert_eq!(plugin.fidelity(), Fidelity::Exact);
+        plugin.set_sample_rate(48_000.0);
+        assert_eq!((plugin.latency(), plugin.max_latency()), (240, 240));
+        let (mut l, mut r) = bursts(96_000);
+        let (dry_l, _) = (l.clone(), r.clone());
+        for (l, r) in l.chunks_mut(512).zip(r.chunks_mut(512)) {
+            plugin.process(l, r);
+        }
+        assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() < 4.0));
+        // What is not the input late by 240 frames is the loops.
+        let late = |at: usize| l[at] - dry_l[at - 240];
+        assert!((40_000..96_000).any(|at| late(at).abs() > 0.05));
+        let rms = (l.iter().map(|v| v * v).sum::<f32>() / l.len() as f32).sqrt();
+        assert!((0.05..0.5).contains(&rms), "{rms}");
+        // No send track: no second output.
+        assert_eq!(plugin.aux_output(), None);
+    }
+
+    #[test]
+    fn the_demo_song_s_state_bounces_its_loops_and_sends_them_on() {
+        let mut bytes = state(&[8]);
+        bytes.extend(state(&[
+            11_000, 5362, 5675, 4969, 0, 0, 499, 2000, 12, 1024, 512, 0, 0, 1, 0, 0, 0, 0, 0, 1,
+            21, 0,
+        ]));
+        bytes.extend([1, 1]);
+        bytes.extend(state(&[2, 1, 3, 0]));
+        let mut plugin = Transporter::default();
+        plugin.set_state(&bytes).unwrap();
+        assert_eq!(plugin.sidechain_output(), 3);
+        assert!(!plugin.follows_song());
+        let (mut l, mut r) = bursts(44_100 * 6);
+        for (l, r) in l.chunks_mut(441).zip(r.chunks_mut(441)) {
+            plugin.process(l, r);
+        }
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+        let (al, ar) = plugin.aux_output().unwrap();
+        assert_eq!((al.len(), ar.len()), (441, 441));
+        assert!(al.iter().chain(ar).any(|v| *v != 0.0));
+        // Tempo mode with a trigger follows the song's beat.
+        plugin.set_param(13, 3.0);
+        plugin.set_param(20, 2.0);
+        assert!(plugin.follows_song());
+        assert!(matches!(plugin.fidelity(), Fidelity::Approximate(_)));
+    }
+
     #[test]
     fn fl_s_states_load_as_the_doc_reads_them() {
         let Some(root) = corpus() else { return };
@@ -287,7 +556,7 @@ mod tests {
             .collect();
         assert_eq!(used.len(), 2);
         for saved in all.iter().chain(&used) {
-            let mut plugin = Transporter::default();
+            let mut plugin = Shell::default();
             assert_eq!(plugin.set_state(&saved.state), Ok(()), "{}", saved.file);
             assert!(matches!(saved.state.len(), 85 | 94 | 110), "{}", saved.file);
             for (index, value) in plugin.params.iter().enumerate() {
@@ -298,9 +567,9 @@ mod tests {
         }
         // The render test is the default, and the demo song a version 8.
         let test = used.iter().find(|s| s.state.len() == 85).unwrap();
-        let mut plugin = Transporter::default();
+        let mut plugin = Shell::default();
         plugin.set_state(&test.state).unwrap();
-        assert_eq!(plugin, Transporter::default());
+        assert_eq!(plugin, Shell::default());
         let song = used.iter().find(|s| s.state.len() == 110).unwrap();
         plugin.set_state(&song.state).unwrap();
         assert_eq!(

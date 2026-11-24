@@ -585,6 +585,16 @@ impl Default for Delay3 {
 }
 
 impl Delay3 {
+    /// Put the engine's 26 values in at once, as a host that drives
+    /// `engine_x64.dll` without this plugin's shell does (Distructor's
+    /// chorus module): each in 0..1, but the model, the sync, keep pitch,
+    /// the distortion type and the filter mode, which are the whole numbers
+    /// the engine makes of its floats. Like a state, it skips the glides.
+    pub(crate) fn set_engine(&mut self, values: [f32; PARAMS]) {
+        self.aim = values;
+        self.settle();
+    }
+
     fn rings(&mut self) -> impl Iterator<Item = &mut Ring> {
         let diffuser = self.diffuser.iter_mut().flatten();
         self.early.iter_mut().chain(&mut self.line).chain(diffuser)

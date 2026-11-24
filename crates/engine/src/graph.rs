@@ -6,12 +6,15 @@
 use crate::arp;
 use crate::automation::Automation;
 use crate::clock::Clock;
+use crate::echo;
 use crate::generator::{Cue, Rack};
+use crate::instrument_env;
 use crate::mix::{Mixer, Told};
 use crate::parts::UnplayedParts;
 use crate::sample::Sample;
 use crate::sequence::{self, Song};
 use crate::slide::Slides;
+use crate::stretch::Stretcher;
 use crate::voice::{self, Voice};
 use crate::{Curves, Error, levels};
 use model::{Channel, ChannelKind, Project};
@@ -172,6 +175,14 @@ impl Graph {
             .then(|| arp::arpeggiate(project, song, &automation, stop))
             .flatten();
         let song = arpeggiated.as_ref().map_or(song, |arp| &arp.song);
+        // The channels with an echo delay play each note's echoes as notes
+        // of their own, after the song's.
+        let echoed = echo::expand(project, song);
+        let (song, echoes) = match &echoed {
+            Some((echoed, echoes)) => (echoed, &echoes[..]),
+            None => (song, &[][..]),
+        };
+        let own_notes = song.notes.len() - echoes.len();
         let unbuilt = arpeggiated.as_ref().map(|arp| &arp.unbuilt);
         let mut unplayed = BTreeSet::new();
         // The channels with a note that sounds, with a clip that does, and
@@ -191,6 +202,7 @@ impl Graph {
         // The slides of the sampler channels' notes, by channel and by
         // the note's place in `events`.
         let mut slides = Slides::default();
+        let mut stretcher = Stretcher::default();
         let mut notes = 0;
         let mut len = clock.sample(song.end).min(limit);
         for (at, note) in song.notes.iter().enumerate() {
@@ -198,7 +210,7 @@ impl Graph {
             if start >= limit {
                 continue;
             }
-            notes += 1;
+            notes += usize::from(at < own_notes);
             let Some(channel) = project.channel(note.note.channel) else {
                 continue;
             };
@@ -230,9 +242,11 @@ impl Graph {
                     continue;
                 }
                 let levels = levels::trigger(&note.note, channel, curves);
+                let echo = at.checked_sub(own_notes).map(|e| echoes[e]);
+                let (levels, cents) = echo::levels(project, channel, &levels, echo);
                 // A clip on the channel's pitch moves the note as it starts.
                 let clip = automation.pitch_shift(channel.index, note.tick as f64);
-                let shift = (levels::shift(channel), clip);
+                let shift = (levels::shift(channel) + cents, clip);
                 let done = rack.cue(place, note, start, &levels, shift, &clock);
                 if let Some(points) = glide {
                     rack.glide(place, points);
@@ -256,11 +270,27 @@ impl Graph {
             };
             noted.insert(channel.index);
             let levels = levels::trigger(&note.note, channel, curves);
+            let echo = at.checked_sub(own_notes).map(|e| echoes[e]);
+            let (levels, _) = echo::levels(project, channel, &levels, echo);
             // FinalLevels.Pitch, from where the sample plays at its own
             // speed.
             let semitones = f64::from(levels.pitch - levels::root(channel)) / 100.0;
             let step =
                 curves.pitch_ratio(semitones) * f64::from(sample.rate) / f64::from(sample_rate);
+            // A channel's time stretch plays another sample, or the same at
+            // another speed (`crate::stretch`).
+            let per_tick = clock.per_tick(note.tick);
+            let (sample, step) = match stretcher.voice(
+                project,
+                channel,
+                &sample,
+                sample_rate,
+                per_tick,
+                semitones * 100.0,
+            ) {
+                Some(played) => (played.sample, played.step),
+                None => (sample, step),
+            };
             let held = note
                 .length
                 .map(|length| clock.sample(note.tick + length).saturating_sub(start));
@@ -271,6 +301,9 @@ impl Graph {
             let own = (levels.vol, levels.pan);
             let mods = (levels.mod_x, levels.mod_y);
             let voice = following(voice, channel, own, mods, sample_rate, &automation, curves);
+            let at = (note.tick, (level, levels.pan), mods);
+            let at = hosted_voice(project, channel, at, sample_rate, &automation, curves);
+            let voice = instrument_env::articulate(voice, &at, curves);
             len = len.max(start.saturating_add(voice.frames()).min(limit));
             played.insert(insert);
             let done = start.saturating_add(voice.frames());
@@ -311,7 +344,7 @@ impl Graph {
 
         // A clip plays its channel's sample for as long as the item is, at
         // the item's gain, pan and pitch on top of the channel's own. The
-        // item's stretch and the channel's time stretching are not applied.
+        // item's stretch is not applied; the channel's time stretch is.
         let (mut clips, mut stretched) = (0, 0);
         for clip in &song.clips {
             let start = clock.sample(clip.tick);
@@ -335,7 +368,17 @@ impl Graph {
             let step =
                 curves.pitch_ratio(semitones) * f64::from(sample.rate) / f64::from(sample_rate);
             let held = clock.sample(clip.tick + clip.length).saturating_sub(start);
-            let offset = f64::from(clip.offset_ms) * f64::from(sample.rate) / 1000.0;
+            let mut offset = f64::from(clip.offset_ms) * f64::from(sample.rate) / 1000.0;
+            let per_tick = clock.per_tick(clip.tick);
+            let cents = semitones * 100.0;
+            let (sample, step) =
+                match stretcher.voice(project, channel, &sample, sample_rate, per_tick, cents) {
+                    Some(played) => {
+                        offset *= played.scale;
+                        (played.sample, played.step)
+                    }
+                    None => (sample, step),
+                };
             let insert = target_insert(channel);
             let adjust = curves.volume_adjust_gain(voice::adjust(project, channel));
             let own = settings.gain * curves.clip_gain();
@@ -353,6 +396,9 @@ impl Graph {
                 &automation,
                 curves,
             );
+            let at = (clip.tick, (level, settings.pan), (0.0, 0.0));
+            let at = hosted_voice(project, channel, at, sample_rate, &automation, curves);
+            let voice = instrument_env::articulate(voice, &at, curves);
             // Trimmed to past the end of its sample, or no ticks long.
             if voice.finished() {
                 continue;
@@ -404,7 +450,7 @@ impl Graph {
                 *unplayed_arpeggiators.entry(what).or_default() += 1;
             }
         }
-        let unplayed_parts = UnplayedParts::of(project, &noted, &clipped, &ts404, &automation);
+        let unplayed_parts = UnplayedParts::of(project, &noted, &clipped, &ts404);
         mixer.host(rack.hosted);
         mixer.set_tempo(automation.tempo_at(0.0).unwrap_or(tempo));
         Ok(Graph {
@@ -489,6 +535,32 @@ fn gains(
     let (volume, channel_pan) = voice::levels(channel);
     let channel_pan = channel_pan as i32 + voice::pan_offset(project, channel);
     voice::gains(volume, channel_pan, level, pan, curves)
+}
+
+/// What [`instrument_env::articulate`] needs of a voice on `channel` that
+/// starts on a tick with a level and a pan of its own, as [`gains`] takes
+/// them, and its note's mod X and mod Y.
+fn hosted_voice<'a>(
+    project: &Project,
+    channel: &'a Channel,
+    (tick, (level, pan), mods): (u64, (f32, f32), (f32, f32)),
+    rate: u32,
+    automation: &Automation,
+    curves: &dyn Curves,
+) -> instrument_env::Played<'a> {
+    let (volume, channel_pan) = voice::levels(channel);
+    let channel_pan = channel_pan as i32 + voice::pan_offset(project, channel);
+    let tempo = automation.tempo_at(tick as f64).or(project.tempo());
+    instrument_env::Played {
+        channel,
+        tick,
+        tempo: tempo.unwrap_or(0.0),
+        ppq: project.header.ppq,
+        rate,
+        level: level * curves.volume_gain(volume),
+        pan: channel_pan as f32 / 6400.0 - 1.0 + pan,
+        mods,
+    }
 }
 
 /// The voice, set to follow its channel when a clip drives one of the

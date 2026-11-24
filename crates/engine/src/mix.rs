@@ -12,7 +12,6 @@ use model::{InsertMix, Project, Slot};
 use plugins::{Effect, Fidelity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Mutex;
 
 /// The samples a bus holds, and the most [`Mixer::process`] takes at once.
 pub(crate) const BLOCK: usize = 512;
@@ -1638,13 +1637,15 @@ impl Mixer {
             let busy = |strip: &&mut Strip| strip.generators.1 > 0 || !strip.effects.is_empty();
             match pool {
                 Some(pool) if strips.iter_mut().filter(busy).nth(1).is_some() => {
-                    let pieces = Mutex::new(Pieces {
+                    // Not a `Mutex`: on macOS that allocates on its first
+                    // lock, and this one is made every block.
+                    let pieces = plugins::workers::Spin::new(Pieces {
                         strips: strips.iter_mut(),
                         generators,
                     });
                     pool.run(&|| {
                         loop {
-                            let piece = pieces.lock().unwrap_or_else(|p| p.into_inner()).next();
+                            let piece = pieces.with(Iterator::next);
                             let Some((strip, generators)) = piece else {
                                 break;
                             };

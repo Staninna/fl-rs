@@ -1,7 +1,7 @@
 //! What a plugin on a channel is to its host: it is handed notes and adds
 //! the sound of them to a stereo block.
 
-use crate::{Fidelity, StateError};
+use crate::{Fidelity, StateError, Workers};
 use std::path::Path;
 
 /// One note for a [`Generator`] to start, with what the note's record and
@@ -72,7 +72,7 @@ impl Default for NoteOn {
 ///
 /// Only [`Generator::set_state`], [`Generator::set_sample_rate`],
 /// [`Generator::set_tempo`], [`Generator::set_ppq`] and
-/// [`Generator::set_resource_dir`] may
+/// [`Generator::set_resource_dir`] and [`Generator::set_workers`] may
 /// allocate. The rest is for an audio callback.
 pub trait Generator: Send {
     /// Take the bytes of the plugin's event 213. A state the plugin turns
@@ -97,6 +97,12 @@ pub trait Generator: Send {
     /// no such directory does not call this, and such a plugin then says
     /// what it lacks in [`Generator::fidelity`]. The others take no notice.
     fn set_resource_dir(&mut self, _dir: &Path) {}
+
+    /// Threads the plugin may render its voices on, beside the one that
+    /// calls [`Generator::process`], or `None` to render them all on that
+    /// one. A plugin that takes them plays the same to the bit either way
+    /// ([`crate::workers`]); the others take no notice. This may allocate.
+    fn set_workers(&mut self, _workers: Option<&'static dyn Workers>) {}
 
     /// The sample the plugin's channel holds, as its event 196 writes it,
     /// for a plugin that plays its channel's own sample: FL hands that one
@@ -276,6 +282,7 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fl_slayer::NAME, || {
         Box::new(crate::fl_slayer::FlSlayer::default())
     }),
+    (crate::flex::NAME, || Box::new(crate::flex::Flex::default())),
     (crate::fpc::NAME, || Box::new(crate::fpc::Fpc::default())),
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
@@ -315,17 +322,29 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::patcher::NAME, || {
         Box::new(crate::patcher::PatcherGenerator::default())
     }),
+    (crate::poizone::NAME, || {
+        Box::new(crate::poizone::PoiZone::default())
+    }),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),
     (crate::sakura::NAME, || {
         Box::new(crate::sakura::Sakura::default())
     }),
+    (crate::sawer::NAME, || {
+        Box::new(crate::sawer::Sawer::default())
+    }),
+    (crate::simsynth::NAME, || {
+        Box::new(crate::simsynth::SimSynth::default())
+    }),
     (crate::slicex::NAME, || {
         Box::new(crate::slicex::Slicex::default())
     }),
     (crate::sytrus::NAME, || {
         Box::new(crate::sytrus::Sytrus::default())
+    }),
+    (crate::voltage_controller::NAME, || {
+        Box::new(crate::voltage_controller::VoltageController::default())
     }),
     (crate::wave_traveller::NAME, || {
         Box::new(crate::wave_traveller::WaveTraveller::default())
@@ -391,7 +410,7 @@ mod tests {
                 assert!(generator.tail() > 0, "{name}");
             }
         }
-        for name in ["3xOsc", "FLEX", "Fruity Wrapper", ""] {
+        for name in ["3xOsc", "Fruity Wrapper", ""] {
             assert!(generator_by_name(name).is_none(), "{name}");
         }
         // An effect is no generator, and a generator no effect.

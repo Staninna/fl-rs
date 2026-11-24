@@ -1,3 +1,73 @@
+# Handoff, 2026-11-24, eight workstreams in one branch
+
+Branch `claude/vigilant-hypatia-es6o1f`, off `main` at `5d3f1b8`, one pull request. Worked in a cloud container: FL Studio's install was unpacked from its installer with the new `tools/fl-extract.py` (no Wine; all 165 projects match `corpus/manifest.sha256`), with Ghidra 11.4.2 and unicorn for the DLLs. Eight agents worked in git worktrees (`.scratch/agent-rules.md`, "Worktree mode") and their branches were merged here; the two sections below this one are two of their handoffs, kept as they wrote them.
+
+Render: at `2e9a83a`, 127 of 165 projects have sound (123 at `5d3f1b8`) and 99 play in full (79). Every effect slot sound reaches is hosted (1145 of 1145, was 1112 of 1117), every generator channel with notes plays (227 of 227, was 210), and no channel part is left unplayed (was 24 envelopes, 52 time stretch, 1 tracking, 2 echo delays). 41 generator channels and 6 effect slots are approximated; 18 projects peak above 1.0 on the Approximate curves. The render took 160 s.
+
+What landed:
+
+- `tools/fl-extract.py`: FL's NSIS installer has 8 bytes of padding after the first header and 36-byte script entries, which is what stops 7-Zip; `$INSTDIR` is user variable 31. README "FL Studio's files" says how to use it.
+- Channel time stretch (`crates/engine/src/stretch.rs`, `docs/rec-channel.md` "Time stretch"): FL's lengths, speeds and pitches per mode from `FLEngine_x64.dll`; a WSOLA stands in for élastique and the slicer. All stretching happens at graph build. Left: Stretch Pro's formant, stretch time automation, a playlist clip's own stretch, a cache across graph rebuilds (`.scratch/notes/time-stretch.md`).
+- Channel envelopes and LFOs, mod X/Y tracking (now at the DLL's scale) and the echo delay (`instrument_env.rs`, `echo.rs`, 3x Osc's articulation unit shared). Left: tick timing under tempo automation, a clip on a sampler's envelope controls (`.scratch/notes/instrument-envelopes.md`).
+- Distructor, Hardcore (the Distortion pedal only) and Fruity Vocoder, Gaps (`.scratch/notes/distructor.md`, `hardcore.md`).
+- FLEX, Approximate: the `.flexpack` mask is exact (MD5 of a fixed string and the entry's index, from `engine_x64.dll`); packs are read from the install, nothing of Image-Line's is committed. Left: LFOs, FM/AM, pulse width, several filter types, layer FX, master reverb and limiter, v2 packs (`.scratch/notes/flex.md`).
+- Transporter (TransientLooper) and Emphasizer's LimiterLite bit for bit under new emulators (`tools/plugstate/transient_looper_emu.py`, `limiter_lite_emu.py`); Fruity Voltage Controller built (it outputs control voltages, so it was never silent by design in FL either); Convolver's drawn EQ curve. Left: the Convolver's layers (`.scratch/notes/fruity-convolver.md`).
+- SimSynth, Sawer and PoiZone from their engine DLLs, bit for bit under emulators (`.scratch/notes/*-emu/`). Toxic Biohazard, Plucked!, Wasp, Wasp XT and Transistor Bass were not reached.
+- Harmor, Harmless and Sytrus voices on the mixer's workers, bit-identical (section below, "voices on the workers").
+- Pitcher, Harmless's sine bank and Maximus 1.3x to 1.9x faster on one thread, bit-identical (section below, "hot plugins cheaper on one thread").
+
+Checks at the head: fmt, workspace clippy `-D warnings`, the plugins tests with the corpus, the engine lib, fixtures and no_alloc tests, `progress.py --check`. Not done: the README bench block and whole-project timings need a quiet machine (this one ran at load 8 to 30); the UI is untouched, so no screenshots.
+
+Next: `todo.md`. The biggest sound gaps now are the five synths above, FLEX's missing parts and Harmor's approximations; for real time, overlap Harmor's and Harmless's effect chains with the next chunk's voices, and the cold first play (`todo.md` item 2).
+
+# Handoff, 2026-11-24, hot plugins cheaper on one thread
+
+Worktree branch off `main` at `5d3f1b8`, not pushed. Every change keeps every bit: the profile harness hashes of all 165 projects at `--frames 1024 --warmup 0` (one thread) are unchanged, and each plugin's every shipped state was checked with the new `state_hashes` test. fmt, clippy and `cargo test --release -p plugins -p dsp` with the corpus pass.
+
+Where the time went, `perf record` (cpu-clock, this VM has no hardware counters, so instruction counts are from callgrind) over the 10 heaviest projects on one thread, before: Fruity Reverb (Harmor's, Harmless's, Sytrus's and Autogun's built-in) 6.9%, Maximus's bands 6.2% plus its saturator's `pow` 4.6% and `bands_frame` 3.9%, Reeverb 2 5.9%, Sytrus `Voice::play` 5.8%, Pitcher's detector 5.5%, Harmor 3.6% + tick 1.7% + `ShapeTable::clamped` 1.4%, Convolver FFT 3.0%, Harmless's sine bank 3.9%, Parametric EQ 2 1.7%, the engine's mixer 2.2%.
+
+Done, one commit each, measured on the plugin bench (fastest of 10 rounds) and on all corpus states:
+
+- Pitcher: the detector's AMDF sums 64 samples at a time with the sums in registers (each sum still in time order), and its band pass (DC blocker and 16 f64 one-poles, a chain of ~300 cycles a sample) runs ahead on 256-sample runs as a wave, stage `i` on sample `k - i`. Bench 356 -> 188 ns a frame.
+- Harmless (`dsp::additive::SineBank`): two groups of eight partials per pass, each sum taking the first group's halves then the second's. Bench 242 -> 125 ns a frame.
+- Maximus: no `%` in the peak window, mean and delay rings (shared with Fruity Limiter); `1/k` of the shaped saturator once; then its release/attack stage chains run over 32 frames at a time as a wave, in passes (crossover and detectors, chains, delay and saturator, master). Bench 286 -> 205 ns a frame. Soundgoodizer, Harmor and Autogun carry a Maximus.
+- `ShapeTable::clamped` inlined with an `i32` index, checked against the old code at all 2^32 floats (`--ignored every_place`). Harmor's tick 94 -> 85 M instructions.
+- `crates/plugins/src/state_hashes.rs`: `FL_RS_STATE_HASHES="Pitcher,Harmor" cargo test --release -p plugins --lib -- --ignored state_hashes --nocapture` prints a hash per shipped state and the time in `process`. Run it before and after and diff the `HASH` lines; minutes a plugin, where the corpus harness takes hours on a busy machine.
+- `crates/plugins/bench.tsv`: the seven moved rows written again.
+
+Tried and dropped, no faster on wall time:
+- Harmor's partial bank two groups at a time, as Harmless's: more instructions (spills), and its corpus states took 124 s against 114 s.
+- Fruity Reverb and Reeverb 2 with their lines lent out as locals, so the compiler stops reloading each line's place after every write: 3% fewer instructions, the same time. Both are ~300-600 instructions a frame with no chain to break; what would pay is running the feed-forward front (the filters, the four diffusers, the predelay) as passes over a block, vectorised over each line's contiguous stretch, or a cheaper tap read.
+- Maximus's three bands' chains side by side (a commit, then superseded by the wave).
+
+Whole-project speed is hard to show on this machine (4 cores, load 5 to 30 from other agents): the 12 slowest projects, base and final run side by side, came out +6% in total with single projects between -19% and +61%, and a paired run (`perf stat` task-clock, base then final per project) was cut short at Bien Duro 113 -> 94 s CPU, Oxygen 102 -> 104 s. Rerun both binaries' harness on a quiet machine for real numbers; the per-plugin numbers above are the reliable ones.
+
+Left, by what the Oxygen profile shows now (Harmor's bank 17%, Maximus's process 16%, Harmor's tick 12%, Reeverb 2 6%, `sin` 5%): Maximus's IIR crossover sections are chains too, and could run as the same wave over a run; Harmor's tick has no single hot spot (log2f 1.8%, exp2f 2.3%); Sytrus `Voice::play` was left alone because its voice loop is being reworked on another branch; Reeverb 2's LFO calls `sin` in f64 every sample, which must stay.
+
+# Handoff, 2026-11-24, voices on the workers
+
+`todo.md` item 1. Harmor, Harmless and Sytrus render their voices on the mixer's worker threads, and all 165 profile-harness hashes at 1024 frames are the same as before (the baseline at `FL_RS_THREADS=1` against the change at 2).
+
+- `plugins::workers`: the `Workers` trait a host lends a generator with `Generator::set_workers`, and `for_each` / `for_each_with`, which run a job over items on the workers or, with none, in a plain loop. The engine hands every generator it builds to play the process's pool (`engine::generator::hosted`).
+- `crates/engine/src/pool.rs`: a board of eight desks beside the mixer's rounds. A plugin opens its job on a desk, runs it itself and waits only for the calls other threads have already taken; a worker between rounds, or the caller of a round while it waits for its workers, takes a call. Nobody waits for a call that has not started, so a plugin playing on a worker in mid-round cannot lock the pool, and with every thread busy the plugin simply renders alone. It allocates nothing; the workers keep FTZ/DAZ and real-time priority.
+- Each plugin keeps each voice's output in a buffer of its own (Harmor and Harmless in the voice, Sytrus row by row in a store sized at load) and adds them in the voice order one thread uses. Harmor and Harmless fan out with two or more voices. Sytrus also needs no voice starting (band-limited copies are taken from a shared pool), no plucked operator (strings likewise) and no released master of a shared unison in the block; a shared unison renders on one thread, slaves then master, with a scratch block per thread.
+- Tests: `testing::same_on_workers` (chords in odd blocks, with and without three threads, to the bit) on the defaults and every corpus state of the three, plus a seventh of Sytrus's presets; a nested fan-out test on the pool; Harmless and Sytrus in the engine's no-allocation song. The one-thread path costs 0.25 to 0.6% more instructions in the plugin bench (callgrind); the bench check passes.
+
+Timing on this 4-core machine shared with other agents is noisy (load 8 to 20, so the baseline runs at about half the speed the README's 8-core table shows). Medians of three interleaved runs, `--frames 1024 --warmup 0`, speed and p99 call against the 21.3 ms budget, calls over (the slowest call is preemption here and says little):
+
+| Project | before, 1 thread | after, 1 | after, 2 | after, 4 |
+|---|---|---|---|---|
+| Olbaid - Harmless Essentials | 0.6x, 490%, 1475 | 0.7x, 510%, 1339 | 0.7x, 416%, 1345 | 1.0x, 314%, 941 |
+| JuiceBass - SeamlessR - Menagerie | 1.2x, 199%, 757 | 1.2x, 209%, 741 | 1.8x, 185%, 192 | 1.7x, 123%, 129 |
+| Square a Saw - Oxygen | 0.8x, 334%, 1337 | 1.0x, 191%, 931 | 1.3x, 150%, 332 | 1.5x, 124%, 109 |
+| Olbaid - Sytrus Essentials | 1.4x, 178%, 341 | 0.9x, 430%, 790 | 1.5x, 181%, 215 | 1.4x, 179%, 254 |
+
+The one-thread columns differ by noise only (the same code to within 0.6% of the instructions). Sytrus Essentials is inconclusive: one pass went from 1.0x to 1.9x, the others not; how many of its blocks the conditions above send to one thread was not counted. The gain is capped by what the voices feed: Harmless Essentials is about 45% voices and 45% its reverb and the Maximus behind them (`perf`, one thread), which stay on one thread.
+
+Found on the way, not changed: in Sytrus, a shared unison's master that ends mid-block leaves what its slaves summed for the rest of the block in the scratch, and the next master to render (in this block or a later one) adds it to its own. The parallel path renders such blocks on one thread so the bits stay; whether FL does this is not checked.
+
+Next: overlap a chunk's effect chain with the next chunk's voices in Harmor and Harmless (the voices do not read the effects, so the bits stay); hand Patcher's inner generators the workers (`Told`); the cold first call in the engine (`todo.md` item 2) was not started.
+
 # Handoff, 2026-11-03, big projects stay smooth
 
 Playing and editing large projects lagged. Three changes, on `main`.

@@ -34,6 +34,7 @@ pub mod delay_3;
 pub mod delay_bank;
 pub mod directwave;
 mod directwave_fx;
+pub mod distructor;
 pub mod drumaxx;
 pub mod drumpad;
 mod drumpad_voice;
@@ -56,6 +57,10 @@ pub mod fl_slayer;
 mod fl_slayer_engine;
 pub mod flanger;
 pub mod flangus;
+pub mod flex;
+mod flex_pack;
+mod flex_preset;
+mod flex_waves;
 pub mod formula_controller;
 pub mod fpc;
 pub mod free_filter;
@@ -64,11 +69,13 @@ pub mod frequency_splitter;
 pub mod fruit_kick;
 pub mod fruity_slicer;
 pub mod fruity_slicer_2;
+pub mod fruity_vocoder;
 mod generator;
 pub mod gms;
 mod gms_fx;
 pub mod granulizer;
 pub mod gross_beat;
+pub mod hardcore;
 pub mod harmless;
 pub mod harmor;
 mod harmor_art;
@@ -80,6 +87,7 @@ pub mod kepler;
 pub mod kepler_exo;
 pub mod keyboard_controller;
 pub mod limiter;
+mod limiter_lite;
 mod linear_phase;
 pub mod love_philter;
 pub mod low_lifter;
@@ -109,6 +117,7 @@ pub mod phase_inverter;
 pub mod phaser;
 pub mod pitch_shifter;
 pub mod pitcher;
+pub mod poizone;
 pub mod port;
 pub mod razer_chroma;
 pub mod reeverb;
@@ -116,13 +125,17 @@ pub mod reeverb_2;
 pub mod sakura;
 mod sakura_fx;
 mod sampler;
+pub mod sawer;
 pub mod send;
 pub mod seven_band_eq;
+pub mod simsynth;
 pub mod slicex;
 pub mod soft_clipper;
 pub mod soundgoodizer;
 pub mod spreader;
 pub mod squeeze;
+#[cfg(test)]
+mod state_hashes;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod sytrus;
@@ -132,14 +145,17 @@ pub mod test_sine;
 #[cfg(test)]
 mod testing;
 pub mod three_osc;
+mod transient_looper;
 pub mod transient_processor;
 pub mod transporter;
 pub mod vintage_chorus;
 pub mod vintage_phaser;
 pub mod vocodex;
+pub mod voltage_controller;
 pub mod wave_candy;
 pub mod wave_traveller;
 pub mod waveshaper;
+pub mod workers;
 pub mod wrapper;
 pub mod xy_controller;
 pub mod xyz_controller;
@@ -148,6 +164,7 @@ pub mod zgameeditor;
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
 use std::path::Path;
+pub use workers::Workers;
 
 /// One plugin in an effect slot.
 ///
@@ -424,6 +441,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_2::Delay2::default()))
     } else if is(delay_3::NAME) {
         Some(Box::new(delay_3::Delay3::default()))
+    } else if is(distructor::NAME) {
+        Some(Box::new(distructor::Distructor::default()))
+    } else if is(hardcore::NAME) {
+        Some(Box::new(hardcore::Hardcore::default()))
+    } else if is(fruity_vocoder::NAME) {
+        Some(Box::new(fruity_vocoder::FruityVocoder::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
     } else if is(edison::NAME) {
@@ -514,6 +537,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(stereo_shaper::StereoShaper::default()))
     } else if is(transient_processor::NAME) {
         Some(Box::new(transient_processor::TransientProcessor::default()))
+    } else if is(transporter::NAME) {
+        Some(Box::new(transporter::Transporter::default()))
     } else if is(vocodex::NAME) {
         Some(Box::new(vocodex::Vocodex::default()))
     } else if is(waveshaper::NAME) {
@@ -848,6 +873,8 @@ mod tests {
             ("pitch shifter", 75, 15),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
+            ("transporter", 85, 1),
+            ("transporter", 110, 1),
             ("vintage chorus", 72, 12),
             ("vintage phaser", 149, 1),
         ] {
@@ -885,6 +912,9 @@ mod tests {
             "fruity wrapper",
             // Counted in their own tests.
             "control surface",
+            "distructor",
+            "fruity vocoder",
+            "hardcore",
             "fruity formula controller",
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
@@ -897,7 +927,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 56);
+        assert_eq!(lengths.count(), 58);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");

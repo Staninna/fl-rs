@@ -208,7 +208,7 @@ if IR not empty:
     if 0x414 != 0: FUN_0087b670(IR, 0x414)                                                              // self-convolution, amount 0..1, below
     resample IR to SR * 0x418 (FUN_0062b090, mode 9: the 256-point sinc, docs/plugins/fl-interpolator.md) // the stretch
     if eq is a flat line at level y (FUN_00793a00):  IR *= level(y * k) with (11^x - 1)/10 (k = _DAT_0087bcc8)
-    else:                                            FUN_0087b2b0(IR, eq, stretch)                      // FFT EQ over the IR (TFFTFilter; not decompiled)
+    else:                                            FUN_0087b2b0(IR, eq, stretch)                      // FFT EQ over the IR, section 3.1
     trim trailing samples with |x| < 2^-24 on both channels (0x8cfb1c)
 lead    = 0x40c (predelay) + count of leading samples with |x| < 2^-24
 block   = lead >= 512 ? largest power of two <= lead : 0
@@ -225,6 +225,46 @@ as the engine's own block delay: the largest power of two that fits in
 replaces the silence. An IR with 100 ms of silence at its head costs nothing;
 an IR that starts at once, with predelay 0, runs through the zero-latency
 path (`0x410 = 0`, section 4).
+
+### 3.1 The EQ curve (`FUN_0087b2b0`)
+
+Only when the mix (`0x41c`) is above 0 and the IR is not empty `code`:
+
+```
+order = clamp(log2up(round(IR rate * 2)), 4, 20); N = 1 << order        // FUN_00622aa0: the least d >= 1 with 2^d >= v
+spectrum: 2 channels, N + 1 frames (float)
+for k in 0..=N:
+    f = float(k * (IR rate / (N * 22050 * stretch * 2)))
+    x = float(axis(f * 22050))                                          // FUN_0087bde0 -> FUN_00637aa0(this+0x4a8)
+    y = the curve at x (runner FUN_00791500 moved on by x - previous x, from 0)
+    m = float(y * 2) == 1 ? 1 : float((exp(float(y * 2) * ln 3) - 1) * 0.5)
+    channel 0 = m, channel 1 = 0
+c = sample convolver; FUN_00624910(c, spectrum, 1); c+0x2c = mix; c+0x28 = 1 - mix
+FUN_00624f90(c, 0, IR len - 1); FUN_00625690(...)                       // IR' = (1 - mix) IR + mix (IR * kernel), centred
+```
+
+The axis (`FUN_00637830`, set up by the constructor with low = `440
+exp(-21 ln 2 / 12)` = 130.81 Hz from FL's math unit's `ln 2 / 12` at
+`0x906520`, high 22050 Hz, curvature 1, flags 0; `this+0x4f4` is the high
+22050): `knee = ln 2 / ln(2 high / low)`, `bend = high / low`; below `low`
+`x = f knee / low`, above `x = knee + ln((f - low) bend / (high - low) + 1)
+/ ln(bend + 1) (1 - knee)`.
+
+`FUN_00624910(c, spectrum, smooth)`: with `smooth`, first `FUN_00624620(c,
+spectrum, 1/128)`: a Gaussian of `M = 2^log2up(round(512 * 128)) + 1 =
+65537` bins, `exp(-0.5 (i s)^2)` with `s = float(1 / (M / 128 * 0.25))`
+(`ippsVectorSlope_32f` from 0, `ippsSqr_32f_I`, `ippsMulC_32f_I` by -0.5,
+`ippsExp_32f_I`, loaded by name at start-up), made a kernel by this same
+function without smoothing, and run over the spectrum held out at each end
+by its own length with its end values, then cut back. Then the kernel: a
+Pack spectrum `pf[0] = m0, pf[2k-1] = m cos(phase), pf[2k] = m sin(phase),
+pf[N'-1] = m_last` over `N' = 2^(log2up(bins - 1) + 1)` points, IPP's
+inverse real FFT divided by `N'`, turned round by `N'/2`, times a Hann
+window `0.5 - 0.5 cos(2 pi j / (N' + 1))` of `N' + 2` points without its
+first (`FUN_00636ca0` type 2; its 0.25 is unused by that type); a mono
+kernel at the IR's rate, centre `+0x20 = (N' - 1) >> 1`. The sample
+convolver's output frame `t` is then the convolution's frame `t + N'/2`:
+zero phase.
 
 ## 4. Signal chain (`Eff_Render` @ 0x0087a000) and the engine
 
@@ -306,10 +346,8 @@ frequency-domain delay line.
 
 - The stretch constant `K` (`.bss` 0x906500) and the `info+0x20` wet factor
   could not be read statically.
-- `FUN_0087b2b0` (EQ curve onto the IR) is mapped in
-  `.scratch/notes/fruity-convolver.md` but not built: the envelope runner
-  `FUN_00791500`, the frequency map `FUN_00637aa0` and the window
-  `FUN_00636ca0` are not read.
+- The envelope runner `FUN_00791500` (290 lines) the EQ reads its curve
+  through is taken to draw the curve as `dsp::curve` does.
 - Which of the four kind-6 layers is volume, pan, and the two others, was
   not read (`FUN_00867c40`); all corpus states leave them flat.
 - The engine's inherent delay with head block `0x410` is taken to equal

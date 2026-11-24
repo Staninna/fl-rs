@@ -1423,7 +1423,7 @@ mod tests {
     #[test]
     fn a_plugin_that_is_not_built_passes_its_input_through() {
         let mut state = State::new();
-        let missing = state.node(2, 2000, "Distructor", &[1, 2, 3]);
+        let missing = state.node(2, 2000, "Not Built", &[1, 2, 3]);
         state.wire(FL_IN, missing.input, 1.0);
         state.wire(missing.output, FL_OUT, 1.0);
         let mut patcher = state.patcher();
@@ -1431,8 +1431,8 @@ mod tests {
         let out = through(&mut patcher, &input);
         assert_eq!(bits(&out.0), bits(&input.0));
         assert_eq!(bits(&out.1), bits(&input.1));
-        assert_eq!(patcher.unhosted(), ["Distructor"]);
-        assert_eq!(Effect::unhosted(&patcher), ["Distructor"]);
+        assert_eq!(patcher.unhosted(), ["Not Built"]);
+        assert_eq!(Effect::unhosted(&patcher), ["Not Built"]);
         assert_eq!(patcher.fidelity(), Fidelity::Approximate(PASSED));
     }
 
@@ -1579,7 +1579,7 @@ mod tests {
         // render tests.
         assert_eq!(states, 35);
         let names: Vec<&str> = unhosted.keys().map(String::as_str).collect();
-        assert_eq!(names, ["Distructor"]);
+        assert!(names.is_empty(), "{names:?}");
     }
 
     /// Frequency Splitter's state, version 4, at its defaults but for
