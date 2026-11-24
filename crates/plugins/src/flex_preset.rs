@@ -196,6 +196,9 @@ pub(crate) struct Preset {
     /// chunk 2 has them.
     pub(crate) shell: Vec<f32>,
     pub(crate) layers: Vec<Layer>,
+    /// The master effects (`FUN_1803bd0c0` on the engine's chain), when
+    /// they read.
+    pub(crate) master: Option<Chain>,
 }
 
 fn slot(s: &mut Stream) -> Option<Slot> {
@@ -333,17 +336,22 @@ fn chain(s: &mut Stream) -> Option<Chain> {
             effect.params = s.floats()?;
         }
     }
-    let n = s.count(12)?;
-    let links = (0..n)
-        .map(|_| {
+    // The master chain at the end of a preset can stop short of its links.
+    let mut links = Vec::new();
+    for _ in 0..s.count(12).unwrap_or(0) {
+        let link = (|| {
             Some(Link {
                 a: s.i32()?,
                 b: s.i32()?,
                 amount: s.f32()?,
                 d: if version >= 3 { s.f32()? } else { 1.0 },
             })
-        })
-        .collect::<Option<_>>()?;
+        })();
+        match link {
+            Some(link) => links.push(link),
+            None => break,
+        }
+    }
     Some(Chain {
         version,
         effects,
@@ -399,10 +407,12 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Preset> {
     let shell = s.floats()?;
     let n = s.count(16)?;
     let layers = (0..n).map(|_| layer(&mut s)).collect::<Option<Vec<_>>>()?;
+    let master = chain(&mut s);
     Some(Preset {
         version,
         shell,
         layers: layers.into_iter().take(LAYERS).collect(),
+        master,
     })
 }
 

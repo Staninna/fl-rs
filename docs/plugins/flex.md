@@ -301,9 +301,10 @@ v>=9  per oscillator two strings: the custom waves 1 and 2
 ```
 "hcxf", i32 version (<= 5)
 i32 n, then n x (i32 type, v>=2 u8 bypass, v>=5 u8 on)
-per effect: v>=4 u8 own; own and an FL plugin: i32 size + the plugin's own state (FL's event 213);
-            own and an engine effect: nothing; else i32 n, f32[n] parameters
-i32 n links x (i32, i32, f32, v>=3 f32)
+per effect: v>=4 u8 own; own and an FL plugin: i32 size + the plugin's own state (FL's event 213)
+            (FUN_1803fd350; Maximus, FUN_1803d3570, wraps it: u16 version, the state, f32 x3,
+            version >= 1 i32); own and an engine effect: nothing; else i32 n, f32[n] parameters
+i32 n links x (i32, i32, f32, v>=3 f32)    (the master chain can end before them)
 ```
 
 Types (`FUN_1803bbc80`'s jump table, RTTI of each constructor's vtable):
@@ -397,21 +398,27 @@ FLAC samples, zones by key and velocity, the four oscillator families
 installed DLL, the two-wave mix, noise, wavetables over a slot's sample),
 unison pitch and pan, the four envelopes with their bends, the 64 routes
 for the sources above but the LFOs and the layer's, the two filters as SVF
-stages, the volume taper and pan law, the shell's pulls and transpose.
+stages, the volume taper and pan law, the shell's pulls and transpose, and
+the master chain's delay: the last type-6 effect of the chain (the one the
+shell's knobs move, `FUN_1803ed870` looks from the end), whose 27 floats are
+FL Delay 3's 26 parameters after one of the engine's own, normalised over
+Delay 3's ranges (the corpus presets carry Delay 3's defaults where the
+knobs are not moved). It runs as `delay_3.rs` with the shell's delay knobs
+24..29 laid on, when the shell has it on (37).
 
 Approximated or left out (the row in `docs/plugins.md` and `fidelity()`
 say so): LFOs, FM/AM, pulse width, phaser/comb/vowel/shelf filters (passed
 through), Moog/Juno ladders (SVF stages of their order), the unison
 detune curve and gain table (straight spread and `1/sqrt(N)`), the layer
-and master effect chains (the shell's delay, reverb, limiter and master
-filter), glide, round-robin groups, macros beyond the routes, the
+and master effect chains but the delay (the shell's reverb, limiter and
+master filter; the chorus some presets put there), glide, round-robin groups, macros beyond the routes, the
 `.flex2pack` engine. No null test against FL.
 
 ## 7. What is left
 
-1. The master chain (`hcxf` after the layers): its types 6 and 7 are
-   FL's Delay 3 and Reeverb 2 with the engine's own parameter floats; map
-   them onto `delay_3.rs` and `reeverb_2.rs`, and the limiter.
+1. The master chain's reverb (type 7, `FruityReeverb2`, setParam
+   `FUN_1803b7780`) onto `reeverb_2.rs`, its limiter (Maximus, with FL's
+   own state) and its filter (type 9).
 2. LFOs (`LFO`, vtable 0x1804867c8, setParam `FUN_1803d22f0`), used by the
    corpus mostly for pitch with amount 0.
 3. FM between oscillators (`r19..22`), the Moog/Juno ladders

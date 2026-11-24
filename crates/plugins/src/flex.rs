@@ -37,10 +37,11 @@
 //!   engine's shapes where they were read and stand in for them where not.
 //! - A `.flex2pack` (engine v2) preset is not read and stays silent.
 
+use crate::delay_3::Delay3;
 use crate::flex_pack::{self, Pack};
 use crate::flex_preset::{self, Preset};
 use crate::flex_waves::Waves;
-use crate::{Fidelity, Generator, NoteOn, StateError};
+use crate::{Effect, Fidelity, Generator, NoteOn, StateError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -61,6 +62,11 @@ const UNISON: usize = 8;
 const STEP: usize = 32;
 /// The longest a release may ring, in seconds.
 const LONGEST: f32 = 30.0;
+/// The frames the voices are summed in before the master delay.
+const SCRATCH: usize = 1024;
+/// The master delay's parameters: FL Delay 3's 26 after one of the
+/// engine's own (`ILDelay3Plugin`, effect type 6).
+const DELAY_PARAMS: usize = 27;
 
 /// The shell's parameters: the lowest and highest integer of each control
 /// as the shell saves it, and the default (`docs/plugins/flex.md`).
@@ -240,6 +246,8 @@ struct Program {
     /// Whether a zone asks for what is not built.
     approximated: bool,
     missing_samples: bool,
+    /// The master chain's delay, its parameters from 0 to 1.
+    delay: Option<[f32; DELAY_PARAMS]>,
 }
 
 /// What the state says (chunks 1 and 2).
@@ -444,12 +452,70 @@ fn build(preset: &Preset, pack: &Pack, shell: &[f32; PARAMS]) -> Program {
             volume: taper(lp(6)),
         });
     }
+    let delay = preset
+        .master
+        .as_ref()
+        .and_then(|chain| chain.effects.iter().rev().find(|e| e.kind == 6))
+        .and_then(|e| e.params.get(..DELAY_PARAMS))
+        .and_then(|p| p.try_into().ok());
     Program {
         layers,
         samples,
         approximated,
         missing_samples: missing,
+        delay,
     }
+}
+
+/// FL Delay 3's state for the master delay (`delay_3.rs`): the engine's
+/// floats over each parameter's range, the shell's delay knobs on top
+/// (`FUN_1803eefc0` -> `FUN_1803ed870`: type 24 -> 2, mix 25 -> 24, time
+/// 26 -> 5, feedback 27 -> 15, modulation 28 -> 10, colour 29 -> 25).
+fn delay_state(engine: &[f32; DELAY_PARAMS], shell: &[f32; PARAMS]) -> Vec<u8> {
+    let mut p = *engine;
+    for (knob, at) in [(24, 2), (25, 24), (26, 5), (27, 15), (28, 10), (29, 25)] {
+        p[at] = shell[knob];
+    }
+    const LIMITS: [(i32, i32); DELAY_PARAMS - 1] = [
+        (0, 6000),
+        (0, 2),
+        (0, 1),
+        (0, 1),
+        (1, 768),
+        (0, 6000),
+        (0, 1000),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 1),
+        (0, 6000),
+        (0, 2),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 6000),
+        (0, 60000),
+        (0, 6000),
+        (0, 6000),
+        (-3000, 3000),
+        (0, 6000),
+    ];
+    let mut bytes = 1i32.to_le_bytes().to_vec();
+    for (i, (lo, hi)) in LIMITS.iter().enumerate() {
+        let v = p[i + 1].clamp(0.0, 1.0);
+        let value = match i {
+            // The shell's delay type has four places (2/3 is ping pong).
+            1 => ((v * 3.0).round() as i32).min(2),
+            2 | 3 | 13 => i32::from(v >= 0.5),
+            _ => lo + (v * (hi - lo) as f32).round() as i32,
+        };
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 /// One of a voice's envelopes (`Env`, `FUN_180390750`), stepped once a
@@ -678,6 +744,9 @@ impl Voice {
 /// The voice engine of FLEX, as far as it is built.
 pub struct Flex {
     rate: f32,
+    tempo: f64,
+    delay: Option<Box<Delay3>>,
+    scratch: [Vec<f32>; 2],
     generators: Option<PathBuf>,
     data: Option<PathBuf>,
     state: Option<State>,
@@ -698,6 +767,9 @@ impl Default for Flex {
         }
         Flex {
             rate: 44_100.0,
+            tempo: 120.0,
+            delay: None,
+            scratch: [vec![0.0; SCRATCH], vec![0.0; SCRATCH]],
             generators: None,
             data: None,
             state: None,
@@ -760,7 +832,18 @@ impl Flex {
         if self.waves.is_none() {
             self.waves = Some(Arc::new(Waves::load(self.generators.as_deref())));
         }
-        self.program = Some(Arc::new(build(&preset, &pack, &self.shell)));
+        let program = build(&preset, &pack, &self.shell);
+        self.delay = program
+            .delay
+            .filter(|_| self.shell[37] >= 0.5)
+            .and_then(|params| {
+                let mut delay = Box::new(Delay3::default());
+                delay.set_sample_rate(self.rate);
+                delay.set_tempo(self.tempo);
+                delay.set_state(&delay_state(&params, &self.shell)).ok()?;
+                Some(delay)
+            });
+        self.program = Some(Arc::new(program));
         self.lacking = None;
     }
 
@@ -1081,6 +1164,16 @@ impl Generator for Flex {
     fn set_sample_rate(&mut self, hz: f32) {
         if hz.is_finite() && hz > 0.0 {
             self.rate = hz;
+            if let Some(delay) = &mut self.delay {
+                delay.set_sample_rate(hz);
+            }
+        }
+    }
+
+    fn set_tempo(&mut self, bpm: f64) {
+        self.tempo = bpm;
+        if let Some(delay) = &mut self.delay {
+            delay.set_tempo(bpm);
         }
     }
 
@@ -1140,15 +1233,41 @@ impl Generator for Flex {
         }
     }
 
+    /// The voices, summed, through the master delay when the shell has
+    /// it on; the master's reverb, filter and limiter are not built.
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         if self.program.is_none() {
             return;
         }
         let len = left.len().min(right.len());
-        for v in 0..self.voices.len() {
-            if self.voices[v].on {
-                self.run_voice(v, &mut left[..len], &mut right[..len]);
+        if self.delay.is_none() {
+            for v in 0..self.voices.len() {
+                if self.voices[v].on {
+                    self.run_voice(v, &mut left[..len], &mut right[..len]);
+                }
             }
+            return;
+        }
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(SCRATCH);
+            let [mut sl, mut sr] = std::mem::take(&mut self.scratch);
+            sl[..n].fill(0.0);
+            sr[..n].fill(0.0);
+            for v in 0..self.voices.len() {
+                if self.voices[v].on {
+                    self.run_voice(v, &mut sl[..n], &mut sr[..n]);
+                }
+            }
+            if let Some(delay) = &mut self.delay {
+                delay.process(&mut sl[..n], &mut sr[..n]);
+            }
+            for i in 0..n {
+                left[done + i] += sl[i];
+                right[done + i] += sr[i];
+            }
+            self.scratch = [sl, sr];
+            done += n;
         }
     }
 
@@ -1179,6 +1298,9 @@ impl Generator for Flex {
         for v in &mut self.voices {
             v.on = false;
         }
+        if let Some(delay) = &mut self.delay {
+            delay.reset();
+        }
     }
 
     fn tail(&self) -> usize {
@@ -1189,7 +1311,10 @@ impl Generator for Flex {
                 .map(|z| z.release)
                 .fold(0.0f32, f32::max)
         });
-        ((longest + 0.1) * self.rate) as usize
+        // The delay's echoes die away within a few seconds at the
+        // feedback the presets use.
+        let echoes = if self.delay.is_some() { 4.0 } else { 0.0 };
+        ((longest + echoes + 0.1) * self.rate) as usize
     }
 
     fn fidelity(&self) -> Fidelity {
@@ -1208,7 +1333,7 @@ impl Generator for Flex {
                 "FLEX: the preset uses LFOs, FM, filter types or effects that are left out",
             ),
             Some(_) => Fidelity::Approximate(
-                "FLEX: the master effects are left out, and the voice is approximated",
+                "FLEX: the master reverb, filter and limiter are left out, and the voice is approximated",
             ),
         }
     }
