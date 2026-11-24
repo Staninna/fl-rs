@@ -327,6 +327,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::sytrus::NAME, || {
         Box::new(crate::sytrus::Sytrus::default())
     }),
+    (crate::voltage_controller::NAME, || {
+        Box::new(crate::voltage_controller::VoltageController::default())
+    }),
     (crate::wave_traveller::NAME, || {
         Box::new(crate::wave_traveller::WaveTraveller::default())
     }),
