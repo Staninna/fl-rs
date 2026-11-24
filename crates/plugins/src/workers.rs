@@ -88,8 +88,9 @@ pub fn for_each_with<S, T, I>(
 
 /// A lock that spins, for the moment it takes to step an iterator. It
 /// allocates nothing, where `std::sync::Mutex` allocates on its first lock
-/// on some platforms.
-struct Spin<T> {
+/// on some platforms, so a job made for one block can hand out its pieces
+/// under it.
+pub struct Spin<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,
 }
@@ -100,7 +101,8 @@ struct Spin<T> {
 unsafe impl<T: Send> Sync for Spin<T> {}
 
 impl<T> Spin<T> {
-    fn new(value: T) -> Self {
+    /// A lock holding `value`.
+    pub fn new(value: T) -> Self {
         Spin {
             locked: AtomicBool::new(false),
             value: UnsafeCell::new(value),
@@ -108,7 +110,7 @@ impl<T> Spin<T> {
     }
 
     /// Run `body` on the value with the lock held.
-    fn with<R>(&self, body: impl FnOnce(&mut T) -> R) -> R {
+    pub fn with<R>(&self, body: impl FnOnce(&mut T) -> R) -> R {
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)

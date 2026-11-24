@@ -153,6 +153,12 @@ impl Pool {
             panicked: AtomicBool::new(false),
             board: Board::new(),
         });
+        // On macOS a `Mutex` allocates its pthread mutex on its first lock,
+        // so every lock the audio path takes is taken once here.
+        drop(lock(&shared.job));
+        for desk in &shared.board.desks {
+            drop(lock(&desk.job));
+        }
         let threads = (0..workers)
             .filter_map(|n| {
                 let shared = Arc::clone(&shared);
@@ -161,10 +167,12 @@ impl Pool {
                 worker.ok().map(|handle| handle.thread().clone())
             })
             .collect();
+        let busy = Mutex::new(());
+        drop(lock(&busy));
         Pool {
             shared,
             threads,
-            busy: Mutex::new(()),
+            busy,
         }
     }
 
