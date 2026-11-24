@@ -116,6 +116,7 @@ pub mod reeverb_2;
 pub mod sakura;
 mod sakura_fx;
 mod sampler;
+pub mod sawer;
 pub mod send;
 pub mod seven_band_eq;
 pub mod simsynth;

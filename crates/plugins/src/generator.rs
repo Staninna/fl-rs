@@ -321,6 +321,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::sakura::NAME, || {
         Box::new(crate::sakura::Sakura::default())
     }),
+    (crate::sawer::NAME, || {
+        Box::new(crate::sawer::Sawer::default())
+    }),
     (crate::simsynth::NAME, || {
         Box::new(crate::simsynth::SimSynth::default())
     }),
