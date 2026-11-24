@@ -331,6 +331,31 @@ impl Chain {
         x as f32
     }
 
+    /// [`Chain::run`] for the bands' chains that run, stage by stage side
+    /// by side: each chain is a row of dependent steps, and three rows at
+    /// once keep the processor busy where one leaves it waiting. A band
+    /// whose chain does not run puts out its input.
+    fn run_side_by_side(
+        chains: [Option<&mut Chain>; MASTER],
+        inputs: [f32; MASTER],
+    ) -> [f32; MASTER] {
+        let mut chains = chains;
+        let mut x = inputs.map(f64::from);
+        for i in 0..STAGES {
+            for (chain, x) in chains.iter_mut().zip(&mut x) {
+                if let Some(chain) = chain
+                    && i < chain.count
+                {
+                    let state = &mut chain.state[i];
+                    let keep = if *x > *state { chain.rise } else { chain.fall };
+                    *state = *x + (*state - *x) * keep;
+                    *x = f64::from(*state as f32);
+                }
+            }
+        }
+        x.map(|x| x as f32)
+    }
+
     /// What FL does after every block: a state too small to hear is 0.
     fn flush(&mut self) {
         for state in &mut self.state[..self.count] {
@@ -829,15 +854,26 @@ impl Band {
     fn run(&mut self, frame: [f32; 2]) -> ([f32; 2], [f32; 2]) {
         let mut gain = self.post;
         if self.effective == 0 {
-            let level = if self.rms_mode {
-                let mean = self.rms.push(frame[0] * frame[0] + frame[1] * frame[1]);
-                (mean * 0.5).max(0.0).sqrt() as f32
-            } else {
-                self.peak.push(frame[0].abs().max(frame[1].abs()))
-            };
+            let level = self.level(frame);
             let level = self.release.run(level);
             gain = self.attack.run(self.table.gain(level, self.pre, self.post));
         }
+        self.apply(frame, gain)
+    }
+
+    /// The detector's level for a frame, in mode 0.
+    fn level(&mut self, frame: [f32; 2]) -> f32 {
+        if self.rms_mode {
+            let mean = self.rms.push(frame[0] * frame[0] + frame[1] * frame[1]);
+            (mean * 0.5).max(0.0).sqrt() as f32
+        } else {
+            self.peak.push(frame[0].abs().max(frame[1].abs()))
+        }
+    }
+
+    /// The frame held back, with the gain and the saturator on it, and
+    /// held back alone.
+    fn apply(&mut self, frame: [f32; 2], gain: f32) -> ([f32; 2], [f32; 2]) {
         let dry = self.delay.push(frame);
         let wet = dry.map(|sample| self.saturator.apply(sample * gain));
         (wet, dry)
@@ -1425,7 +1461,11 @@ impl Maximus {
         let split = self.split(frame);
         let (mix, mix_on) = (self.mix, self.mix != 1.0);
         let linear = self.switches.linear;
-        let mut sum = [0.0f32; 2];
+        // Each band as `Band::run` has it, but the bands' release chains
+        // side by side, then their attack chains.
+        let mut frames = [[0.0f32; 2]; MASTER];
+        let mut levels = [0.0f32; MASTER];
+        let mut gain = [0.0f32; MASTER];
         for b in 0..MASTER {
             let band = &mut self.bands[b];
             if band.effective >= 2 {
@@ -1433,7 +1473,39 @@ impl Maximus {
             }
             let [l, r] = split[b];
             let (l, r) = Matrix::mix(&gains[b], l, r);
-            let (wet, dry) = band.run([l, r]);
+            frames[b] = [l, r];
+            gain[b] = band.post;
+            if band.effective == 0 {
+                levels[b] = band.level(frames[b]);
+            }
+        }
+        let [low, mid, high, _] = self.bands.each_mut();
+        let mut bands = [low, mid, high];
+        let compressing = bands.each_ref().map(|band| band.effective == 0);
+        let chains = bands
+            .each_mut()
+            .map(|band| (band.effective == 0).then_some(&mut band.release));
+        let levels = Chain::run_side_by_side(chains, levels);
+        for (b, band) in bands.iter().enumerate() {
+            if compressing[b] {
+                gain[b] = band.table.gain(levels[b], band.pre, band.post);
+            }
+        }
+        let chains = bands
+            .each_mut()
+            .map(|band| (band.effective == 0).then_some(&mut band.attack));
+        let attacked = Chain::run_side_by_side(chains, gain);
+        for b in 0..MASTER {
+            if compressing[b] {
+                gain[b] = attacked[b];
+            }
+        }
+        let mut sum = [0.0f32; 2];
+        for (b, band) in bands.into_iter().enumerate() {
+            if band.effective >= 2 {
+                continue;
+            }
+            let (wet, dry) = band.apply(frames[b], gain[b]);
             let sign = band.sign;
             for k in 0..2 {
                 let out = if mix_on {
