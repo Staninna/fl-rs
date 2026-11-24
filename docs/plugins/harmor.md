@@ -1208,6 +1208,13 @@ Threading: with `QThreadedBox` and two or more voices, workers take voices
 from an atomic counter (`FUN_00891210`), each with its own buffer set; sets
 1.. are added into set 0. The arithmetic is the same single-threaded.
 
+The port renders its voices on the host's workers too
+(`Generator::set_workers`, `crates/plugins/src/workers.rs`) with two or
+more voices sounding: each voice keeps what it would add to the four buses
+(`Voice::out`), and the plugin adds them in its voice order afterwards, so
+the output is the same to the bit as on one thread. A voice reads only the
+part's and the block's numbers, worked out before the voices run.
+
 ## 4. Effects (Gen_Render tail, `FUN_00891320`)
 
 ### 4.1 Chain

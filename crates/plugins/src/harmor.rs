@@ -33,6 +33,7 @@ use crate::harmor_state::{
 };
 use crate::maximus::Maximus;
 use crate::menvelope::MEnvelope;
+use crate::workers::{self, Workers};
 use crate::{Effect, Fidelity, Generator, NoteOn, StateError};
 use dsp::additive::{SILENT, ShapeTable};
 use dsp::curve::Curve;
@@ -1091,6 +1092,11 @@ struct Voice {
     gains: [f32; 4],
     aims: [f32; 4],
     mono: [f32; CHUNK],
+    /// What the voice put into the effects bus and the dry bus, left and
+    /// right, in its last chunk when it rendered on a worker; `rendered`
+    /// says it did and its chunk is still to be summed.
+    out: [[f32; CHUNK]; 4],
+    rendered: bool,
 }
 
 impl Voice {
@@ -1161,6 +1167,8 @@ impl Voice {
             gains: [0.0; 4],
             aims: [0.0; 4],
             mono: [0.0; CHUNK],
+            out: [[0.0; CHUNK]; 4],
+            rendered: false,
         }
     }
 }
@@ -1192,8 +1200,6 @@ pub struct Harmor {
     compression: Option<Box<Maximus>>,
     compression_states: [Option<Vec<u8>>; 4],
     missing_compression: bool,
-    fx: [[f32; CHUNK]; 2],
-    dry: [[f32; CHUNK]; 2],
     units: Box<GlobalFx>,
     /// The held voices changed since the arpeggiator last ranked them
     /// (this+0xe90).
@@ -1202,6 +1208,8 @@ pub struct Harmor {
     /// voices start, moved on with each block (`Gen_Render`'s list at
     /// this+0x2cf0).
     lfo_phase: [[u32; ARTICULATORS]; 2],
+    /// The threads the voices may render on.
+    workers: Option<&'static dyn Workers>,
 }
 
 impl Default for Harmor {
@@ -1236,11 +1244,10 @@ impl Default for Harmor {
             compression: None,
             compression_states: [None, None, None, None],
             missing_compression: false,
-            fx: [[0.0; CHUNK]; 2],
-            dry: [[0.0; CHUNK]; 2],
             units: Box::new(GlobalFx::new(44_100.0)),
             arp_dirty: false,
             lfo_phase: [[0; ARTICULATORS]; 2],
+            workers: None,
         };
         plugin.derive();
         plugin
@@ -2533,14 +2540,10 @@ fn clip(dsp: &PartDsp, v: &mut Voice, amount: f32) {
 }
 
 impl Harmor {
-    /// Render one chunk of a voice into the buses.
-    fn render_voice(
-        &self,
-        v: &mut Voice,
-        len: usize,
-        fx: &mut [[f32; CHUNK]; 2],
-        dry: &mut [[f32; CHUNK]; 2],
-    ) {
+    /// Render one chunk of a voice and add it to the buses, the effects
+    /// bus and the dry one, or with none keep what it would add in its
+    /// [`Voice::out`]. This reads nothing but the voice that it changes.
+    fn render_voice(&self, v: &mut Voice, len: usize, mut buses: Option<&mut [[f32; CHUNK]; 4]>) {
         let dsp = &self.parts[v.part];
         let ctx = &self.ctx;
         let mut done = 0;
@@ -2593,11 +2596,26 @@ impl Harmor {
             }
             let r_sign = if mid_side { -1.0 } else { 1.0 };
             let (sl, sr) = (s * trem[0], s * trem[1] * r_sign);
-            fx[0][i] += sl * v.gains[0];
-            fx[1][i] += sr * v.gains[1];
-            dry[0][i] += sl * v.gains[2];
-            dry[1][i] += sr * v.gains[3];
+            let put = [
+                sl * v.gains[0],
+                sr * v.gains[1],
+                sl * v.gains[2],
+                sr * v.gains[3],
+            ];
+            match &mut buses {
+                Some(buses) => {
+                    for (bus, x) in buses.iter_mut().zip(put) {
+                        bus[i] += x;
+                    }
+                }
+                None => {
+                    for (out, x) in v.out.iter_mut().zip(put) {
+                        out[i] = x;
+                    }
+                }
+            }
         }
+        v.rendered = buses.is_none();
         // The end of a voice: the volume envelope is over and settled,
         // or there is none (FUN_008856b0).
         if v.state >= 6 && v.state < 9 {
@@ -2690,6 +2708,10 @@ impl Generator for Harmor {
         }
     }
 
+    fn set_workers(&mut self, workers: Option<&'static dyn Workers>) {
+        self.workers = workers;
+    }
+
     fn set_resource_dir(&mut self, dir: &Path) {
         for n in 0..4 {
             let path = dir.join(COMPRESSION).join(format!("{}.fst", n + 1));
@@ -2735,16 +2757,38 @@ impl Generator for Harmor {
         let mut done = 0;
         while done < total {
             let len = (total - done).min(CHUNK);
-            let mut fx = self.fx;
-            let mut dry = self.dry;
-            for b in fx.iter_mut().chain(dry.iter_mut()) {
-                b[..len].fill(0.0);
-            }
+            // The effects bus and the dry bus, left and right.
+            let mut buses = [[0.0; CHUNK]; 4];
             let mut voices = std::mem::take(&mut self.voices);
-            for v in voices.iter_mut().filter(|v| v.active) {
-                self.render_voice(v, len, &mut fx, &mut dry);
+            let sounding = voices.iter().filter(|v| v.active).count();
+            match self.workers {
+                // Every voice on its own, on the workers, then summed in
+                // the order one thread adds them in.
+                Some(workers) if sounding >= 2 => {
+                    let this = &*self;
+                    let active = voices.iter_mut().filter(|v| v.active);
+                    workers::for_each(Some(workers), (active, sounding), 2, |v| {
+                        this.render_voice(v, len, None);
+                    });
+                    for v in voices.iter_mut().filter(|v| v.rendered) {
+                        v.rendered = false;
+                        for (bus, out) in buses.iter_mut().zip(&v.out) {
+                            for (bus, x) in bus[..len].iter_mut().zip(&out[..len]) {
+                                *bus += x;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for v in voices.iter_mut().filter(|v| v.active) {
+                        self.render_voice(v, len, Some(&mut buses));
+                    }
+                }
             }
             self.voices = voices;
+            let [fx0, fx1, dry0, dry1] = &mut buses;
+            let mut fx = [fx0, fx1];
+            let dry = [dry0, dry1];
             // The FX units in their order (FUN_00892e10).
             debug_assert!(len <= FX_BLOCK);
             for unit in self.state.globals.fx_order {
@@ -3225,6 +3269,20 @@ mod tests {
             .map(|v| v.id)
             .collect();
         assert_eq!(ids, vec![2]);
+    }
+
+    #[test]
+    fn the_voices_play_the_same_on_workers() {
+        crate::testing::same_on_workers(|| Box::new(Harmor::default()), &[], 44_100.0);
+        // And the corpus's states, every one with its compression and
+        // unison as the project has them.
+        let Some(root) = crate::testing::corpus() else {
+            return;
+        };
+        let mut states = crate::testing::projects(&root);
+        states.retain(|s| s.plugin.eq_ignore_ascii_case(NAME));
+        let states: Vec<_> = states.into_iter().map(|s| s.state).collect();
+        crate::testing::same_on_workers(|| Box::new(Harmor::default()), &states, 44_100.0);
     }
 
     #[test]

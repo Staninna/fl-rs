@@ -150,6 +150,7 @@ pub mod voltage_controller;
 pub mod wave_candy;
 pub mod wave_traveller;
 pub mod waveshaper;
+pub mod workers;
 pub mod wrapper;
 pub mod xy_controller;
 pub mod xyz_controller;
@@ -158,6 +159,7 @@ pub mod zgameeditor;
 pub use generator::{Generator, NoteOn, SampleFile, generator_by_name};
 use std::fmt;
 use std::path::Path;
+pub use workers::Workers;
 
 /// One plugin in an effect slot.
 ///

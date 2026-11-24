@@ -1,3 +1,27 @@
+# Handoff, 2026-11-24, voices on the workers
+
+`todo.md` item 1. Harmor, Harmless and Sytrus render their voices on the mixer's worker threads, and all 165 profile-harness hashes at 1024 frames are the same as before (the baseline at `FL_RS_THREADS=1` against the change at 2).
+
+- `plugins::workers`: the `Workers` trait a host lends a generator with `Generator::set_workers`, and `for_each` / `for_each_with`, which run a job over items on the workers or, with none, in a plain loop. The engine hands every generator it builds to play the process's pool (`engine::generator::hosted`).
+- `crates/engine/src/pool.rs`: a board of eight desks beside the mixer's rounds. A plugin opens its job on a desk, runs it itself and waits only for the calls other threads have already taken; a worker between rounds, or the caller of a round while it waits for its workers, takes a call. Nobody waits for a call that has not started, so a plugin playing on a worker in mid-round cannot lock the pool, and with every thread busy the plugin simply renders alone. It allocates nothing; the workers keep FTZ/DAZ and real-time priority.
+- Each plugin keeps each voice's output in a buffer of its own (Harmor and Harmless in the voice, Sytrus row by row in a store sized at load) and adds them in the voice order one thread uses. Harmor and Harmless fan out with two or more voices. Sytrus also needs no voice starting (band-limited copies are taken from a shared pool), no plucked operator (strings likewise) and no released master of a shared unison in the block; a shared unison renders on one thread, slaves then master, with a scratch block per thread.
+- Tests: `testing::same_on_workers` (chords in odd blocks, with and without three threads, to the bit) on the defaults and every corpus state of the three, plus a seventh of Sytrus's presets; a nested fan-out test on the pool; Harmless and Sytrus in the engine's no-allocation song. The one-thread path costs 0.25 to 0.6% more instructions in the plugin bench (callgrind); the bench check passes.
+
+Timing on this 4-core machine shared with other agents is noisy (load 8 to 20, so the baseline runs at about half the speed the README's 8-core table shows). Medians of three interleaved runs, `--frames 1024 --warmup 0`, speed and p99 call against the 21.3 ms budget, calls over (the slowest call is preemption here and says little):
+
+| Project | before, 1 thread | after, 1 | after, 2 | after, 4 |
+|---|---|---|---|---|
+| Olbaid - Harmless Essentials | 0.6x, 490%, 1475 | 0.7x, 510%, 1339 | 0.7x, 416%, 1345 | 1.0x, 314%, 941 |
+| JuiceBass - SeamlessR - Menagerie | 1.2x, 199%, 757 | 1.2x, 209%, 741 | 1.8x, 185%, 192 | 1.7x, 123%, 129 |
+| Square a Saw - Oxygen | 0.8x, 334%, 1337 | 1.0x, 191%, 931 | 1.3x, 150%, 332 | 1.5x, 124%, 109 |
+| Olbaid - Sytrus Essentials | 1.4x, 178%, 341 | 0.9x, 430%, 790 | 1.5x, 181%, 215 | 1.4x, 179%, 254 |
+
+The one-thread columns differ by noise only (the same code to within 0.6% of the instructions). Sytrus Essentials is inconclusive: one pass went from 1.0x to 1.9x, the others not; how many of its blocks the conditions above send to one thread was not counted. The gain is capped by what the voices feed: Harmless Essentials is about 45% voices and 45% its reverb and the Maximus behind them (`perf`, one thread), which stay on one thread.
+
+Found on the way, not changed: in Sytrus, a shared unison's master that ends mid-block leaves what its slaves summed for the rest of the block in the scratch, and the next master to render (in this block or a later one) adds it to its own. The parallel path renders such blocks on one thread so the bits stay; whether FL does this is not checked.
+
+Next: overlap a chunk's effect chain with the next chunk's voices in Harmor and Harmless (the voices do not read the effects, so the bits stay); hand Patcher's inner generators the workers (`Told`); the cold first call in the engine (`todo.md` item 2) was not started.
+
 # Handoff, 2026-11-03, big projects stay smooth
 
 Playing and editing large projects lagged. Three changes, on `main`.

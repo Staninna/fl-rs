@@ -262,6 +262,11 @@ pub(crate) fn hosted(
     if let Some(path) = channel.sample_path.as_deref().filter(|p| !p.is_empty()) {
         generator.set_channel_sample(path);
     }
+    // A generator that will play may render its voices on the mixer's
+    // workers.
+    if timing.is_some() {
+        generator.set_workers(crate::pool::workers());
+    }
     Some(generator)
 }
 
