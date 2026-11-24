@@ -203,6 +203,10 @@ const QUIET: f32 = 1e-6;
 /// The highest oversampling order run as FL runs it: eight times. The
 /// corpus and the presets ask for 0 or 1.
 const MAX_ORDER: usize = 3;
+/// The frames the plugin takes through at a time, in passes, and as many
+/// at the band rate at the most oversampling.
+const RUN: usize = 32;
+const WIDE_RUN: usize = RUN << MAX_ORDER;
 
 /// The low cut's four sections: their `1 / (2 Q)` at 0.8 of the wheel's
 /// frequency.
@@ -321,39 +325,51 @@ struct Chain {
 }
 
 impl Chain {
-    fn run(&mut self, input: f32) -> f32 {
-        let mut x = f64::from(input);
-        for state in &mut self.state[..self.count] {
-            let keep = if x > *state { self.rise } else { self.fall };
-            *state = x + (*state - x) * keep;
-            x = f64::from(*state as f32);
+    /// [`Chain::run`] on each of a run of inputs in turn, in place. The
+    /// stages run as a wave: at step `k` stage `i` takes input `k - i`,
+    /// so a step's stage updates do not wait on each other as a frame's
+    /// do, each on the stage before. Each stage takes its inputs in order
+    /// with the same operations, so the bits are those of a frame at a
+    /// time.
+    fn run_wave(&mut self, xs: &mut [f32]) {
+        let (n, count) = (xs.len(), self.count);
+        if count == 0 || n == 0 {
+            return;
         }
-        x as f32
-    }
-
-    /// [`Chain::run`] for the bands' chains that run, stage by stage side
-    /// by side: each chain is a row of dependent steps, and three rows at
-    /// once keep the processor busy where one leaves it waiting. A band
-    /// whose chain does not run puts out its input.
-    fn run_side_by_side(
-        chains: [Option<&mut Chain>; MASTER],
-        inputs: [f32; MASTER],
-    ) -> [f32; MASTER] {
-        let mut chains = chains;
-        let mut x = inputs.map(f64::from);
-        for i in 0..STAGES {
-            for (chain, x) in chains.iter_mut().zip(&mut x) {
-                if let Some(chain) = chain
-                    && i < chain.count
-                {
-                    let state = &mut chain.state[i];
-                    let keep = if *x > *state { chain.rise } else { chain.fall };
-                    *state = *x + (*state - *x) * keep;
-                    *x = f64::from(*state as f32);
+        let (rise, fall) = (self.rise, self.fall);
+        let mut state = self.state;
+        // Each stage's last output, which the next stage takes a step on.
+        let mut carry = [0.0f64; STAGES];
+        let mut step =
+            |state: &mut [f64; STAGES], carry: &mut [f64; STAGES], i: usize, t: usize| {
+                let x = if i == 0 {
+                    f64::from(xs[t])
+                } else {
+                    carry[i - 1]
+                };
+                let stage = &mut state[i];
+                let keep = if x > *stage { rise } else { fall };
+                *stage = x + (*stage - x) * keep;
+                carry[i] = f64::from(*stage as f32);
+                if i == count - 1 {
+                    xs[t] = carry[i] as f32;
+                }
+            };
+        // The last stage first, so each takes the carry of the step before.
+        for k in 0..n + count - 1 {
+            if k >= count - 1 && k < n {
+                for i in (0..count).rev() {
+                    step(&mut state, &mut carry, i, k - i);
+                }
+            } else {
+                for i in (0..count).rev() {
+                    if i <= k && k - i < n {
+                        step(&mut state, &mut carry, i, k - i);
+                    }
                 }
             }
         }
-        x.map(|x| x as f32)
+        self.state = state;
     }
 
     /// What FL does after every block: a state too small to hear is 0.
@@ -848,17 +864,20 @@ impl Band {
         self.rms.make_room(longest);
     }
 
-    /// One frame through the band's engine, after the stereo separation:
-    /// the sound held back and gained, and the sound held back alone. The
-    /// band is in mode 0 or 1.
-    fn run(&mut self, frame: [f32; 2]) -> ([f32; 2], [f32; 2]) {
-        let mut gain = self.post;
-        if self.effective == 0 {
-            let level = self.level(frame);
-            let level = self.release.run(level);
-            gain = self.attack.run(self.table.gain(level, self.pre, self.post));
+    /// The band's engine on a run of frames, after the stereo separation,
+    /// up to the gain: `gains` comes in holding each frame's detector level
+    /// ([`Band::level`]) and goes out holding its gain. The band is in mode
+    /// 0 or 1; in mode 1 the gain is the post gain.
+    fn gains(&mut self, gains: &mut [f32]) {
+        if self.effective != 0 {
+            gains.fill(self.post);
+            return;
         }
-        self.apply(frame, gain)
+        self.release.run_wave(gains);
+        for gain in gains.iter_mut() {
+            *gain = self.table.gain(*gain, self.pre, self.post);
+        }
+        self.attack.run_wave(gains);
     }
 
     /// The detector's level for a frame, in mode 0.
@@ -1412,118 +1431,128 @@ impl Maximus {
         [low, mid, high]
     }
 
-    /// One frame at the project rate through the plugin: the low cut,
-    /// up to the band rate, the three bands, down again, the master. Each
-    /// band's separation gains move on by their step after each of its
-    /// frames.
-    fn frame(
+    /// A run of frames at the project rate through the plugin, at most
+    /// [`RUN`] of them: the low cut, up to the band rate, the three bands,
+    /// down again, the master. Each band's separation gains move on by
+    /// their step after each of its frames.
+    ///
+    /// The bands' and the master's stage chains wait on themselves frame
+    /// after frame, but nothing feeds them from what comes after them, so
+    /// the run goes in passes: the crossover and the detectors for every
+    /// frame, then each band's chains over the run ([`Chain::run_wave`]),
+    /// then the bands' delays and saturators and their sum, frame by
+    /// frame, then the master the same way. Each part takes its frames in
+    /// order, so the output is that of a frame at a time.
+    fn run_frames(
         &mut self,
-        frame: [f32; 2],
+        left: &mut [f32],
+        right: &mut [f32],
         gains: &mut [[f32; 4]; BANDS],
         steps: &[[f32; 4]; BANDS],
-    ) -> [f32; 2] {
-        let frame = if self.low_cut_on {
-            run(&mut self.low_cut, frame)
-        } else {
-            frame
-        };
+    ) {
+        let n = left.len().min(right.len()).min(RUN);
         let order = self.order();
-        let sum = if order == 0 {
-            self.bands_frame(frame, gains, steps)
-        } else {
+        let os = 1 << order;
+        let wide_n = n * os;
+        let mut frames = [[[0.0f32; 2]; WIDE_RUN]; MASTER];
+        let mut levels = [[0.0f32; WIDE_RUN]; MASTER];
+        for (j, (l, r)) in left[..n].iter().zip(right[..n].iter()).enumerate() {
+            let frame = if self.low_cut_on {
+                run(&mut self.low_cut, [*l, *r])
+            } else {
+                [*l, *r]
+            };
             let mut wide = [[0.0f32; 2]; 1 << MAX_ORDER];
-            self.oversampler.up(order, frame, &mut wide);
-            for frame in wide.iter_mut().take(1 << order) {
-                *frame = self.bands_frame(*frame, gains, steps);
+            if order == 0 {
+                wide[0] = frame;
+            } else {
+                self.oversampler.up(order, frame, &mut wide);
             }
-            self.oversampler.down(order, &mut wide)
-        };
-        let master = &mut self.bands[MASTER];
-        let gain = gains[MASTER];
-        for (g, s) in gains[MASTER].iter_mut().zip(&steps[MASTER]) {
-            *g += s;
+            for (w, frame) in wide[..os].iter().enumerate() {
+                let t = j * os + w;
+                let split = self.split(*frame);
+                for b in 0..MASTER {
+                    let band = &mut self.bands[b];
+                    if band.effective >= 2 {
+                        continue;
+                    }
+                    let [l, r] = split[b];
+                    let (l, r) = Matrix::mix(&gains[b], l, r);
+                    frames[b][t] = [l, r];
+                    if band.effective == 0 {
+                        levels[b][t] = band.level([l, r]);
+                    }
+                }
+                for (gain, step) in gains.iter_mut().zip(steps).take(MASTER) {
+                    for (g, s) in gain.iter_mut().zip(step) {
+                        *g += s;
+                    }
+                }
+            }
         }
-        if master.effective >= 2 {
-            return [0.0; 2];
+        for (band, levels) in self.bands.iter_mut().zip(&mut levels) {
+            if band.effective < 2 {
+                band.gains(&mut levels[..wide_n]);
+            }
         }
-        let (l, r) = Matrix::mix(&gain, sum[0], sum[1]);
-        master.run([l, r]).0
-    }
-
-    /// One frame at the band rate through the crossover and the three
-    /// bands: their sum.
-    fn bands_frame(
-        &mut self,
-        frame: [f32; 2],
-        gains: &mut [[f32; 4]; BANDS],
-        steps: &[[f32; 4]; BANDS],
-    ) -> [f32; 2] {
-        let split = self.split(frame);
         let (mix, mix_on) = (self.mix, self.mix != 1.0);
         let linear = self.switches.linear;
-        // Each band as `Band::run` has it, but the bands' release chains
-        // side by side, then their attack chains.
-        let mut frames = [[0.0f32; 2]; MASTER];
-        let mut levels = [0.0f32; MASTER];
-        let mut gain = [0.0f32; MASTER];
-        for b in 0..MASTER {
-            let band = &mut self.bands[b];
-            if band.effective >= 2 {
-                continue;
+        let mut sums = [[0.0f32; 2]; RUN];
+        for (j, sum) in sums[..n].iter_mut().enumerate() {
+            let mut wide = [[0.0f32; 2]; 1 << MAX_ORDER];
+            for (w, wide) in wide[..os].iter_mut().enumerate() {
+                let t = j * os + w;
+                let mut sum = [0.0f32; 2];
+                for (b, band) in self.bands[..MASTER].iter_mut().enumerate() {
+                    if band.effective >= 2 {
+                        continue;
+                    }
+                    let (wet, dry) = band.apply(frames[b][t], levels[b][t]);
+                    let sign = band.sign;
+                    for k in 0..2 {
+                        let out = if mix_on {
+                            wet[k] * mix * sign + dry[k] * (1.0 - mix) * sign
+                        } else if sign == -1.0 && !linear {
+                            -wet[k]
+                        } else {
+                            wet[k]
+                        };
+                        sum[k] += out;
+                    }
+                }
+                *wide = sum;
             }
-            let [l, r] = split[b];
-            let (l, r) = Matrix::mix(&gains[b], l, r);
-            frames[b] = [l, r];
-            gain[b] = band.post;
-            if band.effective == 0 {
-                levels[b] = band.level(frames[b]);
-            }
+            *sum = if order == 0 {
+                wide[0]
+            } else {
+                self.oversampler.down(order, &mut wide)
+            };
         }
-        let [low, mid, high, _] = self.bands.each_mut();
-        let mut bands = [low, mid, high];
-        let compressing = bands.each_ref().map(|band| band.effective == 0);
-        let chains = bands
-            .each_mut()
-            .map(|band| (band.effective == 0).then_some(&mut band.release));
-        let levels = Chain::run_side_by_side(chains, levels);
-        for (b, band) in bands.iter().enumerate() {
-            if compressing[b] {
-                gain[b] = band.table.gain(levels[b], band.pre, band.post);
-            }
-        }
-        let chains = bands
-            .each_mut()
-            .map(|band| (band.effective == 0).then_some(&mut band.attack));
-        let attacked = Chain::run_side_by_side(chains, gain);
-        for b in 0..MASTER {
-            if compressing[b] {
-                gain[b] = attacked[b];
-            }
-        }
-        let mut sum = [0.0f32; 2];
-        for (b, band) in bands.into_iter().enumerate() {
-            if band.effective >= 2 {
-                continue;
-            }
-            let (wet, dry) = band.apply(frames[b], gain[b]);
-            let sign = band.sign;
-            for k in 0..2 {
-                let out = if mix_on {
-                    wet[k] * mix * sign + dry[k] * (1.0 - mix) * sign
-                } else if sign == -1.0 && !linear {
-                    -wet[k]
-                } else {
-                    wet[k]
-                };
-                sum[k] += out;
-            }
-        }
-        for (gain, step) in gains.iter_mut().zip(steps).take(MASTER) {
-            for (g, s) in gain.iter_mut().zip(step) {
+        // The master, the same way.
+        let master = &mut self.bands[MASTER];
+        let mut master_levels = [0.0f32; RUN];
+        for (sum, level) in sums[..n].iter_mut().zip(&mut master_levels) {
+            let gain = gains[MASTER];
+            for (g, s) in gains[MASTER].iter_mut().zip(&steps[MASTER]) {
                 *g += s;
             }
+            if master.effective < 2 {
+                let (l, r) = Matrix::mix(&gain, sum[0], sum[1]);
+                *sum = [l, r];
+                if master.effective == 0 {
+                    *level = master.level(*sum);
+                }
+            }
         }
-        sum
+        if master.effective >= 2 {
+            left[..n].fill(0.0);
+            right[..n].fill(0.0);
+            return;
+        }
+        master.gains(&mut master_levels[..n]);
+        for (j, (l, r)) in left[..n].iter_mut().zip(right[..n].iter_mut()).enumerate() {
+            [*l, *r] = master.apply(sums[j], master_levels[j]).0;
+        }
     }
 
     /// Forget the frames so far, as FL's flush does.
@@ -1823,8 +1852,8 @@ impl Effect for Maximus {
         }
         let mut gains = ramps.map(|(from, _)| from);
         let steps = ramps.map(|(_, step)| step);
-        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-            [*l, *r] = self.frame([*l, *r], &mut gains, &steps);
+        for (left, right) in left.chunks_mut(RUN).zip(right.chunks_mut(RUN)) {
+            self.run_frames(left, right, &mut gains, &steps);
         }
         for band in &mut self.bands {
             band.end_block();
