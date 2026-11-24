@@ -12,6 +12,8 @@ dsp = { path = "../dsp" }
 miniz_oxide = "0.9"
 # Convolver's impulses are WavPack files.
 wavicle = "0.1"
+# FLEX's packs hold their samples as FLAC.
+symphonia = { version = "0.6", default-features = false, features = ["flac"] }
 
 [dev-dependencies]
 # The plugin bench flushes denormals to zero, as the engine does.

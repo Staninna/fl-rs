@@ -276,6 +276,7 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::fl_slayer::NAME, || {
         Box::new(crate::fl_slayer::FlSlayer::default())
     }),
+    (crate::flex::NAME, || Box::new(crate::flex::Flex::default())),
     (crate::fpc::NAME, || Box::new(crate::fpc::Fpc::default())),
     (crate::fruit_kick::NAME, || {
         Box::new(crate::fruit_kick::FruitKick::default())
@@ -391,7 +392,7 @@ mod tests {
                 assert!(generator.tail() > 0, "{name}");
             }
         }
-        for name in ["3xOsc", "FLEX", "Fruity Wrapper", ""] {
+        for name in ["3xOsc", "Fruity Wrapper", ""] {
             assert!(generator_by_name(name).is_none(), "{name}");
         }
         // An effect is no generator, and a generator no effect.
