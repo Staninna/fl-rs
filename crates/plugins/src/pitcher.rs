@@ -132,6 +132,8 @@ const VOICES: usize = 4;
 
 /// The detector sums its differences this many samples at a time.
 const BLOCK: usize = 64;
+/// And band-passes this many samples at a time, ahead of the rest.
+const RUN: usize = 256;
 /// And this many lags side by side.
 const LAGS: usize = 16;
 
@@ -227,6 +229,66 @@ struct Side {
 }
 
 impl Side {
+    /// The detector's band pass (`FUN_18001e030`'s inner loop) on a run of
+    /// input samples, into `out`: the DC blocker, then the sixteen stages.
+    /// Nothing else in the plugin reads the band pass's state or feeds it,
+    /// so a run can be passed before the rest of the plugin plays it.
+    ///
+    /// Each stage waits on its own last sample and on the stage before, so
+    /// a sample at a time is sixteen steps in a row. Here the stages run
+    /// as a wave instead: at step `k` stage `i` takes sample `k - i`, so
+    /// that the sixteen steps of a step are all apart and the processor
+    /// overlaps them. Every stage still takes its samples in order with
+    /// the same sums, so the bits are the same.
+    fn band_pass(&mut self, input: &[f32], out: &mut [f32]) {
+        let n = input.len();
+        let mut dc = self.dc;
+        for (x, y) in input.iter().zip(out.iter_mut()) {
+            let next = (x - dc) * DC_POLE + dc;
+            dc = if next < TINY && next > -TINY {
+                0.0
+            } else {
+                next
+            };
+            *y = x - next;
+        }
+        self.dc = dc;
+        let mut stages = self.stages;
+        // Each stage's last output, which the next stage takes a step on.
+        let mut carry = [0.0f32; STAGES];
+        let tiny = f64::from(TINY);
+        let mut step =
+            |stages: &mut [f64; STAGES], carry: &mut [f32; STAGES], i: usize, t: usize| {
+                let y = if i == 0 { out[t] } else { carry[i - 1] };
+                let stage = &mut stages[i];
+                let next = (f64::from(y) - *stage) * STAGE_POLE + *stage;
+                *stage = if next < tiny && next > -tiny {
+                    0.0
+                } else {
+                    next
+                };
+                carry[i] = next as f32;
+                if i == STAGES - 1 {
+                    out[t] = carry[i];
+                }
+            };
+        // The last stage first, so each takes the carry of the step before.
+        for k in 0..n + STAGES - 1 {
+            if k >= STAGES - 1 && k < n {
+                for i in (0..STAGES).rev() {
+                    step(&mut stages, &mut carry, i, k - i);
+                }
+            } else {
+                for i in (0..STAGES).rev() {
+                    if i <= k && k - i < n {
+                        step(&mut stages, &mut carry, i, k - i);
+                    }
+                }
+            }
+        }
+        self.stages = stages;
+    }
+
     /// Add the pending samples' differences to the sums (`FUN_18001e030`'s
     /// inner loop, which FL runs a sample at a time). Each sum takes its
     /// samples' differences one by one in the order they came, as FL's
@@ -554,23 +616,12 @@ impl Pitcher {
     }
 
     /// One frame of the detector on one side (`FUN_18001e030`'s inner
-    /// loop): the band pass, the differences, and the correction moving.
-    fn detect(&mut self, side: usize, x: f32) {
+    /// loop), for the band-passed sample `y` ([`Side::band_pass`]): the
+    /// differences, and the correction moving.
+    fn detect(&mut self, side: usize, y: f32) {
         let speed = self.speed;
         let grain_write = self.grain_write;
         let state = &mut self.sides[side];
-        let dc = (x - state.dc) * DC_POLE + state.dc;
-        state.dc = if dc < TINY && dc > -TINY { 0.0 } else { dc };
-        let mut y = x - dc;
-        for stage in &mut state.stages {
-            let next = (f64::from(y) - *stage) * STAGE_POLE + *stage;
-            *stage = if next < f64::from(TINY) && next > -f64::from(TINY) {
-                0.0
-            } else {
-                next
-            };
-            y = next as f32;
-        }
         state.marks[grain_write] = y;
         let frame = self.frame;
         state.line[frame + state.pending] = y;
@@ -669,6 +720,57 @@ impl Pitcher {
                 if off || self.bypass_all {
                     state.target = 0.0;
                 }
+            }
+        }
+    }
+
+    /// A run of frames through the shifters and the detector, with the
+    /// run's band-passed input.
+    fn play(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        passed: &[[f32; RUN]; 2],
+        harmony: &Option<Harmony>,
+        level_one: &[[f32; VOICES]; 2],
+    ) {
+        for (t, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+            let input = [*l, *r];
+            let (shifts, levels, with_input) = match harmony {
+                Some((shifts, levels, with_input)) => (*shifts, *levels, *with_input),
+                None => {
+                    let (from_left, from_right) = match self.reference {
+                        1 => (0, 1),
+                        2 => (1, 1),
+                        _ => (0, 0),
+                    };
+                    let mut shifts = [[0.0; VOICES]; 2];
+                    shifts[0][0] = self.fine + self.sides[from_left].correction;
+                    shifts[1][0] = self.fine + self.sides[from_right].correction;
+                    (shifts, *level_one, false)
+                }
+            };
+            let mut out = if self.formant {
+                self.shift_formant(input, &shifts, &levels)
+            } else {
+                self.shift(input, &shifts, &levels)
+            };
+            if with_input {
+                out[0] += input[0];
+                out[1] += input[1];
+            }
+            *l = out[0];
+            *r = out[1];
+            self.detect(0, passed[0][t]);
+            self.detect(1, passed[1][t]);
+            self.count += 1;
+            if self.count == self.frame {
+                self.find_periods();
+                self.find_targets();
+                for side in &mut self.sides {
+                    side.sums.fill(0.0);
+                }
+                self.count = 0;
             }
         }
     }
@@ -992,44 +1094,12 @@ impl Effect for Pitcher {
         }
         let harmony = self.harmony();
         let level_one = [[1.0, 0.0, 0.0, 0.0]; 2];
-        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-            let input = [*l, *r];
-            let (shifts, levels, with_input) = match &harmony {
-                Some((shifts, levels, with_input)) => (*shifts, *levels, *with_input),
-                None => {
-                    let (from_left, from_right) = match self.reference {
-                        1 => (0, 1),
-                        2 => (1, 1),
-                        _ => (0, 0),
-                    };
-                    let mut shifts = [[0.0; VOICES]; 2];
-                    shifts[0][0] = self.fine + self.sides[from_left].correction;
-                    shifts[1][0] = self.fine + self.sides[from_right].correction;
-                    (shifts, level_one, false)
-                }
-            };
-            let mut out = if self.formant {
-                self.shift_formant(input, &shifts, &levels)
-            } else {
-                self.shift(input, &shifts, &levels)
-            };
-            if with_input {
-                out[0] += input[0];
-                out[1] += input[1];
-            }
-            *l = out[0];
-            *r = out[1];
-            self.detect(0, input[0]);
-            self.detect(1, input[1]);
-            self.count += 1;
-            if self.count == self.frame {
-                self.find_periods();
-                self.find_targets();
-                for side in &mut self.sides {
-                    side.sums.fill(0.0);
-                }
-                self.count = 0;
-            }
+        let mut passed = [[0.0f32; RUN]; 2];
+        for (left, right) in left.chunks_mut(RUN).zip(right.chunks_mut(RUN)) {
+            let n = left.len().min(right.len());
+            self.sides[0].band_pass(&left[..n], &mut passed[0][..n]);
+            self.sides[1].band_pass(&right[..n], &mut passed[1][..n]);
+            self.play(left, right, &passed, &harmony, &level_one);
         }
     }
 
