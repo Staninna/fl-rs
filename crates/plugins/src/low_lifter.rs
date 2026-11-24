@@ -450,7 +450,7 @@ impl Consts {
 /// gives them. The two paths agree but for one argument in many
 /// thousands; the SSE2 one, which the emulator runs, was matched to the
 /// bit over 20000 arguments of each.
-mod msvc {
+pub(crate) mod msvc {
     /// `2^(i/64)`, at `0x1803e3720`.
     const EXP2: [u64; 64] = [
         0x3ff0000000000000,
@@ -541,7 +541,7 @@ mod msvc {
 
     /// `powf(10, y)` (`0x1801c8b16`). Its base is always 10 here, which
     /// leaves its logarithm a constant.
-    pub(super) fn pow10(y: f32) -> f32 {
+    pub(crate) fn pow10(y: f32) -> f32 {
         if y == 0.0 {
             return 1.0;
         }
@@ -564,7 +564,7 @@ mod msvc {
     }
 
     /// `expf` (`0x1801c60b0`).
-    pub(super) fn exp(x: f32) -> f32 {
+    pub(crate) fn exp(x: f32) -> f32 {
         if x == f32::NEG_INFINITY {
             return 0.0;
         }
@@ -584,7 +584,7 @@ mod msvc {
     /// `tanf` (`0x1801ca260`) up to pi/4, the most the plugin asks of it
     /// at a rate of 480 Hz or more. Past that the runtime reduces the
     /// argument, and this takes the f64 tangent.
-    pub(super) fn tan(x: f32) -> f32 {
+    pub(crate) fn tan(x: f32) -> f32 {
         let xd = f64::from(x);
         let a = xd.abs();
         if a.is_nan() || a > std::f64::consts::FRAC_PI_4 {

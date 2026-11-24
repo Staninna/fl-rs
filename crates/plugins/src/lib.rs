@@ -87,6 +87,7 @@ pub mod kepler;
 pub mod kepler_exo;
 pub mod keyboard_controller;
 pub mod limiter;
+mod limiter_lite;
 mod linear_phase;
 pub mod love_philter;
 pub mod low_lifter;
@@ -139,11 +140,13 @@ pub mod test_sine;
 #[cfg(test)]
 mod testing;
 pub mod three_osc;
+mod transient_looper;
 pub mod transient_processor;
 pub mod transporter;
 pub mod vintage_chorus;
 pub mod vintage_phaser;
 pub mod vocodex;
+pub mod voltage_controller;
 pub mod wave_candy;
 pub mod wave_traveller;
 pub mod waveshaper;
@@ -527,6 +530,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(stereo_shaper::StereoShaper::default()))
     } else if is(transient_processor::NAME) {
         Some(Box::new(transient_processor::TransientProcessor::default()))
+    } else if is(transporter::NAME) {
+        Some(Box::new(transporter::Transporter::default()))
     } else if is(vocodex::NAME) {
         Some(Box::new(vocodex::Vocodex::default()))
     } else if is(waveshaper::NAME) {
@@ -861,6 +866,8 @@ mod tests {
             ("pitch shifter", 75, 15),
             ("spreader", 30, 33),
             ("transient processor", 49, 47),
+            ("transporter", 85, 1),
+            ("transporter", 110, 1),
             ("vintage chorus", 72, 12),
             ("vintage phaser", 149, 1),
         ] {
@@ -913,7 +920,7 @@ mod tests {
         let lengths = loaded
             .keys()
             .filter(|(plugin, _)| !others.contains(&plugin.as_str()) && !passes(plugin));
-        assert_eq!(lengths.count(), 56);
+        assert_eq!(lengths.count(), 58);
         let shapers = loaded
             .iter()
             .filter(|((plugin, _), _)| plugin == "fruity waveshaper");
