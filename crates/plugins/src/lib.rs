@@ -70,6 +70,7 @@ pub mod gms;
 mod gms_fx;
 pub mod granulizer;
 pub mod gross_beat;
+pub mod hardcore;
 pub mod harmless;
 pub mod harmor;
 mod harmor_art;
@@ -427,6 +428,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_3::Delay3::default()))
     } else if is(distructor::NAME) {
         Some(Box::new(distructor::Distructor::default()))
+    } else if is(hardcore::NAME) {
+        Some(Box::new(hardcore::Hardcore::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
     } else if is(edison::NAME) {
@@ -889,6 +892,7 @@ mod tests {
             // Counted in their own tests.
             "control surface",
             "distructor",
+            "hardcore",
             "fruity formula controller",
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.
