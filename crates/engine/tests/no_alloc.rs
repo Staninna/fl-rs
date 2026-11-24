@@ -12,7 +12,7 @@
 
 use engine::Engine;
 use flp::event::Id;
-use flp::event::layout::{InsertFlags, Levels, PluginWrapper};
+use flp::event::layout::{Delay, EnvelopeLfo, InsertFlags, Levels, PluginWrapper, Tracking};
 use model::{
     Arrangement, Channel, ChannelKind, Insert, Item, ItemSource, Note, Pattern, Placed,
     PlaylistItem, Project, Slot,
@@ -177,20 +177,49 @@ fn song() -> Project {
         unknown_20: [0; 4],
         len: 24,
     };
+    // The sampler's volume envelope and its pitch and mod X LFOs are on,
+    // its key tracks mod X, and it echoes its notes.
+    let mut envelopes = vec![EnvelopeLfo::from_bytes(&[0; 68]).unwrap(); 5];
+    for (e, record) in envelopes.iter_mut().enumerate() {
+        (record.predelay, record.attack, record.hold) = (100, 3_000, 100);
+        (record.decay, record.sustain, record.release) = (9_000, 64, 12_000);
+        (record.lfo_predelay, record.lfo_attack, record.lfo_speed) = (100, 100, 20_000);
+        record.enabled = i32::from(e == 1);
+        record.lfo_amount = if e >= 2 { 64 } else { 0 };
+    }
+    let tracked = |middle, mod_x| Tracking {
+        middle,
+        pan: 0,
+        mod_x,
+        mod_y: 0,
+    };
     project.channels.push(Channel {
         index: 0,
         kind: Some(ChannelKind::Sampler),
         sample_path: Some("click.wav".to_owned()),
         levels: Some(levels),
         routed_to: Some(1),
+        envelopes,
+        tracking: vec![tracked(100, 0), tracked(60, -128)],
+        delay: Some(Delay {
+            feedback: 6400,
+            pan: 9600,
+            pitch: 100,
+            echoes: 3,
+            time: 48,
+        }),
         order: [
             Id::ChannelNew,
             Id::ChannelType,
             Id::SamplePath,
             Id::Levels,
             Id::RoutedTo,
+            Id::Delay,
+            Id::Tracking,
+            Id::Tracking,
         ]
         .into_iter()
+        .chain([Id::EnvelopeLFO; 5])
         .enumerate()
         .map(|(n, id)| placed(10 + n, id))
         .collect(),
