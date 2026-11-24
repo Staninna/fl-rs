@@ -1,7 +1,7 @@
 //! What a plugin on a channel is to its host: it is handed notes and adds
 //! the sound of them to a stereo block.
 
-use crate::{Fidelity, StateError};
+use crate::{Fidelity, StateError, Workers};
 use std::path::Path;
 
 /// One note for a [`Generator`] to start, with what the note's record and
@@ -72,7 +72,7 @@ impl Default for NoteOn {
 ///
 /// Only [`Generator::set_state`], [`Generator::set_sample_rate`],
 /// [`Generator::set_tempo`], [`Generator::set_ppq`] and
-/// [`Generator::set_resource_dir`] may
+/// [`Generator::set_resource_dir`] and [`Generator::set_workers`] may
 /// allocate. The rest is for an audio callback.
 pub trait Generator: Send {
     /// Take the bytes of the plugin's event 213. A state the plugin turns
@@ -97,6 +97,12 @@ pub trait Generator: Send {
     /// no such directory does not call this, and such a plugin then says
     /// what it lacks in [`Generator::fidelity`]. The others take no notice.
     fn set_resource_dir(&mut self, _dir: &Path) {}
+
+    /// Threads the plugin may render its voices on, beside the one that
+    /// calls [`Generator::process`], or `None` to render them all on that
+    /// one. A plugin that takes them plays the same to the bit either way
+    /// ([`crate::workers`]); the others take no notice. This may allocate.
+    fn set_workers(&mut self, _workers: Option<&'static dyn Workers>) {}
 
     /// The sample the plugin's channel holds, as its event 196 writes it,
     /// for a plugin that plays its channel's own sample: FL hands that one
