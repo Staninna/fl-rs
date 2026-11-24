@@ -5,7 +5,7 @@ effect	Control Surface	0.0015	0.1	373971.6	sound	91	0.0
 effect	Edison	0.0015	0.1	375516.3	sound	80	0.0
 effect	Effector	0.1531	6.3	3602.7	sound	4867	0.0
 effect	Emphasis	15.1354	622.2	36.4	sound	324853	2.8
-effect	Emphasizer	0.0015	0.1	374812.6	sound	180	0.0
+effect	Emphasizer	0.7571	35.9	631.8	sound	20981	0.2
 effect	EQUO	3.2416	133.0	170.6	sound	69660	0.6
 effect	Frequency Shifter	1.8235	74.7	303.4	sound	43457	0.4
 effect	Frequency Splitter	1.3538	55.6	407.8	sound	30808	0.3
@@ -102,3 +102,12 @@ generator	Sakura	4.5189	185.4	122.3	sound	124523	1.1
 generator	Slicex	0.0027	0.1	203169.4	silent	1881	0.0
 generator	Sytrus	1.3578	55.7	407.2	sound	67814	0.6
 generator	Wave Traveller	0.0020	0.1	283045.6	silent	1851	0.0
+effect	Distructor	4.8285	184.3	123.1	sound	161511	1.4
+effect	Fruity Vocoder	5.9409	227.2	99.8	sound	125612	1.1
+effect	Hardcore	8.1522	311.0	72.9	sound	165004	1.4
+effect	Transporter	22.1103	844.8	26.8	sound	468719	4.0
+generator	FLEX	0.0018	0.1	327868.9	silent	983	0.0
+generator	Fruity Voltage Controller	0.0025	0.1	229042.6	silent	2771	0.0
+generator	PoiZone	16.8675	588.7	38.5	sound	349174	3.0
+generator	Sawer	1.1844	47.8	474.7	silent	32020	0.3
+generator	SimSynth	1.2832	49.4	459.2	sound	34853	0.3

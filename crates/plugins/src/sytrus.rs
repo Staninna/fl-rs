@@ -2679,9 +2679,7 @@ impl Lent {
         };
         Lent {
             workers: Some(workers),
-            lanes: (0..=workers.helpers())
-                .map(|_| Mutex::new(lane()))
-                .collect(),
+            lanes: (0..=workers.helpers()).map(|_| locked_lane()).collect(),
             store: vec![0.0; SIDE_BY_SIDE * Heard::of(state).len()],
         }
     }
@@ -2692,12 +2690,20 @@ fn lane() -> Vec<f32> {
     vec![0.0; (ROWS + OPERATORS + 2) * CHUNK]
 }
 
+/// [`lane`] behind a lock that has been taken once: on macOS a `Mutex`
+/// allocates on its first lock, which must not be on the audio thread.
+fn locked_lane() -> Mutex<Vec<f32>> {
+    let lane = Mutex::new(lane());
+    drop(lane.try_lock());
+    lane
+}
+
 /// A copy of a plugin renders its voices on the same workers.
 impl Clone for Lent {
     fn clone(&self) -> Self {
         Lent {
             workers: self.workers,
-            lanes: self.lanes.iter().map(|_| Mutex::new(lane())).collect(),
+            lanes: self.lanes.iter().map(|_| locked_lane()).collect(),
             store: vec![0.0; self.store.len()],
         }
     }

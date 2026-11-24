@@ -8,9 +8,12 @@
 //! it plays is the same to the bit as when one thread renders every voice.
 //! Without workers, `for_each` is a plain loop on the calling thread.
 //!
-//! Nothing here allocates.
+//! Nothing here allocates, on any platform: `std::sync::Mutex` is a
+//! pthread mutex boxed on its first lock on macOS, so the items are handed
+//! out under a [`Spin`] lock instead.
 
-use std::sync::{Mutex, PoisonError};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Threads that take part in one job beside the caller's.
 pub trait Workers: Sync {
@@ -64,11 +67,11 @@ pub fn for_each_with<S, T, I>(
         .min(count.saturating_sub(1));
     match workers {
         Some(workers) if helpers > 0 && count >= least.max(2) => {
-            let items = Mutex::new(items);
+            let items = Spin::new(items);
             workers.run(helpers, &|| {
                 let mut own = None;
                 loop {
-                    let item = items.lock().unwrap_or_else(PoisonError::into_inner).next();
+                    let item = items.with(Iterator::next);
                     let Some(item) = item else { break };
                     each(own.get_or_insert_with(&start), item);
                 }
@@ -80,6 +83,52 @@ pub fn for_each_with<S, T, I>(
                 each(own.get_or_insert_with(&start), item);
             }
         }
+    }
+}
+
+/// A lock that spins, for the moment it takes to step an iterator. It
+/// allocates nothing, where `std::sync::Mutex` allocates on its first lock
+/// on some platforms.
+struct Spin<T> {
+    locked: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: the value is reached only in `with`, by one thread at a time,
+// and moves between threads with the lock, so `T: Send` is enough.
+#[allow(unsafe_code)]
+unsafe impl<T: Send> Sync for Spin<T> {}
+
+impl<T> Spin<T> {
+    fn new(value: T) -> Self {
+        Spin {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Run `body` on the value with the lock held.
+    fn with<R>(&self, body: impl FnOnce(&mut T) -> R) -> R {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        /// Lets the lock go however `body` ends, a panic included.
+        struct Unlock<'a>(&'a AtomicBool);
+        impl Drop for Unlock<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _unlock = Unlock(&self.locked);
+        #[allow(unsafe_code)]
+        // SAFETY: the lock is held, so no other thread has the value until
+        // `_unlock` lets it go after `body`.
+        let value = unsafe { &mut *self.value.get() };
+        body(value)
     }
 }
 
