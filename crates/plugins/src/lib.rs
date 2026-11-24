@@ -65,6 +65,7 @@ pub mod frequency_splitter;
 pub mod fruit_kick;
 pub mod fruity_slicer;
 pub mod fruity_slicer_2;
+pub mod fruity_vocoder;
 mod generator;
 pub mod gms;
 mod gms_fx;
@@ -430,6 +431,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(distructor::Distructor::default()))
     } else if is(hardcore::NAME) {
         Some(Box::new(hardcore::Hardcore::default()))
+    } else if is(fruity_vocoder::NAME) {
+        Some(Box::new(fruity_vocoder::FruityVocoder::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
     } else if is(edison::NAME) {
@@ -892,6 +895,7 @@ mod tests {
             // Counted in their own tests.
             "control surface",
             "distructor",
+            "fruity vocoder",
             "hardcore",
             "fruity formula controller",
             "fruity x-y controller",
