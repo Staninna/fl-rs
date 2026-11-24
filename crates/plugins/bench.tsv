@@ -30,7 +30,7 @@ effect	Fruity Flangus	1.3012	53.4	424.4	sound	28045	0.2
 effect	Fruity Formula Controller	0.0018	0.1	312989.0	sound	870	0.0
 effect	Fruity Free Filter	0.3808	15.6	1450.1	sound	8983	0.1
 effect	Fruity HTML NoteBook	0.0015	0.1	375657.4	sound	193	0.0
-effect	Fruity Limiter	0.8122	33.3	680.9	sound	4064897	35.0
+effect	Fruity Limiter	0.7256	25.4	893.8	sound	15921	0.1
 effect	Fruity Love Philter	1.2901	52.9	428.8	sound	35457	0.3
 effect	Fruity Multiband Compressor	2.8141	115.4	196.4	sound	60655	0.5
 effect	Fruity Mute 2	0.0018	0.1	311720.7	sound	513	0.0
@@ -57,12 +57,12 @@ effect	Gross Beat	0.5155	21.2	1071.8	sound	16355	0.1
 effect	Hyper Chorus	2.2576	92.8	244.4	sound	59189	0.5
 effect	Low Lifter	9.0844	373.0	60.8	sound	269096	2.3
 effect	Luxeverb	8.2137	337.0	67.3	sound	190485	1.6
-effect	Maximus	7.4062	303.7	74.7	sound	176967	1.5
+effect	Maximus	5.7460	206.8	109.7	sound	126712	1.1
 effect	Patcher	0.0059	0.2	92988.7	silent	1298	0.0
 effect	Pitch Shifter	4.7861	196.2	115.6	sound	27369	0.2
-effect	Pitcher	10.1186	414.9	54.6	sound	242539	2.1
+effect	Pitcher	5.4439	191.0	118.7	sound	102588	0.9
 effect	Razer Chroma	0.0015	0.1	371885.5	sound	172	0.0
-effect	Soundgoodizer	19.4415	796.9	28.5	sound	395569	3.4
+effect	Soundgoodizer	14.9250	523.1	43.3	sound	280300	2.4
 effect	Spreader	1.0818	44.4	510.4	sound	23599	0.2
 effect	Transient Processor	0.7420	30.4	745.1	sound	20924	0.2
 effect	Vintage Chorus	0.8956	36.8	617.0	sound	20744	0.2
@@ -71,7 +71,7 @@ effect	Vocodex	104.1384	4271.4	5.3	sound	2199822	18.9
 effect	Wave Candy	0.0018	0.1	268889.5	sound	118	0.0
 effect	ZGameEditor Visualizer	0.0019	0.1	249812.6	sound	136	0.0
 generator	3x Osc	1.8418	89.3	254.0	sound	87900	0.8
-generator	Autogun	17.1321	703.3	32.2	sound	2941937	25.3
+generator	Autogun	14.1413	495.3	45.8	sound	13667658	117.7
 generator	BassDrum	1.5494	63.6	356.4	sound	138918	1.2
 generator	BeepMap	0.0028	0.1	201005.0	silent	1810	0.0
 generator	BooBass	0.0019	0.1	292825.8	silent	8784	0.1
@@ -90,8 +90,8 @@ generator	Fruity Keyboard Controller	0.0023	0.1	239865.7	silent	2009	0.0
 generator	Fruity Slicer	0.0018	0.1	305530.1	silent	1342	0.0
 generator	Fruity Slicer 2	0.0018	0.1	308451.6	silent	1861	0.0
 generator	GMS	12.3882	508.3	44.6	silent	254850	2.2
-generator	Harmless	6.3092	258.8	87.6	sound	206925	1.8
-generator	Harmor	7.2914	299.3	75.8	sound	282389	2.4
+generator	Harmless	3.4752	121.6	186.5	sound	96819	0.8
+generator	Harmor	6.4934	227.7	99.6	sound	816089	7.0
 generator	Kepler	19.4970	800.1	28.3	sound	411059	3.5
 generator	Kepler Exo	19.9723	820.4	27.6	sound	424557	3.7
 generator	MiniSynth	0.0194	0.8	28496.5	silent	6117	0.1

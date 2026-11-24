@@ -131,6 +131,8 @@ pub mod soft_clipper;
 pub mod soundgoodizer;
 pub mod spreader;
 pub mod squeeze;
+#[cfg(test)]
+mod state_hashes;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod sytrus;
