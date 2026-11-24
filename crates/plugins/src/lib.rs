@@ -109,6 +109,7 @@ pub mod phase_inverter;
 pub mod phaser;
 pub mod pitch_shifter;
 pub mod pitcher;
+pub mod poizone;
 pub mod port;
 pub mod razer_chroma;
 pub mod reeverb;

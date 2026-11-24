@@ -315,6 +315,9 @@ const GENERATORS: &[(&str, Make)] = &[
     (crate::patcher::NAME, || {
         Box::new(crate::patcher::PatcherGenerator::default())
     }),
+    (crate::poizone::NAME, || {
+        Box::new(crate::poizone::PoiZone::default())
+    }),
     (crate::three_osc::NAME, || {
         Box::new(crate::three_osc::ThreeOsc::default())
     }),

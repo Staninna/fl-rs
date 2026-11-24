@@ -93,6 +93,7 @@ pub const PORTS: &[(&str, Port)] = &[
     (crate::phaser::NAME, Port::Exact),
     (crate::pitch_shifter::NAME, Port::Gaps),
     (crate::pitcher::NAME, Port::Gaps),
+    (crate::poizone::NAME, Port::Gaps),
     (crate::razer_chroma::NAME, Port::Exact),
     (crate::reeverb::NAME, Port::Exact),
     (crate::reeverb_2::NAME, Port::Exact),
