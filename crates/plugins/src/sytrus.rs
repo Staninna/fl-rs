@@ -47,6 +47,73 @@ struct Pools {
     tables: filter::Tables,
 }
 
+/// The pools as the voices get them: to take from and to pluck strings
+/// in, or, while voices render side by side, only to read the copies
+/// from. Side by side, no voice starts and no operator is plucked, so
+/// nothing needs more.
+enum Lend<'a> {
+    Own(&'a mut Pools),
+    Read(&'a Pools),
+}
+
+impl Lend<'_> {
+    fn read(&self) -> &Pools {
+        match self {
+            Lend::Own(pools) => pools,
+            Lend::Read(pools) => pools,
+        }
+    }
+
+    fn own(&mut self) -> Option<&mut Pools> {
+        match self {
+            Lend::Own(pools) => Some(pools),
+            Lend::Read(_) => None,
+        }
+    }
+
+    /// The strings, when they may be plucked, and the copies.
+    fn split(&mut self) -> (Option<&mut [pluck::Strings]>, &[band::Copies]) {
+        match self {
+            Lend::Own(pools) => (Some(&mut pools.strings[..]), &pools.copies[..]),
+            Lend::Read(pools) => (None, &pools.copies[..]),
+        }
+    }
+}
+
+/// Where a voice's frames go: added to the buses as it renders them, dry
+/// left and right and send left and right, or kept for them in a part of
+/// [`Lent::store`]: for each row heard, in order, as many of the buses as
+/// [`Heard::sides`] says, a [`CHUNK`] each.
+enum Sink<'a, 'b> {
+    Add(&'a mut [&'b mut [f32]; 4]),
+    Keep(&'a mut [f32], usize),
+}
+
+/// The rows the voices are heard through, and how many of the buses one
+/// of them reaches: 2, or 4 when one sends.
+#[derive(Clone, Copy)]
+struct Heard {
+    rows: usize,
+    sides: usize,
+}
+
+impl Heard {
+    fn of(state: &State) -> Self {
+        let heard =
+            |row: &usize| state.active[*row] && (state.out[*row] != 0.0 || state.send[*row] != 0.0);
+        let sends = (0..ROWS).filter(heard).any(|row| state.send[row] != 0.0);
+        Heard {
+            rows: (0..ROWS).filter(heard).count(),
+            sides: if sends { 4 } else { 2 },
+        }
+    }
+
+    /// What one voice keeps.
+    fn len(self) -> usize {
+        self.rows * self.sides * CHUNK
+    }
+}
+
 impl Default for Pools {
     fn default() -> Self {
         Pools {
@@ -57,9 +124,11 @@ impl Default for Pools {
     }
 }
 use crate::three_osc::pan_law;
+use crate::workers::{self, Workers};
 use crate::{Fidelity, Generator, NoteOn, StateError, knob_gain};
 use dsp::curve::{Curve, Point};
 use std::f64::consts::{LN_2, PI};
+use std::sync::Mutex;
 
 pub const NAME: &str = "Sytrus";
 
@@ -1615,6 +1684,10 @@ struct Voice {
     first_len: Option<usize>,
     first_dt: f64,
     seed: u32,
+    /// The frames of the last block the voice rendered, and whether it was
+    /// over after them, when it rendered on a worker.
+    played: usize,
+    done: bool,
 }
 
 /// What a voice's start takes from the voices before it and the last
@@ -2059,6 +2132,8 @@ impl Voice {
             band: [band::WHOLE; OPERATORS],
             plucks: [pluck::Pluck::IDLE; OPERATORS],
             seed: *seed,
+            played: 0,
+            done: false,
         }
     }
 
@@ -2101,7 +2176,7 @@ impl Voice {
 
     /// Start a control tick of `len` frames: move every articulator on and
     /// aim the levels at what they come to.
-    fn tick(&mut self, state: &State, timing: Timing, len: usize, pools: &mut Pools) {
+    fn tick(&mut self, state: &State, timing: Timing, len: usize, pools: &mut Lend) {
         let len = len.max(1) as f32;
         let snap = self.first;
         self.first = false;
@@ -2180,7 +2255,8 @@ impl Voice {
             // note starts (`0x86ace0`).
             if snap && operator.band_limit {
                 let hz = pitch * timing.rate;
-                if let Some(limits) = band::limits(hz, timing.rate, state.smooth) {
+                let limits = band::limits(hz, timing.rate, state.smooth);
+                if let (Some(limits), Some(pools)) = (limits, pools.own()) {
                     let copies = &mut pools.copies[op];
                     self.band[op] = copies.take(limits, &operator.spectrum, state.smooth);
                 }
@@ -2191,7 +2267,7 @@ impl Voice {
             if operator.plucked {
                 let damping = value(op, 5).clamp(0.0, 1.0);
                 let pluck = &mut self.plucks[op];
-                if snap {
+                if let (true, Some(pools)) = (snap, pools.own()) {
                     let strings = &mut pools.strings[op];
                     pluck.slot = strings.take();
                     let base = run.pitch as f32;
@@ -2229,7 +2305,13 @@ impl Voice {
             let resonance = filter.resonance + value(part, 3);
             let arts = [value(part, 4), value(part, 5), value(part, 6)];
             let run = &mut self.filters[f];
-            run.tick(filter, (cutoff, resonance), arts, &pools.tables, snap);
+            run.tick(
+                filter,
+                (cutoff, resonance),
+                arts,
+                &pools.read().tables,
+                snap,
+            );
             run.volume_aim = value(part, 1);
             if snap {
                 run.volume = run.volume_aim;
@@ -2294,11 +2376,11 @@ impl Voice {
         state: &State,
         timing: Timing,
         scratch: &mut [f32],
-        buses: &mut [&mut [f32]; 4],
-        pools: &mut Pools,
+        (sink, len): (&mut Sink, usize),
+        pools: &mut Lend,
     ) -> bool {
-        let len = buses[0].len();
         let mut at = 0;
+        self.played = 0;
         while at < len {
             if self.to_tick == 0 {
                 self.to_tick = match (self.first, self.first_len) {
@@ -2312,9 +2394,10 @@ impl Voice {
                 }
             }
             let run = (len - at).min(self.to_tick);
-            self.render(state, timing, scratch, (buses, at, run), pools);
+            self.render(state, timing, scratch, (sink, at, run), pools);
             self.to_tick -= run;
             at += run;
+            self.played = at;
             if self.ending && self.unison.role != Role::Slave && self.silent(state) {
                 return true;
             }
@@ -2322,18 +2405,18 @@ impl Voice {
         false
     }
 
-    /// Render the next frames into `scratch`, a block of [`CHUNK`] a row,
-    /// and add them to the buses: dry left and right, send left and right,
-    /// as many frames as they hold.
+    /// Render the next `len` frames into `scratch`, a block of [`CHUNK`] a
+    /// row, and put them in the sink from frame `at`.
     fn render(
         &mut self,
         state: &State,
         timing: Timing,
         scratch: &mut [f32],
-        (buses, at, len): (&mut [&mut [f32]; 4], usize, usize),
-        pools: &mut Pools,
+        (sink, at, len): (&mut Sink, usize, usize),
+        pools: &mut Lend,
     ) {
         let len = len.min(CHUNK);
+        let (mut strings, copies) = pools.split();
         for i in 0..len {
             for op in 0..OPERATORS {
                 if !state.active[op] {
@@ -2345,13 +2428,12 @@ impl Voice {
                 let mut y = 0.0;
                 if operator.plucked {
                     let pluck = &mut self.plucks[op];
-                    if let Some(buffer) = pools.strings[op].buffer(pluck.slot) {
+                    let strings = strings.as_deref_mut();
+                    if let Some(buffer) = strings.and_then(|s| s[op].buffer(pluck.slot)) {
                         y = pluck.next(buffer);
                     }
                 } else if !operator.table.is_empty() {
-                    let table = pools.copies[op]
-                        .table(self.band[op])
-                        .unwrap_or(&operator.table);
+                    let table = copies[op].table(self.band[op]).unwrap_or(&operator.table);
                     let size = table.len() - 1;
                     let pos = (x - x.floor()) * size as f64;
                     let index = (pos as usize).min(size - 1);
@@ -2460,6 +2542,8 @@ impl Voice {
                 }
             }
         }
+        // The rows heard so far, which places a row in a kept voice.
+        let mut heard = 0;
         for row in 0..ROWS {
             if !state.active[row] || (state.out[row] == 0.0 && state.send[row] == 0.0) {
                 continue;
@@ -2475,24 +2559,163 @@ impl Voice {
                 (gains[side], steps[side]) = glide(&mut self.gains[row][side], aim, cap, len);
             }
             let sends = state.send[row] != 0.0;
-            for i in 0..len {
-                let sample = scratch[row * CHUNK + i];
-                buses[0][at + i] += sample * gains[0];
-                buses[1][at + i] += sample * gains[1];
-                if sends {
-                    buses[2][at + i] += sample * gains[2];
-                    buses[3][at + i] += sample * gains[3];
+            match sink {
+                Sink::Add(buses) => {
+                    for i in 0..len {
+                        let sample = scratch[row * CHUNK + i];
+                        buses[0][at + i] += sample * gains[0];
+                        buses[1][at + i] += sample * gains[1];
+                        if sends {
+                            buses[2][at + i] += sample * gains[2];
+                            buses[3][at + i] += sample * gains[3];
+                        }
+                        for (gain, step) in gains.iter_mut().zip(&steps) {
+                            *gain += step;
+                        }
+                    }
                 }
-                for (gain, step) in gains.iter_mut().zip(&steps) {
-                    *gain += step;
+                Sink::Keep(store, sides) => {
+                    let sides = *sides;
+                    let kept = &mut store[heard * sides * CHUNK..(heard + 1) * sides * CHUNK];
+                    let used = if sends { 4 } else { 2 };
+                    for i in 0..len {
+                        let sample = scratch[row * CHUNK + i];
+                        for side in 0..used {
+                            kept[side * CHUNK + at + i] = sample * gains[side];
+                        }
+                        for (gain, step) in gains.iter_mut().zip(&steps) {
+                            *gain += step;
+                        }
+                    }
                 }
             }
+            heard += 1;
         }
     }
 
     /// An ending voice is over once every gain has got to 0 (stage 10).
     fn silent(&self, state: &State) -> bool {
         (0..ROWS).all(|row| !state.active[row] || self.gains[row].iter().all(|gain| *gain == 0.0))
+    }
+}
+
+/// The voices in the pieces they render side by side in, each with its
+/// part of the store: a voice alone, or a unison that shares its filters,
+/// its slaves and then its master.
+struct Units<'a> {
+    voices: &'a mut [Voice],
+    store: &'a mut [f32],
+    /// What one voice keeps.
+    kept: usize,
+}
+
+impl Units<'_> {
+    /// How many voices the unit at the head of `voices` takes.
+    fn head(voices: &[Voice]) -> usize {
+        match voices.first() {
+            None => 0,
+            Some(v) if v.unison.role == Role::Alone => 1,
+            Some(v) => {
+                let group = v.group;
+                let shared = |w: &&Voice| w.group == group && w.unison.role != Role::Alone;
+                voices.iter().take_while(shared).count()
+            }
+        }
+    }
+
+    /// How many units the voices make, or `None` when a unison that shares
+    /// its filters is not its slaves and then its master, side by side.
+    fn count(mut voices: &[Voice]) -> Option<usize> {
+        let mut units = 0;
+        while !voices.is_empty() {
+            let n = Self::head(voices);
+            let (unit, rest) = voices.split_at(n);
+            let (last, slaves) = unit.split_last()?;
+            let alone = n == 1 && last.unison.role == Role::Alone;
+            let slaves_first = slaves.iter().all(|v| v.unison.role == Role::Slave);
+            if !alone && !(last.unison.role == Role::Master && slaves_first) {
+                return None;
+            }
+            units += 1;
+            voices = rest;
+        }
+        Some(units)
+    }
+}
+
+impl<'a> Iterator for Units<'a> {
+    type Item = (&'a mut [Voice], &'a mut [f32]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let n = Self::head(self.voices);
+        if n == 0 {
+            return None;
+        }
+        let (unit, rest) = std::mem::take(&mut self.voices).split_at_mut(n);
+        self.voices = rest;
+        let (store, rest) = std::mem::take(&mut self.store).split_at_mut(n * self.kept);
+        self.store = rest;
+        Some((unit, store))
+    }
+}
+
+/// What the voices take to render on workers: the threads, a scratch
+/// block for each thread, and room for what every voice puts out.
+#[derive(Default)]
+struct Lent {
+    workers: Option<&'static dyn Workers>,
+    lanes: Vec<Mutex<Vec<f32>>>,
+    store: Vec<f32>,
+}
+
+/// How many voices may render side by side, unison voices counted.
+const SIDE_BY_SIDE: usize = 4 * VOICES;
+
+impl Lent {
+    /// For these workers and this state. This allocates.
+    fn new(workers: Option<&'static dyn Workers>, state: &State) -> Self {
+        let Some(workers) = workers.filter(|w| w.helpers() > 0) else {
+            return Lent::default();
+        };
+        Lent {
+            workers: Some(workers),
+            lanes: (0..=workers.helpers())
+                .map(|_| Mutex::new(lane()))
+                .collect(),
+            store: vec![0.0; SIDE_BY_SIDE * Heard::of(state).len()],
+        }
+    }
+}
+
+/// A scratch block for one thread, as [`Sytrus::scratch`].
+fn lane() -> Vec<f32> {
+    vec![0.0; (ROWS + OPERATORS + 2) * CHUNK]
+}
+
+/// A copy of a plugin renders its voices on the same workers.
+impl Clone for Lent {
+    fn clone(&self) -> Self {
+        Lent {
+            workers: self.workers,
+            lanes: self.lanes.iter().map(|_| Mutex::new(lane())).collect(),
+            store: vec![0.0; self.store.len()],
+        }
+    }
+}
+
+/// Scratch memory, which says nothing of how a plugin plays.
+impl PartialEq for Lent {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Lent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lent")
+            .field("workers", &self.workers.map(|w| w.helpers()))
+            .field("lanes", &self.lanes.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -2517,6 +2740,8 @@ pub struct Sytrus {
     /// The last note's pitch, cents from C5 with the main pitch (0x62e0,
     /// `0x7fffffff` for none): where a portamento glides from.
     last_pitch: Option<f32>,
+    /// What the voices take to render on workers.
+    lent: Lent,
 }
 
 impl Default for Sytrus {
@@ -2530,10 +2755,11 @@ impl Default for Sytrus {
             notes: 0,
             fx: fx::Effects::default(),
             pools: Pools::default(),
-            scratch: vec![0.0; (ROWS + OPERATORS + 2) * CHUNK],
+            scratch: lane(),
             seed: 0x1234_5678,
             clock: 0,
             last_pitch: None,
+            lent: Lent::default(),
         }
     }
 }
@@ -2576,6 +2802,95 @@ impl Sytrus {
                 k += 1;
             }
         }
+    }
+
+    /// Render the voices' next `frames` on the workers and add them to the
+    /// buses, in the order [`Generator::process`] adds them in on one
+    /// thread, and let the voices that are over go; `ended` says whether a
+    /// unison's master was among them. Each voice keeps what it renders,
+    /// and a unison that shares its filters renders on one thread, its
+    /// slaves and then its master.
+    ///
+    /// Nothing is done, and this says so, when there are no workers, too
+    /// few voices or no room to keep them, or when the voices would touch
+    /// what they share: a voice starts (it takes a band-limited copy), an
+    /// operator is plucked (it takes a string), or a master is released
+    /// (it may end before it has taken all its slaves left it, which one
+    /// thread then hands on to the next master, as it would the slaves'
+    /// sum left over from an earlier block).
+    fn side_by_side(&mut self, timing: Timing, frames: usize, ended: &mut bool) -> bool {
+        let Some(workers) = self.lent.workers else {
+            return false;
+        };
+        let state = &self.state;
+        let voices = &self.voices;
+        let heard = Heard::of(state);
+        let kept = heard.len();
+        let plucked = (0..OPERATORS).any(|op| state.active[op] && state.operators[op].plucked);
+        let master = |v: &Voice| v.unison.role == Role::Master;
+        let touches = voices.iter().any(|v| v.first || (master(v) && v.released));
+        let left_over = self.scratch[ROWS * CHUNK..(ROWS + OPERATORS) * CHUNK]
+            .iter()
+            .any(|x| *x != 0.0);
+        if voices.len() < 2 || plucked || touches || left_over {
+            return false;
+        }
+        if kept * voices.len() > self.lent.store.len() {
+            return false;
+        }
+        let Some(units) = Units::count(voices) else {
+            return false;
+        };
+        let store = &mut self.lent.store[..kept * voices.len()];
+        let (lanes, pools) = (&self.lent.lanes, &self.pools);
+        let items = Units {
+            voices: &mut self.voices[..],
+            store,
+            kept,
+        };
+        let lane = || {
+            let free = lanes.iter().find_map(|lane| lane.try_lock().ok());
+            free.expect("a scratch lane for every thread")
+        };
+        workers::for_each_with(Some(workers), (items, units), 2, lane, |lane, unit| {
+            let (voices, store) = unit;
+            for (k, voice) in voices.iter_mut().enumerate() {
+                let mut sink = Sink::Keep(&mut store[k * kept..(k + 1) * kept], heard.sides);
+                let lend = &mut Lend::Read(pools);
+                voice.done = voice.play(state, timing, &mut lane[..], (&mut sink, frames), lend);
+            }
+        });
+        let mut buses = self.fx.buses(frames);
+        for (k, voice) in self.voices.iter().enumerate() {
+            // A slave's frames went into its master's.
+            if voice.unison.role == Role::Slave {
+                continue;
+            }
+            let store = &self.lent.store[k * kept..(k + 1) * kept];
+            let rows = (0..ROWS).filter(|row| {
+                state.active[*row] && (state.out[*row] != 0.0 || state.send[*row] != 0.0)
+            });
+            for (place, row) in rows.enumerate() {
+                let used = if state.send[row] != 0.0 { 4 } else { 2 };
+                for (side, bus) in buses.iter_mut().enumerate().take(used) {
+                    let from = (place * heard.sides + side) * CHUNK;
+                    let from = &store[from..from + voice.played];
+                    for (bus, x) in bus[..voice.played].iter_mut().zip(from) {
+                        *bus += x;
+                    }
+                }
+            }
+        }
+        let pools = &mut self.pools;
+        self.voices.retain_mut(|voice| {
+            let over = std::mem::take(&mut voice.done);
+            *ended |= over && voice.unison.role == Role::Master;
+            if over {
+                voice.give_back(pools);
+            }
+            !over
+        });
+        true
     }
 
     /// The control tick in frames (`0x8657b0`): 96 samples at 44.1 kHz,
@@ -2641,7 +2956,13 @@ impl Generator for Sytrus {
                 })
                 .collect(),
         };
+        // Room to keep the voices of this state, on the same workers.
+        self.lent = Lent::new(self.lent.workers, &self.state);
         Ok(())
+    }
+
+    fn set_workers(&mut self, workers: Option<&'static dyn Workers>) {
+        self.lent = Lent::new(workers, &self.state);
     }
 
     fn set_sample_rate(&mut self, hz: f32) {
@@ -2762,20 +3083,25 @@ impl Generator for Sytrus {
         let mut at = 0;
         while at < len {
             let run = (len - at).min(CHUNK >> levels);
-            let (state, scratch) = (&self.state, &mut self.scratch[..]);
+            let frames = run << levels;
             let block = at..at + run;
             let mut ended = false;
             let sounding = self.voices.len();
-            let mut buses = self.fx.buses(run << levels);
-            let pools = &mut self.pools;
-            self.voices.retain_mut(|voice| {
-                let over = voice.play(state, timing, scratch, &mut buses, pools);
-                ended |= over && voice.unison.role == Role::Master;
-                if over {
-                    voice.give_back(pools);
-                }
-                !over
-            });
+            if !self.side_by_side(timing, frames, &mut ended) {
+                let (state, scratch) = (&self.state, &mut self.scratch[..]);
+                let mut buses = self.fx.buses(frames);
+                let pools = &mut self.pools;
+                self.voices.retain_mut(|voice| {
+                    let mut sink = Sink::Add(&mut buses);
+                    let lend = &mut Lend::Own(pools);
+                    let over = voice.play(state, timing, scratch, (&mut sink, frames), lend);
+                    ended |= over && voice.unison.role == Role::Master;
+                    if over {
+                        voice.give_back(pools);
+                    }
+                    !over
+                });
+            }
             if ended {
                 self.drop_orphans();
             }
@@ -2926,6 +3252,42 @@ mod tests {
     #[test]
     fn a_note_follows_the_pitch_the_host_moves_it_to() {
         crate::testing::follows_note_pitch(|| Box::new(Sytrus::default()), 44_100.0);
+    }
+
+    #[test]
+    fn held_voices_render_side_by_side_and_new_ones_on_one_thread() {
+        let mut sytrus = Sytrus::default();
+        sytrus.set_workers(Some(&crate::workers::tests::THREE));
+        for (n, key) in [48, 52, 55].into_iter().enumerate() {
+            sytrus.note_on(note(n as u32 + 1, key));
+        }
+        let timing = sytrus.timing();
+        let mut ended = false;
+        // A voice that starts takes a band-limited copy.
+        assert!(!sytrus.side_by_side(timing, 64, &mut ended));
+        let (mut left, mut right) = (vec![0.0; 64], vec![0.0; 64]);
+        sytrus.process(&mut left, &mut right);
+        assert!(sytrus.side_by_side(timing, 64, &mut ended));
+        assert_eq!((sytrus.voices.len(), ended), (3, false));
+        // Without workers, never.
+        sytrus.set_workers(None);
+        assert!(!sytrus.side_by_side(timing, 64, &mut ended));
+    }
+
+    #[test]
+    fn the_voices_play_the_same_on_workers() {
+        crate::testing::same_on_workers(|| Box::new(Sytrus::default()), &[], 44_100.0);
+        // And the corpus's states and presets: unisons that share their
+        // filters or not, sends, plucked and band-limited operators.
+        let Some(root) = crate::testing::corpus() else {
+            return;
+        };
+        let mut states = crate::testing::projects(&root);
+        states.retain(|s| s.plugin.eq_ignore_ascii_case(NAME));
+        let mut states: Vec<_> = states.into_iter().map(|s| s.state).collect();
+        let presets = crate::testing::every_preset(&root, NAME);
+        states.extend(presets.into_iter().step_by(7).map(|s| s.state));
+        crate::testing::same_on_workers(|| Box::new(Sytrus::default()), &states, 44_100.0);
     }
     #[test]
     fn a_sine_operator_at_full_level_is_a_sine_at_the_note_s_frequency() {
