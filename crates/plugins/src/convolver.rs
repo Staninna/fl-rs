@@ -42,7 +42,13 @@
 //!    `2^(v / 1000)`, by FL's interpolator at its 256-point quality
 //!    ([`dsp::interpolator`]).
 //! 4. A level equaliser curve at `y` scales it by `(3^(2y) - 1) / 2`, which
-//!    is 1 at the half it starts at.
+//!    is 1 at the half it starts at. Any other curve filters it
+//!    (`FUN_0087b2b0`): the curve's gains at the bins of a spectrum of
+//!    `2^order + 1` bins up to half the impulse's rate (the editor's axis,
+//!    straight to 130.8 Hz and logarithmic to 22050 Hz, the stretch undone),
+//!    smoothed by a Gaussian, made a zero-phase kernel by an inverse FFT and
+//!    a Hann window, convolved with the impulse and mixed in at the
+//!    equaliser's mix.
 //! 5. What is under 2^-24 at its end is cut off, and what is under it at
 //!    its start counts as delay, with the pre-delay: `(7^(v / 1000) - 1) /
 //!    12` seconds.
@@ -65,13 +71,16 @@
 //!
 //! - An impulse whose file is not found, or is a kind of file that is not
 //!   decoded, leaves the plugin out: its input passes as it is.
-//! - The four layers and an equaliser curve that is not level are left
-//!   out.
+//! - The four layers are left out.
+//! - The equaliser's FFTs are this crate's float FFT where FL's are IPP's,
+//!   and its curve is read off the points as [`dsp::curve`] draws them,
+//!   which FL's envelope runner (`FUN_00791500`) is taken to do.
 //! - FL sleeps after as much silence as the impulse is long.
 
 use crate::menvelope::{Class, MEnvelope, Reader};
 use crate::parts::{glide, stereo_gains};
 use crate::{Effect, Fidelity, StateError, knob_gain, knob_value};
+use dsp::curve::{Curve, Point};
 use dsp::interpolator;
 use std::f64::consts::PI;
 use std::path::{Component, Path, PathBuf};
@@ -686,6 +695,158 @@ fn self_convolve(left: &mut [f32], right: &mut [f32], amount: f32) {
     }
 }
 
+/// The equaliser editor's frequency axis (`FUN_00637830` at
+/// `this+0x4a8`, set up by the constructor from 130.8 Hz, `440 exp(-21 ln
+/// 2 / 12)`, to 22050 Hz with a curvature of 1; read by `FUN_00637aa0`):
+/// a straight line up to 130.8 Hz, logarithmic above, from 0 to 1.
+fn axis(hz: f64) -> f64 {
+    let low = (2f64.ln() / 12.0 * -21.0).exp() * 440.0;
+    let high = 22050.0;
+    let knee = 2f64.ln() / (high * 2.0 / low).ln();
+    let bend = high / low;
+    let scale = 1.0 / (bend + 1.0).ln();
+    let slope = bend / (high - low);
+    if low <= hz {
+        knee + ((hz - low) * slope + 1.0).ln() * scale * (1.0 - knee)
+    } else {
+        hz * knee / low
+    }
+}
+
+/// `FUN_00622aa0`: the least `d`, 1 or more, with `2^d` at least `v`.
+fn log2_up(v: i64) -> u32 {
+    let mut d = 1;
+    while (1i64 << d) < v {
+        d += 1;
+    }
+    d
+}
+
+/// The equaliser's gains at the bins of a spectrum (`FUN_0087b2b0`):
+/// `2^order + 1` of them from 0 Hz to half the impulse's rate, `order`
+/// from twice the rate (4 to 20), each the curve at the bin's place on the axis
+/// (`FUN_0087bde0`), the stretch undone, turned into a gain as a level
+/// curve is.
+fn equaliser_spectrum(curve: &[Point], rate: f64, stretch: f32) -> Vec<f32> {
+    let order = log2_up((rate * 2.0).round_ties_even() as i64).clamp(4, 20);
+    let bins = 1usize << order;
+    let span = bins as f64 * 22050.0 * f64::from(stretch) * 2.0;
+    let shape = Curve::new(curve);
+    let start = curve.first().map_or(0.0, |point| point.x.max(0.0));
+    let ln3 = 3f64.ln() as f32;
+    (0..=bins)
+        .map(|k| {
+            let hz = (k as f64 * (rate / span)) as f32;
+            let x = axis(f64::from(hz) * 22050.0) as f32;
+            let y = shape.value_at(start + f64::from(x));
+            let twice = (y * 2.0) as f32;
+            if twice == 1.0 {
+                1.0
+            } else {
+                ((f64::from(twice * ln3).exp() - 1.0) * f64::from(0.5f32)) as f32
+            }
+        })
+        .collect()
+}
+
+/// A kernel from a magnitude spectrum of `n + 1` bins (`FUN_00624910`):
+/// the inverse real FFT of the spectrum with no phase, over `2n` points,
+/// turned round by half so that it is centred, times a Hann window of
+/// `2n + 2` points without its first.
+fn spectrum_kernel(bins: &[f32]) -> Vec<f32> {
+    let half = bins.len().saturating_sub(1).max(1);
+    let size = 1usize << (log2_up(half as i64) + 1);
+    let fft = Fft::new(size);
+    let (mut re, mut im) = (vec![0f32; size], vec![0f32; size]);
+    for (k, m) in bins.iter().enumerate().take(size / 2 + 1) {
+        re[k] = *m;
+        if k > 0 && k < size / 2 {
+            re[size - k] = *m;
+        }
+    }
+    fft.run(&mut re, &mut im, true);
+    let scale = 1.0 / size as f32;
+    let turn = 2.0 * PI / (size + 1) as f64;
+    (0..size)
+        .map(|i| {
+            let window = (0.5 - (turn * (i + 1) as f64).cos() * 0.5) as f32;
+            re[(i + size / 2) % size] * scale * window
+        })
+        .collect()
+}
+
+/// FL's sample convolver over `x` with a kernel whose centre is
+/// `(len - 1) / 2` (`FUN_00624f90`): the output keeps `x`'s length and
+/// frame `t` is the convolution's frame `t + len / 2`, so a kernel that
+/// is symmetric round its middle sample moves nothing. Both sides at
+/// once, as the real and the imaginary part of one FFT.
+fn convolve_centred(left: &[f32], right: &[f32], kernel: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let len = left.len();
+    let shift = kernel.len() - 1 - (kernel.len() - 1) / 2;
+    let size = (len + kernel.len()).next_power_of_two();
+    let fft = Fft::new(size);
+    let (mut re, mut im) = (vec![0f32; size], vec![0f32; size]);
+    re[..len].copy_from_slice(left);
+    im[..len].copy_from_slice(&right[..len]);
+    fft.run(&mut re, &mut im, false);
+    let (mut kr, mut ki) = (vec![0f32; size], vec![0f32; size]);
+    kr[..kernel.len()].copy_from_slice(kernel);
+    fft.run(&mut kr, &mut ki, false);
+    for k in 0..size {
+        let (a, b) = (re[k], im[k]);
+        re[k] = a * kr[k] - b * ki[k];
+        im[k] = a * ki[k] + b * kr[k];
+    }
+    fft.run(&mut re, &mut im, true);
+    let scale = 1.0 / size as f32;
+    let take = |part: &[f32]| (0..len).map(|t| part[t + shift] * scale).collect();
+    (take(&re), take(&im))
+}
+
+/// `FUN_00624620` with a width of 1/128: the spectrum, its ends held
+/// out by its own length on each side, convolved with the kernel of a
+/// Gaussian of `2^16 + 1` bins (`ippsVectorSlope_32f` from 0 by `1 /
+/// (bins / 512)`, `ippsSqr_32f_I`, `ippsMulC_32f_I` by -0.5,
+/// `ippsExp_32f_I`), which smooths it.
+fn smooth(spectrum: &[f32]) -> Vec<f32> {
+    let len = spectrum.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let width = 1.0 / 128.0;
+    let bins = (1usize << log2_up((512.0f64 / width).round_ties_even() as i64)) + 1;
+    let slope = (1.0 / (bins as f64 * width * 0.25)) as f32;
+    let gauss: Vec<f32> = (0..bins)
+        .map(|i| {
+            let x = i as f32 * slope;
+            (f64::from(x * x * -0.5)).exp() as f32
+        })
+        .collect();
+    let kernel = spectrum_kernel(&gauss);
+    let mut held = vec![spectrum[0]; len];
+    held.extend_from_slice(spectrum);
+    held.extend(std::iter::repeat_n(spectrum[len - 1], len));
+    let (out, _) = convolve_centred(&held, &held, &kernel);
+    out[len..2 * len].to_vec()
+}
+
+/// The equaliser's kernel over the impulse (`FUN_0087b2b0`), mixed in at
+/// `mix` over the impulse at `1 - mix` (`FUN_00625690`).
+fn equalize(left: &mut [f32], right: &mut [f32], kernel: &[f32], mix: f32) {
+    let len = left.len().min(right.len());
+    let (wet_l, wet_r) = convolve_centred(&left[..len], &right[..len], kernel);
+    let dry = 1.0 - mix;
+    for (side, wet) in [(&mut left[..len], wet_l), (&mut right[..len], wet_r)] {
+        for (v, w) in side.iter_mut().zip(wet) {
+            *v = if dry == 0.0 {
+                w * mix
+            } else {
+                *v * dry + w * mix
+            };
+        }
+    }
+}
+
 /// The loudest RMS of both sides of an impulse over a window of 300 ms,
 /// which is what FL's normalize brings to 0.05.
 fn loudest(impulse: &Impulse) -> f32 {
@@ -718,6 +879,9 @@ pub struct Convolver {
     /// equaliser's curve when it is one.
     layers_flat: bool,
     equaliser: Option<f32>,
+    /// The equaliser's curve when it is not level, and its mix.
+    curve: Vec<Point>,
+    equaliser_mix: f32,
     normalize: bool,
     /// The latency the state reports, in frames.
     reported: i32,
@@ -754,6 +918,8 @@ impl Default for Convolver {
             embedded: Vec::new(),
             layers_flat: true,
             equaliser: Some(0.5),
+            curve: Vec::new(),
+            equaliser_mix: 1.0,
             normalize: true,
             reported: 0,
             predelay: 0,
@@ -823,6 +989,13 @@ impl Convolver {
             right = interpolator::resample(&right, ratio, QUALITY);
         }
         // A level equaliser curve is a gain: 1 at a half and 4 at the top.
+        // Any other is an FIR filter of the impulse (`FUN_0087b2b0`).
+        if self.equaliser.is_none() && self.equaliser_mix > 0.0 && !left.is_empty() {
+            let rate = target;
+            let spectrum = equaliser_spectrum(&self.curve, rate, stretch);
+            let kernel = spectrum_kernel(&smooth(&spectrum));
+            equalize(&mut left, &mut right, &kernel, self.equaliser_mix);
+        }
         if let Some(level) = self.equaliser {
             let x = level * 2.0;
             if x != 1.0 {
@@ -966,7 +1139,8 @@ impl Effect for Convolver {
             let layer = MEnvelope::read(&mut reader, Class::Map)?;
             layers_flat &= layer.flat() == Some(0.5);
         }
-        let equaliser = MEnvelope::read(&mut reader, Class::Map)?.flat();
+        let curve = MEnvelope::read(&mut reader, Class::Map)?;
+        let equaliser = curve.flat();
         let flags = reader.bytes(4)?;
         let normalize = flags[3] != 0;
         let reported = if version >= 15 { reader.i32()? } else { 0 };
@@ -974,8 +1148,9 @@ impl Effect for Convolver {
         let predelay = reader.i32()?.clamp(0, 1000);
         let self_convolution = reader.i32()?.clamp(0, 1000);
         let stretch = reader.i32()?.clamp(-1000, 1000);
+        let mut equaliser_mix = 1000;
         if version >= 11 {
-            let _equaliser_mix = reader.i32()?;
+            equaliser_mix = reader.i32()?;
         }
         reader.end()?;
 
@@ -986,6 +1161,8 @@ impl Effect for Convolver {
             embedded,
             layers_flat,
             equaliser,
+            curve: curve.points,
+            equaliser_mix: equaliser_mix.clamp(0, 1000) as f32 / 1000.0,
             normalize,
             reported,
             predelay,
@@ -1073,8 +1250,8 @@ impl Effect for Convolver {
             }
             Source::Loaded(_) => {}
         }
-        if !self.layers_flat || self.equaliser.is_none() {
-            Fidelity::Approximate("Convolver's envelope layers and equaliser curve are left out")
+        if !self.layers_flat {
+            Fidelity::Approximate("Convolver's envelope layers are left out")
         } else {
             Fidelity::Exact
         }
@@ -1453,6 +1630,77 @@ mod tests {
             (heard[1] - (0.25 * 0.75 + 0.25 * unit)).abs() < 1e-5,
             "{heard:?}"
         );
+    }
+
+    #[test]
+    fn the_equaliser_s_axis_runs_from_0_to_1_and_is_logarithmic_above_c3() {
+        assert_eq!(axis(0.0), 0.0);
+        assert!((axis(22050.0) - 1.0).abs() < 1e-12);
+        let low = 440.0 * (-21.0 * 2f64.ln() / 12.0).exp();
+        let knee = 2f64.ln() / (44100.0 / low).ln();
+        assert!((axis(low) - knee).abs() < 1e-12);
+        assert!((axis(low / 2.0) - knee / 2.0).abs() < 1e-12);
+        assert!(axis(1000.0) < axis(2000.0) && axis(2000.0) < axis(4000.0));
+    }
+
+    #[test]
+    fn a_flat_spectrum_s_kernel_is_a_centred_click_and_smoothing_keeps_it_flat() {
+        let kernel = spectrum_kernel(&[1.0; 65]);
+        assert_eq!(kernel.len(), 128);
+        let peak = kernel[64];
+        assert!((peak - 1.0).abs() < 1e-3, "{peak}");
+        assert!(
+            kernel
+                .iter()
+                .enumerate()
+                .all(|(i, v)| i == 64 || v.abs() < 1e-5)
+        );
+        // FL holds the ends out by the spectrum's own length, which is
+        // more than the smoothing reaches for a spectrum of FL's size.
+        let smoothed = smooth(&vec![0.25; (1 << 16) + 1]);
+        assert!(
+            smoothed.iter().all(|v| (v - 0.25).abs() < 1e-4),
+            "{:?}",
+            &smoothed[..4]
+        );
+    }
+
+    #[test]
+    fn a_curve_up_at_the_top_lifts_the_highs_of_the_impulse_by_12_db() {
+        // Level up to 2 kHz, the top above 5 kHz: a click comes out of the
+        // equaliser as itself in the lows and four times it in the highs.
+        let (two, five) = (axis(2000.0), axis(5000.0));
+        let curve = [
+            Point::new(0.0, 0.5),
+            Point::new(two, 0.5),
+            Point::new(five - two, 1.0),
+            Point::new(1.0 - five, 1.0),
+        ];
+        let spectrum = equaliser_spectrum(&curve, 44_100.0, 1.0);
+        assert_eq!(spectrum.len(), (1 << 17) + 1);
+        assert_eq!((spectrum[0], spectrum[1 << 16]), (1.0, 4.0));
+        let kernel = spectrum_kernel(&smooth(&spectrum));
+        let mut click = vec![0f32; 8192];
+        click[4096] = 1.0;
+        let (mut l, mut r) = (click.clone(), click.clone());
+        equalize(&mut l, &mut r, &kernel, 1.0);
+        assert!(l.iter().zip(&r).all(|(a, b)| (a - b).abs() < 1e-6));
+        // The response's level at a frequency, by a DFT of the output.
+        let level = |hz: f64| {
+            let turn = 2.0 * PI * hz / 44_100.0;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (n, v) in l.iter().enumerate() {
+                re += f64::from(*v) * (turn * n as f64).cos();
+                im -= f64::from(*v) * (turn * n as f64).sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        assert!((level(200.0) - 1.0).abs() < 0.02, "{}", level(200.0));
+        assert!((level(12_000.0) - 4.0).abs() < 0.05, "{}", level(12_000.0));
+        // Half the mix is half way there.
+        let (mut l, mut r) = (click.clone(), click);
+        equalize(&mut l, &mut r, &kernel, 0.5);
+        assert!((l[4096] - (0.5 + 0.5 * kernel[kernel.len() / 2])).abs() < 1e-6);
     }
 
     #[test]
