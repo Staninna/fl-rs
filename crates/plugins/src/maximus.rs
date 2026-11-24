@@ -360,7 +360,10 @@ impl Delay {
             return frame;
         }
         let out = std::mem::replace(&mut self.frames[self.at], frame);
-        self.at = (self.at + 1) % self.frames.len();
+        self.at += 1;
+        if self.at == self.frames.len() {
+            self.at = 0;
+        }
         out
     }
 }
@@ -716,6 +719,8 @@ enum Saturator {
     Shaped {
         ceiling: f32,
         k: f64,
+        /// `1 / k`, worked out once.
+        inverse: f64,
         expect: f32,
         norm: f64,
     },
@@ -742,6 +747,7 @@ impl Saturator {
             Saturator::Shaped {
                 ceiling,
                 k,
+                inverse,
                 expect,
                 norm,
             } => {
@@ -751,7 +757,7 @@ impl Saturator {
                     return 0.0;
                 }
                 let size = f64::from(x.abs().min(expect) / ceiling);
-                let bent = size.powf(k).atan().powf(1.0 / k) * norm * f64::from(ceiling);
+                let bent = size.powf(k).atan().powf(inverse) * norm * f64::from(ceiling);
                 (bent as f32).copysign(x)
             }
         }
@@ -1645,6 +1651,7 @@ fn saturator(p: &[i32; PER_BAND], band: &Band) -> Saturator {
         Saturator::Shaped {
             ceiling,
             k,
+            inverse: 1.0 / k,
             expect: expect as f32,
             norm,
         }
@@ -2478,6 +2485,7 @@ mod tests {
             k,
             expect,
             norm,
+            ..
         } = plugin.bands[0].saturator
         else {
             panic!("not shaped");
