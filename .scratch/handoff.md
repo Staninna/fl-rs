@@ -1,3 +1,27 @@
+# Handoff, 2026-11-24, hot plugins cheaper on one thread
+
+Worktree branch off `main` at `5d3f1b8`, not pushed. Every change keeps every bit: the profile harness hashes of all 165 projects at `--frames 1024 --warmup 0` (one thread) are unchanged, and each plugin's every shipped state was checked with the new `state_hashes` test. fmt, clippy and `cargo test --release -p plugins -p dsp` with the corpus pass.
+
+Where the time went, `perf record` (cpu-clock, this VM has no hardware counters, so instruction counts are from callgrind) over the 10 heaviest projects on one thread, before: Fruity Reverb (Harmor's, Harmless's, Sytrus's and Autogun's built-in) 6.9%, Maximus's bands 6.2% plus its saturator's `pow` 4.6% and `bands_frame` 3.9%, Reeverb 2 5.9%, Sytrus `Voice::play` 5.8%, Pitcher's detector 5.5%, Harmor 3.6% + tick 1.7% + `ShapeTable::clamped` 1.4%, Convolver FFT 3.0%, Harmless's sine bank 3.9%, Parametric EQ 2 1.7%, the engine's mixer 2.2%.
+
+Done, one commit each, measured on the plugin bench (fastest of 10 rounds) and on all corpus states:
+
+- Pitcher: the detector's AMDF sums 64 samples at a time with the sums in registers (each sum still in time order), and its band pass (DC blocker and 16 f64 one-poles, a chain of ~300 cycles a sample) runs ahead on 256-sample runs as a wave, stage `i` on sample `k - i`. Bench 356 -> 188 ns a frame.
+- Harmless (`dsp::additive::SineBank`): two groups of eight partials per pass, each sum taking the first group's halves then the second's. Bench 242 -> 125 ns a frame.
+- Maximus: no `%` in the peak window, mean and delay rings (shared with Fruity Limiter); `1/k` of the shaped saturator once; then its release/attack stage chains run over 32 frames at a time as a wave, in passes (crossover and detectors, chains, delay and saturator, master). Bench 286 -> 205 ns a frame. Soundgoodizer, Harmor and Autogun carry a Maximus.
+- `ShapeTable::clamped` inlined with an `i32` index, checked against the old code at all 2^32 floats (`--ignored every_place`). Harmor's tick 94 -> 85 M instructions.
+- `crates/plugins/src/state_hashes.rs`: `FL_RS_STATE_HASHES="Pitcher,Harmor" cargo test --release -p plugins --lib -- --ignored state_hashes --nocapture` prints a hash per shipped state and the time in `process`. Run it before and after and diff the `HASH` lines; minutes a plugin, where the corpus harness takes hours on a busy machine.
+- `crates/plugins/bench.tsv`: the seven moved rows written again.
+
+Tried and dropped, no faster on wall time:
+- Harmor's partial bank two groups at a time, as Harmless's: more instructions (spills), and its corpus states took 124 s against 114 s.
+- Fruity Reverb and Reeverb 2 with their lines lent out as locals, so the compiler stops reloading each line's place after every write: 3% fewer instructions, the same time. Both are ~300-600 instructions a frame with no chain to break; what would pay is running the feed-forward front (the filters, the four diffusers, the predelay) as passes over a block, vectorised over each line's contiguous stretch, or a cheaper tap read.
+- Maximus's three bands' chains side by side (a commit, then superseded by the wave).
+
+Whole-project speed is hard to show on this machine (4 cores, load 5 to 30 from other agents): the 12 slowest projects, base and final run side by side, came out +6% in total with single projects between -19% and +61%, and a paired run (`perf stat` task-clock, base then final per project) was cut short at Bien Duro 113 -> 94 s CPU, Oxygen 102 -> 104 s. Rerun both binaries' harness on a quiet machine for real numbers; the per-plugin numbers above are the reliable ones.
+
+Left, by what the Oxygen profile shows now (Harmor's bank 17%, Maximus's process 16%, Harmor's tick 12%, Reeverb 2 6%, `sin` 5%): Maximus's IIR crossover sections are chains too, and could run as the same wave over a run; Harmor's tick has no single hot spot (log2f 1.8%, exp2f 2.3%); Sytrus `Voice::play` was left alone because its voice loop is being reworked on another branch; Reeverb 2's LFO calls `sin` in f64 every sample, which must stay.
+
 # Handoff, 2026-11-03, big projects stay smooth
 
 Playing and editing large projects lagged. Three changes, on `main`.
