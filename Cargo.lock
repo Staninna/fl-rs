@@ -2115,6 +2115,7 @@ dependencies = [
  "dsp",
  "miniz_oxide 0.9.1",
  "no_denormals",
+ "symphonia",
  "wavicle",
 ]
 
