@@ -61,11 +61,11 @@ multiplies @0 and @4 by 100 for writers below 5.3.7).
 | 0x13 | mod X offset | 229 @12, `chan+0x190` | -256..256 (`FCutOfsWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
 | 0x14 | mod Y offset | 229 @16, `chan+0x194` | -256..256 (`FResOfsWheel`) | `FUN_00fea140` | plays on a sampler or audio clip channel | loader, dfm |
 | 0x103..0x125 | TS404 parameters | `*(chan+0x358) + 8 + 4n` | per knob | | no | loader, dfm |
-| 0x200..0x207 | echo delay: 0x200 feedback, 0x201 pan, 0x202 pitch, 0x203 echoes, 0x204 time, 0x205 mod Y, 0x206 mod X | `chan+0x200 + 4n` | per knob (`Delay*Wheel`, tags 512..518) | | no | loader, dfm |
+| 0x200..0x207 | echo delay: 0x200 feedback, 0x201 pan, 0x202 pitch, 0x203 echoes, 0x204 time, 0x205 mod Y, 0x206 mod X | `chan+0x200 + 4n` | per knob (`Delay*Wheel`, tags 512..518) | read as a note starts (`FUN_00d28990`) | plays from the 209 and the 138, not from a clip (below, "Echo delay") | loader, dfm |
 | 0x300..0x3FF | arpeggiator: 0x300 direction, 0x301 range, 0x302 chord, 0x303 time (450..1447), 0x304 gate (0..48), 0x305 repeat (`docs/arpeggiator.md`) | `chan+0x2ac + 4n` (0x302 stored less 2, 0x305 at `chan+0x2e0`) | per knob (`Arp*`, tags 769..773) | 0x303: `FUN_00fea220` | 0x303 and 0x304 play from a clip | loader, dfm |
-| 0x500..0x5FF | key and velocity tracking: record `(c - 0x500) >> 4`, field `c & 0xf` | `chan+0x1b0 + 0x20 r + 4 f` | -256..256 (`Track*Wheel`, tags 1280..1282) | | no | loader, dfm |
+| 0x500..0x5FF | key and velocity tracking: record `(c - 0x500) >> 4`, field `c & 0xf` | `chan+0x1b0 + 0x20 r + 4 f` | -256..256 (`Track*Wheel`, tags 1280..1282) | `FUN_00fea360`, `FUN_00fea290` | plays from the 228, not from a clip (below, "Tracking") | loader, dfm |
 | 0x600..0x6FF | an automation clip's own LFO: 0x600 speed (512..65536), 0x601 tension, 0x602 skew, 0x603 pulse width, 0x604 level (-128..128) | the clip's `TACArticulator` | per knob (`ACLFO*`, tags 1536..1540) | | no | loader, dfm |
-| 0x1000..0x17FF | the instrument envelopes and LFOs: envelope `(c - 0x1000) >> 8`, field `c & 0xff` (2 predelay, 3 attack, 4 hold, 5 decay, 6 sustain, 7 release, 8 amount, 9 LFO predelay, ...) | `*(chan+0x330) + 0x198 + 0xa0 e + 4 f` | per knob (`Env*`, `LFO*`, tags 4098..4112) | | no | loader, dfm |
+| 0x1000..0x17FF | the instrument envelopes and LFOs: envelope `(c - 0x1000) >> 8`, field `c & 0xff` (2 predelay, 3 attack, 4 hold, 5 decay, 6 sustain, 7 release, 8 amount, 9 LFO predelay, ...) | `*(chan+0x330) + 0x198 + 0xa0 e + 4 f` | per knob (`Env*`, `LFO*`, tags 4098..4112) | `FUN_009ce9e0` | plays from the 218 on a sampler or audio clip channel (below, "Instrument envelopes and LFOs"); from a clip only on 3x Osc, as its parameter `23 + 17 e + f` | loader, dfm |
 | 0x1800..0x7FFF | nothing: the dispatcher has no branch for them | | | | no | loader |
 | 0x8000.. | plugin parameter `c - 0x8000` | the plugin | the plugin's | plugin VMT +0x30 | plays where the generator is hosted | loader |
 
@@ -142,12 +142,16 @@ Left out, and why:
   engine plays none of the four on a plugin channel: `Square a Saw -
   Oxygen` channel 51 (3x Osc) keeps its two clips on mod X unsupported.
 - A clip or a link on the stretch time (14), Stretch Pro's formant shift
-  (15), the instrument envelopes (0x1000..), the tracking of mod X and Y
-  on a sampler whose filter does not run, the echo delay (0x200..), TS404
-  (0x103..): the engine plays none of these parts of a channel, and counts
-  the channels that turn each on (below, "Channel parts the engine
-  counts"). The stretch itself is played, as FL's lengths, speeds and
-  pitches with a stand-in for élastique (below, "Time stretch"). Nor the arpeggiator's direction, range, chord and repeat
+  (15) and TS404 (0x103..): the engine plays none of these parts of a
+  channel, and counts the channels that turn the formant or TS404 on
+  (below, "Channel parts the engine counts"). The stretch itself is
+  played, as FL's lengths, speeds and pitches with a stand-in for
+  élastique (below, "Time stretch"). The instrument envelopes, the
+  tracking and the echo delay play from their records, but a clip on one
+  of their controls is not played on a sampler: FL works the envelope's
+  record out again as the clip moves it (`FUN_009ce9e0` from the
+  dispatcher), and the engine reads the records once. On 3x Osc the tab's
+  parameters take the clip (above). Nor the arpeggiator's direction, range, chord and repeat
   (0x300..0x302, 0x305) from a clip, which no corpus clip drives, nor its
   time and gate from a controller link: the arpeggios are worked out from
   the song before it plays.
@@ -160,24 +164,23 @@ Left out, and why:
 A render counts, in `Rendered::unplayed_parts`, the channels that turn on
 a part the engine leaves out, as it counts the arpeggiators it does not
 build (`docs/arpeggiator.md`). The corpus test prints the counts on each
-project's line (`unplayed envelopes`, `unplayed time stretch`, `unplayed
-tracking`, `unplayed echo delays`, `TS404`) and adds them up on its
+project's line (`unplayed time stretch`, `TS404`) and adds them up on its
 `corpus channel parts` line, and `tools/progress.py --render` counts a
 project with any of them as not played in full. A channel counts when it
 has a note that sounds in the render (a sampler voice with its sample, or
-a note for a hosted generator), and for the envelopes and the time
-stretch also an audio clip that sounds; a TS404 counts with a note, as
-nothing of it sounds. A channel counts once for each part it turns on.
+a note for a hosted generator), and for the time stretch also an audio
+clip that sounds; a TS404 counts with a note, as nothing of it sounds. A
+channel counts once for each part it turns on. The instrument envelopes,
+the tracking of mod X and Y and the echo delay were counted the same way
+until the engine played them (the sections below); the render before
+that counted 24, 1 and 2 channels.
 
 What turns each part on is a reading of what moves the sound, in
 `model::Channel`:
 
 | part | events and layout | on when | confidence |
 |---|---|---|---|
-| instrument envelopes and LFOs (`envelope_on`) | five 218 `EnvelopeLFO`, 68 bytes each, one per target in order pan, volume, mod X, mod Y, pitch. i32s: @0 flags (a byte), @4 the envelope's switch, @8 predelay, @12 attack, @16 hold, @20 decay, @24 sustain, @28 release, @32 amount, @36 LFO predelay, @40 LFO attack, @44 LFO amount, @48 LFO speed, @52 LFO shape, @56..@67 tensions. The loader copies each to `smp+0x198 + 0xa0 e`, and control `0x1000 + 0x100 e + f` is the i32 at `4 f` | an envelope's switch is on and its amount is off 0, or its switch is on and it is the volume's; or an LFO's amount is off 0 | fields 2 to 9 loader and dfm (the map above); the switch @4, the LFO fields and the order of the targets PyFLP and inferred. A new sampler (`model`'s `NEW_SAMPLER`, from FL's `Empty.flp`) has every switch off and every amount 0, and its second record alone has other flags and a tension, which fits the volume being second. That the volume envelope works at amount 0 is inferred |
 | Stretch Pro's formant shift (`crate::stretch::unplayed`), sampler and audio clip channels only | 215 `Parameters` @160 f64 the formant (control 15, `chan+0x324`), with @108 the mode (`chan+0x2f0`) | the mode is Stretch Pro (-2) and the formant is in the payload and off 0.5. The rest of the stretch is played (below, "Time stretch"); before, any time, pitch, multiplier or formant counted (`model::Channel::time_stretch_on`), 52 channels in the render at `5d3f1b8` | `FUN_0067db90` takes the formant as a factor of `2^(1 - 2 formant)` on the pitch; that only élastique Pro shifts formants is the DLL's string "Elastique Pro with formant shifting" for the mode. 0.5 for the centre inferred from a new sampler |
-| tracking of mod X and Y (`tracks_mods`), sampler channels whose filter does not run | two 228 `Tracking`, 16 bytes each, the velocity's then the key's: i32 @0 the middle, @4 pan, @8 mod X, @12 mod Y. The loader copies record `r` to `chan+0x1ac + 0x20 r`, so control `0x500 + 0x10 r + f` is the knob at @`4 + 4 f` | a mod X or mod Y knob of either record is off 0, on a sampler whose voices do not run the filter (no clip or link drives its mod X, mod Y or their offsets). Pan tracking is played on every channel, and a plugin is handed its tracked mods (`crates/engine/src/levels.rs`) | loader and dfm for the knobs; the middle and the velocity-then-key order as `levels.rs` reads them. A new sampler has middles 100 and 60 and every knob 0 |
-| echo delay (`echo_delay_on`) | 209 `Delay`, 20 bytes, five i32: @0 feedback, @4 pan, @8 pitch, @12 echoes, @16 time, copied to `chan+0x200`, controls 0x200..0x204 in that order | feedback above 0 and at least one echo | loader and dfm for the order; the legacy 130 writes echoes to `chan+0x20c` (@12) and a feedback that grows with them to `chan+0x200` (@0). That feedback 0 makes no echo is inferred: a new sampler has feedback 0, 4 echoes and time 144 |
 | TS404 (`is_ts404`) | 21 `ChannelID.Type` 1, whose controls 0x103..0x125 address the object at `chan+0x358` (210 `LegacySampleState` fills it) | the channel is of type 1 | inferred: FL 3's TS404 was a channel type, and no corpus project has type 1 or a 210. No filter type is a TS404: 219 @20 has the eight kinds of the table at 0x1510e40 |
 
 ## Time stretch (crates/engine/src/stretch.rs)
@@ -329,17 +332,196 @@ and runs them through a filter, the same unit 3x Osc carries a copy of
   gains.
 
 What the engine plays: a voice on a sampler or audio clip channel whose
-mod X, mod Y or one of their offsets a clip or a link drives runs this
-filter with the cutoff and resonance of its note (its mod X and Y and
-tracking) and of its channel. It works the coefficients out where it reads
-its controls, every 512th sample and where a voice starts, and moves the
-Fast LP over 512 samples rather than a tick. It leaves out the mod X and
-mod Y envelopes and LFOs, and the zeroing under 2^-24, which would make a
-voice depend on where its blocks fall. A channel whose filter nothing
-drives plays unfiltered, as before: 85 of the corpus's 1,277 sampler and
+mod X, mod Y or one of their offsets a clip or a link drives, whose
+tracking moves its mods, or whose mod X or mod Y envelope or LFO is on,
+runs this filter with the cutoff and resonance of its note (its mod X and
+Y and tracking), of its channel and of the envelopes. It works the
+coefficients out where it reads its controls, every 512th sample, where a
+voice starts and at each tick its envelopes step, and moves the Fast LP
+over 512 samples rather than a tick. It leaves out the zeroing under
+2^-24, which would make a voice depend on where its blocks fall. A
+channel whose filter nothing drives plays unfiltered, as before: 85 of the corpus's 1,277 sampler and
 audio clip channels have a filter that is not wide open, and playing it on
 all of them would change projects no clip touches.
 
 Corpus: `Square a Saw - Oxygen` channel 14, a sampler with type 5 (the
 low-pass twice) and mod Y at 114, and `Bombs Away ft KARRA - I'm Awake`
 channels 227 and 228, audio clip channels with a clip on the mod X offset.
+
+## Instrument envelopes and LFOs (crates/engine/src/instrument_env.rs)
+
+Read from `FLEngine_x64.dll` with capstone and Ghidra. The unit is the
+same as 3x Osc's own copy (`docs/plugins/3x-osc.md`, section 3.2), down to
+the constants, so the engine runs `plugins::three_osc::{Block, Envelope}`.
+
+- The records. The loader copies each 218 to `smp+0x198 + 0xa0 e`
+  (`smp = *(chan+0x330)`), in the order pan, volume, mod X, mod Y, pitch:
+  `FUN_00d24500` steps state `e` against record `e` and combines them in
+  that order (below), which confirms the order the model inferred. @4 is
+  the envelope's switch: `FUN_009ce490` runs the envelope only when it is
+  not 0, and `FUN_00d241e0` lets the volume envelope's voice be cut at the
+  note off when it is 0 (`smp+0x198+0xa0+4`, `0xd24332`).
+- `FUN_009ce9e0` works a record out (`FUN_009cec20` makes a new one with
+  its defaults and calls it): times in ticks, `t <= 100 ? 0 : round((1001^(t
+  / 65536) - 1) * u)` (`FUN_009ce950`), where `u = (PPQ >> 2) / 48 *
+  24576 / 1000`, times `tempo / 120` unless flag bit 0 (bit 1 for the
+  LFO) is set; `PPQ >> 2` and the tempo are globals `FUN_009ce3f0` and
+  `FUN_009ce3e0` set. Attack `+0x44 = 1/(n+1)`, decay and release
+  `-1/(n+1)`, sustain `/128`, the amounts `/128` (`*0x15e3890`), the
+  tensions through `FUN_009ce890` (`sign(t) (6347^|t/128| - 1) / 10`),
+  the LFO step `2^32 / max(3, n)` (`FUN_006614a0`) and its table from
+  `*0x15e3168[shape]`, shape kept to 0..2.
+- `FUN_009cedb0` starts a voice's envelope (from the voice's set-up,
+  `FUN_00d277d0` and `FUN_00d27cf0`): at the predelay when there is one
+  and the switch is on; otherwise at the top when the attack knob is 100
+  and the switch is on, or the switch is off and flag bit 2 is set; at 0
+  otherwise. The voice's `+0x230` is then `1 + (volume stage > 1)`: a
+  voice that starts at the top takes its gains at once, one that does
+  not ramps them up from 0.
+- `FUN_009ce490` steps it, once a tick (`FUN_00d24ae0` calls
+  `FUN_00d24500` where the tick flag `*0x15e1820` is set or the voice is
+  new): stages 0 predelay, 1 attack, 2 hold, 3 decay to the sustain, 4
+  sustain, 6 release, and 9 once a stage past the hold is under 2^-24
+  (`*0x15e4ff0`). The LFO waits its predelay in ticks, then reads its
+  table at `phase >> 18`, the phase the voice's own or, with flag bit
+  5, the record's shared one: `FUN_009cef00` sets it to `song position *
+  step` and `FUN_009ceec0` moves it a step a tick.
+- `FUN_00d24500` makes what the five move: pan `lfo * lfo amount * 2`,
+  volume `env * (lfo * lfo amount + 1)` kept at 0 and up, mod X and mod Y
+  `env * amount + lfo * lfo amount`, pitch in cents `env * amount + lfo *
+  lfo amount` with the amounts as the record's integers. The pan has no
+  envelope, and the volume's amount is not read: a volume envelope that
+  is on works at amount 0, as the model inferred.
+- The voice's render, `FUN_00d24ae0`, puts them on: gains
+  `ComputeLRVol(FinalLevels.Pan + pan, FinalLevels.Vol * volume)`
+  (`FUN_006a3a00`), moved from the last tick's over the tick's rounded
+  length by no more than `0.001 * 44100 / rate` a sample (`FUN_006a3810`,
+  `*0x15e1678`), and ending where that ramp is at the tick's end
+  (`0xd24d1f`); the speed from `FinalLevels.Pitch + pitch` (`FUN_00d26890`,
+  `voice+0x158`); the filter's cutoff and resonance `FinalLevels.FCut +
+  mod X` and `FRes + mod Y` (`FUN_00d24650`, `voice+0x110` and `+0x134`).
+- The note off, `FUN_00d241e0`: the volume, mod X, mod Y and pitch
+  envelopes release from where they are (`FUN_009cecc0`). With the volume
+  envelope off the voice is cut there (`FUN_00d243c0`); with it on, the
+  render cuts it once it is let go of and the volume envelope is at stage
+  9 (`0xd24b74`). A volume envelope that falls to a sustain of 0 leaves
+  its voice silent until the note off.
+
+Plugin channels. The host steps these envelopes on the voices it renders
+itself: a sampler's and an audio clip's. A plugin channel's `chan+0x164`
+is 2 unless the plugin asks for the sampler (`FUN_012bd640`, `2 -
+(FPF_UseSampler != 0)`), and at 2 the note off releases none of them; a
+generator that renders its own voices does not go through
+`FUN_00d24ae0`. The generators that show the channel's envelopes carry the
+same unit themselves: 3x Osc's instrument tab and Fruity Slicer's
+articulation, whose ports run it. So the engine runs the records on
+sampler and audio clip voices alone, and the corpus's other plugin
+channels with a record switched on (Harmless, DX10, Harmor, Fruit Kick,
+Ogun) play as their plugin does. A 3x Osc state below version 14 has no
+tab, and FL 12 and older kept its envelopes in the channel alone: the
+engine hands such a 3x Osc the channel's records as its tab (parameters
+`23 + 17 e + f`), which is inferred from such projects automating the
+tab's controls on the channel (`Treben - Gimbal and Sinan - RawFL`, clip
+33 on 0x1408 of 3x Osc channel 13) and from a version 14 state carrying
+the channel's words in 24 of the corpus's 26. A clip on control
+`0x1000 + 0x100 e + f` of a 3x Osc channel drives that parameter.
+
+What the engine plays: a voice on a sampler or audio clip channel whose
+records move something steps them once a tick of the song, worked out
+from the tempo at its note's tick, and puts the pan, the volume, the
+pitch and the mods on its gains, its speed and its filter (above, "The
+filter"). The ticks fall where `round((tick + k) * samples per tick)`
+does from the tempo the note starts at, which a clip on the tempo moves
+away from where the clock has them. A voice whose pan the LFO moves keeps
+the level and pan it started with under it, not those a clip on the
+channel's volume or pan gives it. What a voice whose volume envelope is
+off plays, and when it ends, is as before.
+
+Corpus: 192 channels have a record that moves something; 106 are
+samplers, 60 are 3x Osc, the rest other plugins. Of the 24 the render
+counted, in channels that sound in its 10 seconds, the samplers and the
+3x Osc channels with an old state are played now. The corpus render at
+`bb8defe` plays 82 of the 165 projects in full, against 79 at `5d3f1b8`,
+where the envelopes, the tracking and the echo delay were counted (24, 1
+and 2 channels); the master peaks of `I'll Be Your Madonna`, `The Ogun
+Dream` (echoes) and `Gimbal and Sinan - RawFL` (an old 3x Osc's tab)
+moved.
+
+## Tracking (crates/engine/src/levels.rs)
+
+`FUN_00d265e0` adds a channel's tracking to `FinalLevels` once a tick
+when the flag `chan+0x6ed` is set (any knob off 0, `FUN_00fea360`):
+
+    dv = FinalLevels.Vol + chan+0x1bc       dp = FinalLevels.Pitch + chan+0x1dc
+    Pan += chan+0x1c0 * dv + chan+0x1e0 * dp, and FCut, FRes with +0x1c4/+0x1e4, +0x1c8/+0x1e8
+
+with `chan+0x1c0 + 0x20 r + 4 f = knob * table[r]`, the table at
+0x1543088 being `1/128` for the velocity's record and `1/307200` (a level
+an octave for a knob at 256) for the key's; `chan+0x1bc = -curve(middle /
+128)`, FL's volume curve `(11^x - 1) / 10` with 1 at 1 (`FUN_00fea290`),
+which a note of velocity 100 on a channel at 10000 meets; and `chan+0x1dc =
+(key middle - 60) * 100`, added as read (every corpus channel has its key
+middle at 60, so its sign is not borne out). `levels.rs` had a velocity
+knob at half and a key knob at a fifth of this; it now has FL's. The
+voice of a sampler whose tracking moves mod X or mod Y runs its filter.
+
+## Echo delay (crates/engine/src/echo.rs)
+
+`FUN_00d293d0`, the host's note on, calls `FUN_00d28990` and, for a note
+it echoes, `FUN_00d28c90`:
+
+- A channel echoes when its feedback, `chan+0x200`, is above 0 and the
+  note is not an echo itself (flag 0x10000 of the note, which the echoes
+  get with 0x50000). The feedback is `feedback / 12800` (`*0x15e4780`).
+- Echo `k`, from 1 to `chan+0x20c`, starts `FUN_01312200(k * time)`
+  ticks after its note, `k * time * (PPQ >> 2) / 48` in whole ticks: the
+  time is in 192nds of a beat, and a new sampler's 144 is a dotted
+  eighth. It lasts as long as its note.
+- Each echo's `InitLevels` are the one before's: the volume times the
+  feedback; the pan plus `(chan+0x204 - 12800) / 6400` on top of the
+  channel's pan (`chan+0x198`), kept to -1..1 and then less the channel's
+  pan, where the loader stores the 209's pan plus 6400, so 6400 in the
+  file pans nothing; with ping-pong (`chan+0x28e` bit 1, 215 @10) the
+  step turns round where the pan reaches an end; the pitch plus
+  `chan+0x208` cents unless the channel time stretches (`chan+0x2e4` off 0
+  and the mode not below 0); mod X and Y moved by 138 `DelayModXY`'s high
+  and low words, `chan+0x218` and `+0x214`: 128 moves nothing, below it
+  `(m + 1) v / 128 - 1`, above `1 - (1 - m)(256 - v) / 128`.
+- Fat mode (`chan+0x28e` bit 2): the feedback is over `(1.5 n + 1) 2`,
+  the note itself is turned down to `1.5 - 2 n feedback` of its volume,
+  and the echoes come twice at the same ticks, each at the note's volume
+  times the feedback: once from the note as it was, once from it as it
+  was turned down with the pan and pitch steps the other way.
+- The loader's rewrites of the 209 for old writers (`FUN_00f46490`):
+  feedback and pan times 100 below 5.3.7, pitch `(p - 120) * 10` below
+  version number 3,002,985.
+
+What the engine plays: every note of a channel that echoes gets its
+echoes as notes of their own, after the song's notes, on a sampler and
+on a plugin channel alike (`FUN_00d293d0` is the note on of every
+channel); slide notes are not echoed. An echo's levels are worked out
+from its note's as the engine has them, so its tracking is the note's,
+where FL tracks each echo's own levels. Corpus: `LeriQ - SHINE` channels
+1, 2 and 3, `LollieVox & Lezina J - I'll Be Your Madonna` channel 3
+(3x Osc), `Electric Loop - The Ogun Dream` channels 3, 10 and 13 (Ogun),
+and `Treben - Umziky - All the same` channel 7.
+
+## Functions read for the envelopes, tracking and echo delay
+
+| address | what |
+|---|---|
+| `FUN_009ce9e0`, `FUN_009ce950`, `FUN_009ce890` | a record's derived values, its times in ticks, its tensions |
+| `FUN_009cec20` | a new record's defaults |
+| `FUN_009cedb0`, `FUN_009ce490`, `FUN_009cecc0` | an envelope's start, its tick, its release |
+| `FUN_009ce3e0`, `FUN_009ce3f0` | the tempo and `PPQ >> 2` the times use |
+| `FUN_009cef00`, `FUN_009ceec0` | the shared LFO phase: set from the song position, moved a tick |
+| `FUN_00d24500` | a voice's five envelopes stepped and combined |
+| `FUN_00d24ae0` | a sampler voice's render: envelopes, gains, filter, the end of a voice let go of |
+| `FUN_00d26890`, `FUN_00d279d0` | a sampler voice's speed and a plugin voice's pitch, with `voice+0x158` |
+| `FUN_00d241e0`, `FUN_00d243c0` | the note off: the releases, or the cut |
+| `FUN_00d277d0`, `FUN_00d27cf0` | a voice's set-up: the envelopes started, `+0x230` |
+| `FUN_006a3810` | a gain's ramp over a tick, kept to a limit a sample |
+| `FUN_012bd640` | a plugin channel's `chan+0x164` from its flags |
+| `FUN_00d265e0`, `FUN_00fea360`, `FUN_00fea290` | tracking into `FinalLevels`, its knobs and its middles |
+| `FUN_00d28990`, `FUN_00d28c90`, `FUN_01312200` | the echo delay: whether, how loud, and each echo |
+| `FUN_00fe90d0` | a new channel's echo delay (`chan+0x214`, `+0x218` 128) |

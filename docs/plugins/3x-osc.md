@@ -178,7 +178,10 @@ four flag bytes; v11 (88) is `version, 20 params, 4 flag bytes` (p20 is set to
 0); v10 (84) is `version, 20 params` (flags forced to 0); the unversioned 44
 bytes are the 11 ints `[s1 c1 f1 m2 s2 c2 f2 m3 s3 c3 f3]`. For every version
 below 14 the articulation block takes the defaults above (`FUN_0072c250`),
-filter cutoff 256, resonance 0, type 0.
+filter cutoff 256, resonance 0, type 0. FL 12 and older kept such a 3x
+Osc's envelopes in the channel's 218 records alone, and the engine hands
+it those as its tab (`crates/engine/src/instrument_env.rs`, `hand_tab`;
+inferred, `docs/rec-channel.md`, "Instrument envelopes and LFOs").
 
 Preset check (`.fst` name "3x Osc"; every version-14 corpus block that was
 checked by hand decodes with the table above):

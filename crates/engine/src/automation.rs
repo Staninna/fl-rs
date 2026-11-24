@@ -1077,9 +1077,13 @@ impl Automation {
                 let channel = index;
                 (Control::Arp { channel, gate }, initial, target.raw_range()?)
             }
-            RecTarget::Channel { index, control } if control >= PARAM => {
+            // A plugin whose tab is the channel's envelopes takes them as
+            // its parameters.
+            RecTarget::Channel { index, control }
+                if control >= PARAM || tab_param(project, index, control).is_some() =>
+            {
                 let mut plugin = generator::hosted(project.channel(index)?, None, None)?;
-                let param = control - PARAM;
+                let param = tab_param(project, index, control).unwrap_or(control - PARAM);
                 let initial = plugin.param(usize::from(param)) as i32;
                 let range = generator::param_range(plugin.as_mut(), usize::from(param))?;
                 let channel = index;
@@ -1283,13 +1287,6 @@ impl Automation {
         })
     }
 
-    /// Whether the voices of this sampler or audio clip channel run its
-    /// filter: a clip or a link drives its mod X, mod Y or an offset of
-    /// them.
-    pub fn runs_filter(&self, channel: u16) -> bool {
-        (self.levels.iter()).any(|l| l.channel == channel && l.filter.is_some())
-    }
-
     /// Whether a clip drives the pitch knob of this channel.
     pub fn drives_pitch(&self, channel: u16) -> bool {
         self.pitch_lane(channel).is_some()
@@ -1416,9 +1413,15 @@ fn raw_at(low: i32, high: i32, part: i32) -> f64 {
 /// [`Levels::mods`] keeps them (`docs/rec-channel.md`).
 const MODS: [u16; 4] = [2, 3, 0x13, 0x14];
 
+/// The parameter of a channel's plugin that channel control `control` of
+/// its envelopes drives, for a plugin whose tab they are.
+fn tab_param(project: &Project, channel: u16, control: u16) -> Option<u16> {
+    crate::instrument_env::tab_param(project.channel(channel)?, control)
+}
+
 /// Mod X and mod Y of a channel, 219 @12 and @16, 256 and 0 for a channel
 /// without a 219, and their offsets, 229 @12 and @16.
-fn mods(channel: &model::Channel) -> [i32; 4] {
+pub(crate) fn mods(channel: &model::Channel) -> [i32; 4] {
     let (x, y) = channel
         .levels
         .map_or((256, 0), |l| (l.mod_x as i32, l.mod_y as i32));

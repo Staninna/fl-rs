@@ -3,6 +3,7 @@
 
 use crate::Curves;
 use crate::channel_filter::ChannelFilter;
+use crate::instrument_env::Articulation;
 use crate::sample::Sample;
 use dsp::resample::read_hermite;
 use model::{Channel, Project};
@@ -142,6 +143,15 @@ pub(crate) struct Voice {
     /// mod Y automated, and the cutoff and resonance it was last given.
     filter: Option<ChannelFilter>,
     mods: Option<(f32, f32)>,
+    /// The cutoff and resonance of the note and its channel, which the
+    /// envelopes' mods go on.
+    filter_base: Option<(f32, f32)>,
+    /// The channel's envelopes and LFOs, the share of the speed the pitch
+    /// envelope gives, and the samples the voice may sound past its note
+    /// off ([`crate::instrument_env`]).
+    art: Option<Articulation>,
+    enveloped: f64,
+    tail: usize,
 }
 
 impl Voice {
@@ -174,6 +184,10 @@ impl Voice {
             next_bend: 0,
             filter: None,
             mods: None,
+            filter_base: None,
+            art: None,
+            enveloped: 1.0,
+            tail: 0,
         }
     }
 
@@ -197,14 +211,68 @@ impl Voice {
     /// voice without the filter, or when the two have not moved.
     pub fn set_filter(&mut self, cut: f32, res: f32) {
         let own = self.follow.and_then(|f| f.filter).map(|f| f.mods);
-        let (Some(filter), Some((x, y))) = (&mut self.filter, own) else {
+        let (Some(_), Some((x, y))) = (&self.filter, own) else {
             return;
         };
-        let mods = (x + cut, y + res);
+        self.filter_base = Some((x + cut, y + res));
+        self.apply_filter();
+    }
+
+    /// Give the filter the note's and the channel's cutoff and resonance
+    /// with what the envelopes add, when they have moved.
+    fn apply_filter(&mut self) {
+        let (Some(filter), Some((x, y))) = (&mut self.filter, self.filter_base) else {
+            return;
+        };
+        let (ex, ey) = self.art.as_ref().map_or((0.0, 0.0), |art| art.mods);
+        let mods = (x + ex, y + ey);
         if self.mods != Some(mods) {
             self.mods = Some(mods);
             filter.set(mods.0, mods.1);
         }
+    }
+
+    /// The voice plays its channel's envelopes and LFOs. A voice whose
+    /// volume envelope is on sounds past its note off for as long as the
+    /// release takes. `filter` is the channel's filter type and the
+    /// note's and the channel's cutoff and resonance, for a voice whose
+    /// mods the envelopes move and that runs no filter yet; `rate` is the
+    /// output rate. Call it after [`Voice::following`] and before
+    /// [`Voice::bending`].
+    pub fn articulated(
+        mut self,
+        art: Articulation,
+        rate: u32,
+        filter: Option<(i32, (f32, f32))>,
+    ) -> Self {
+        self.tail = art.shape().tail();
+        if art.shape().mods()
+            && self.filter.is_none()
+            && let Some((kind, base)) = filter
+        {
+            self.filter = ChannelFilter::new(kind, rate);
+            self.filter_base = Some(base);
+        }
+        self.art = Some(art);
+        self.fit();
+        self
+    }
+
+    /// The voice runs its channel's filter at `cutoff` and `resonance`,
+    /// the note's and the channel's, though no clip drives them: tracking
+    /// moves them. Nothing happens for a voice that runs it already.
+    pub fn filtered(mut self, kind: i32, rate: u32, (cut, res): (f32, f32)) -> Self {
+        if self.filter.is_none() {
+            self.filter = ChannelFilter::new(kind, rate);
+            self.filter_base = Some((cut, res));
+            self.apply_filter();
+        }
+        self
+    }
+
+    /// The note's length and what may sound past it.
+    fn cap(&self) -> Option<usize> {
+        self.held.map(|held| held.saturating_add(self.tail))
     }
 
     /// The note slides: from output sample `at` of the voice on it plays at
@@ -221,18 +289,30 @@ impl Voice {
     /// Whether the voice's speed may move, so that it knows its end only
     /// when it gets there.
     fn pitched(&self) -> bool {
-        self.bends.is_some() || self.follow.is_some_and(|f| f.slowest.is_some())
+        self.bends.is_some()
+            || self.follow.is_some_and(|f| f.slowest.is_some())
+            || self.art.as_ref().is_some_and(|art| art.shape().pitches())
     }
 
     /// Make a voice whose speed may move as long as it lasts at the
     /// slowest it can go.
     fn lengthen(&mut self) {
-        if !self.pitched() {
-            return;
+        if self.pitched() {
+            self.fit();
         }
+    }
+
+    /// Make the voice last as long as it may at the slowest it can go,
+    /// to its note's end and what may sound past it.
+    fn fit(&mut self) {
         let automated = self.follow.and_then(|f| f.slowest).unwrap_or(1.0);
         let bends = self.bends.as_deref().unwrap_or(&[]);
         let slid = bends.iter().map(|b| b.1).fold(1.0, f64::min);
+        let lowest = self
+            .art
+            .as_ref()
+            .map_or(0.0, |art| art.shape().lowest_cents());
+        let slid = slid * (f64::from(lowest) / 1200.0).exp2();
         let len = self.sample.left.len() as f64;
         let left = if self.step < 0.0 {
             self.origin + 1.0
@@ -241,7 +321,7 @@ impl Voice {
         };
         let slowest = automated.min(1.0) * slid;
         let most = (left / (self.step.abs() * slowest)).ceil() as usize;
-        self.frames = self.held.map_or(most, |held| held.min(most));
+        self.frames = self.cap().map_or(most, |cap| cap.min(most));
     }
 
     pub fn follows(&self) -> Option<Follow> {
@@ -268,7 +348,7 @@ impl Voice {
     /// Play at what automation and the slides make of the speed the voice
     /// was made with, from the next sample on.
     fn retune(&mut self) {
-        let step = self.made * self.automated * self.slid;
+        let step = self.made * self.automated * self.slid * self.enveloped;
         if step != self.step {
             self.origin += (self.done - self.since) as f64 * self.step;
             self.since = self.done;
@@ -307,10 +387,12 @@ impl Voice {
     /// Add the voice's next samples to a bus and move the voice on by as
     /// many. A voice that ends inside the bus leaves the rest alone.
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        let Some(bends) = self.bends.clone() else {
+        if self.bends.is_none() && self.art.is_none() {
             self.render_run(left, right);
             return;
-        };
+        }
+        let bends = self.bends.clone();
+        let bends = bends.as_deref().unwrap_or(&[]);
         let len = left.len().min(right.len());
         let mut at = 0;
         while at < len && !self.finished() {
@@ -322,8 +404,15 @@ impl Voice {
                 self.retune();
                 self.next_bend += 1;
             }
+            if self.art.as_ref().is_some_and(|art| art.next() <= self.done) {
+                self.tick();
+                if self.finished() {
+                    break;
+                }
+            }
             let next = bends.get(self.next_bend).map_or(usize::MAX, |b| b.0);
-            let run = (len - at).min(next - self.done);
+            let tick = self.art.as_ref().map_or(usize::MAX, Articulation::next);
+            let run = (len - at).min(next - self.done).min(tick - self.done);
             let before = self.done;
             self.render_run(&mut left[at..at + run], &mut right[at..at + run]);
             if self.done == before {
@@ -333,11 +422,33 @@ impl Voice {
         }
     }
 
+    /// A tick of the envelopes at the sample the voice is at: the gains,
+    /// the speed and the filter take what they make.
+    fn tick(&mut self) {
+        let Some(art) = &mut self.art else {
+            return;
+        };
+        let ticked = art.tick(self.done, self.held, self.gains);
+        if let Some(ends) = ticked.ends {
+            self.frames = self.frames.min(ends);
+        }
+        let ratio = match art.shape().pitches() {
+            true => (f64::from(art.cents) / 1200.0).exp2(),
+            false => 1.0,
+        };
+        if ratio != self.enveloped {
+            self.enveloped = ratio;
+            self.retune();
+        }
+        self.apply_filter();
+    }
+
     /// [`Voice::render`] at the speed the voice has now.
     fn render_run(&mut self, left: &mut [f32], right: &mut [f32]) {
         let count = (self.frames - self.done).min(left.len()).min(right.len());
         let len = self.sample.left.len() as f64;
         let pitched = self.pitched();
+        let art = self.art.as_ref().filter(|art| art.gains());
         let outs = left[..count].iter_mut().zip(&mut right[..count]);
         for (i, (l, r)) in outs.enumerate() {
             // A product and not a running sum, so the position does not
@@ -355,15 +466,22 @@ impl Voice {
                 Some(right) => read_hermite(right, pos),
                 None => a,
             };
+            let gains = match art {
+                Some(art) => {
+                    let [l, r] = art.gain_at(self.done + i);
+                    (l, r)
+                }
+                None => self.gains,
+            };
             if let Some(filter) = &mut self.filter {
                 let [a, b] = filter.run([a, b]);
                 let gain = filter.gain();
-                *l += a * (self.gains.0 * gain);
-                *r += b * (self.gains.1 * gain);
+                *l += a * (gains.0 * gain);
+                *r += b * (gains.1 * gain);
                 continue;
             }
-            *l += a * self.gains.0;
-            *r += b * self.gains.1;
+            *l += a * gains.0;
+            *r += b * gains.1;
         }
         self.done = (self.done + count).min(self.frames);
     }

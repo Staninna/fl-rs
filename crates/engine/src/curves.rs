@@ -27,6 +27,12 @@ pub trait Curves {
     }
     /// Left and right gain for a pan from -1 (left) to 1 (right).
     fn pan_gains(&self, pan: f32) -> (f32, f32);
+    /// [`Curves::pan_gains`] as a function that holds nothing, for a voice
+    /// that pans itself as it plays, where the curves are not at hand.
+    /// Curves that do not say pan linearly.
+    fn pan_law(&self) -> fn(f32) -> (f32, f32) {
+        dsp::pan_linear
+    }
     /// Gain for an insert volume, or for the main volume, as its 225 record
     /// stores it: 0..=16000, where 12800 is 0 dB.
     fn insert_gain(&self, raw: i32) -> f32;
@@ -364,6 +370,10 @@ impl Curves for FlExact {
 
     fn pan_gains(&self, pan: f32) -> (f32, f32) {
         compute_lr_vol(pan, 1.0)
+    }
+
+    fn pan_law(&self) -> fn(f32) -> (f32, f32) {
+        |pan| compute_lr_vol(pan, 1.0)
     }
 
     fn insert_gain(&self, raw: i32) -> f32 {

@@ -1431,11 +1431,13 @@ fn fl_s_curves_track_a_note_s_key_and_velocity_into_its_pan() {
     // The middle key at the middle velocity stays in the centre.
     let new = new_channel();
     assert_gains(&out, 0, circular(0.0, new));
-    // 1200 cents of the 6000 that a whole knob pans all the way for.
-    assert_gains(&out, 24_000, circular(0.2, new));
-    // Half the volume that the note is under the middle one, to the left.
+    // A whole key knob pans all the way for an octave (1 / 307200 of a
+    // knob step a cent, `FUN_00fea360`).
+    assert_gains(&out, 24_000, circular(1.0, new));
+    // A velocity knob half way up pans by the volume the note is under the
+    // middle one (a 128th of a knob step), to the left.
     let soft = (11f64.powf(0.64) - 1.0) / 10.0 * new;
-    assert_gains(&out, 48_000, circular((soft - new) / 2.0, soft));
+    assert_gains(&out, 48_000, circular(soft - new, soft));
     assert!(out.left[48_000] > out.right[48_000]);
 
     // The other curves leave tracking out.
@@ -4885,8 +4887,8 @@ fn clips_drive_an_insert_s_separation_and_eq() {
     assert_eq!(out.left[40_000], out.right[40_000]);
 }
 
-/// Channel 0 with the parts the engine leaves out in its events, at 150:
-/// an echo delay with this feedback, the five envelopes with the volume's
+/// Channel 0 with the parts of FL's channel in its events, at 150: an
+/// echo delay with this feedback, the five envelopes with the volume's
 /// switched on or not, key tracking of mod X by this much, and a 215 with
 /// this formant, in Stretch Pro when it is off its middle.
 fn with_parts(project: &mut Project, feedback: i32, volume: bool, mod_x: i32, formant: f64) {
@@ -4937,32 +4939,20 @@ fn the_parts_of_a_channel_the_engine_leaves_out_are_counted() {
     let out = render(&new, &dir);
     assert_eq!(out.unplayed_parts, engine::UnplayedParts::default());
 
-    // Each on, the sound is the same and each is counted once. Stretch
-    // Pro on the root key with no time, pitch or multiplier plays the
-    // sample as it is, and its formant is what is left out.
+    // Each on, the formant alone is counted: the envelopes, the tracking
+    // and the echo delay play, and the sound is not the same. Stretch Pro
+    // on the root key with no time, pitch or multiplier plays the sample
+    // as it is, and its formant is what is left out.
     let mut on = tone(BAR);
     with_parts(&mut on, 6400, true, 128, 0.75);
     let out = render(&on, &dir);
-    assert!(out.left == plain.left);
+    assert!(out.left != plain.left);
     let counted = engine::UnplayedParts {
-        envelopes: 1,
         time_stretch: 1,
-        tracking: 1,
-        echo_delay: 1,
         ts404: 0,
     };
     assert_eq!(out.unplayed_parts, counted);
-    assert_eq!(out.unplayed_parts.total(), 4);
-
-    // Tracking of mod X is played where a clip runs the filter.
-    let open = [Point::new(0.0, 1.0), Point::new(4.0, 1.0)];
-    let clip = add_automation(&mut on, &open, FULL);
-    bind(&mut on, clip, 2);
-    place(&mut on, clip, 0, BAR);
-    on.channels[0].levels = Some(filter_levels(256, 0, 0));
-    let out = render(&on, &dir);
-    assert_eq!(out.unplayed_parts.tracking, 0);
-    assert_eq!(out.unplayed_parts.echo_delay, 1);
+    assert_eq!(out.unplayed_parts.total(), 1);
 
     // A channel with no note that sounds is not counted: here its sample
     // is missing.
@@ -5058,4 +5048,67 @@ fn a_channel_s_time_stretch_plays_fl_s_lengths_and_pitches() {
     let mut up = stretched(BAR, -1, 0.0, 0, 0);
     up.patterns[0].notes[0].key = 72;
     near(sounds(&render(&up, &dir)), (48_000, 200.0));
+}
+
+#[test]
+fn an_echo_delay_plays_a_note_again_quieter_each_time() {
+    let dir = Dir::new("echo-delay");
+    let mut song = one_click();
+    // Half as loud each time, three times, three sixteenths apart: 72
+    // ticks of 250 samples.
+    song.channels[0].delay = Some(layout::Delay {
+        feedback: 6400,
+        pan: 6400,
+        pitch: 0,
+        echoes: 3,
+        time: 144,
+    });
+    song.channels[0].order.push(Placed {
+        pos: 150,
+        item: Item::Field(Id::Delay),
+    });
+    let out = render(&song, &dir);
+    assert_eq!(impulses(&out.left), [0, 18_000, 36_000, 54_000]);
+    let heard = [0, 18_000, 36_000, 54_000].map(|at| out.left[at]);
+    assert_eq!(heard, [1.0, 0.5, 0.25, 0.125]);
+    assert_eq!(out.left, out.right);
+    // A feedback of 0 echoes nothing.
+    song.channels[0].delay.as_mut().unwrap().feedback = 0;
+    assert_eq!(impulses(&render(&song, &dir).left), [0]);
+}
+
+#[test]
+fn a_volume_envelope_shapes_a_note_and_rings_past_its_end() {
+    let dir = Dir::new("volume-envelope");
+    dir.tone(2 * 96_000);
+    let plain = render(&tone(BEAT), &dir);
+    // The note is cut at its end, and the render with it.
+    assert_eq!((plain.left.len(), plain.left[23_999]), (24_000, 1.0));
+    let mut song = tone(BEAT);
+    // At once to the top and down to half, then a release of 10 ticks.
+    let mut records = vec![layout::EnvelopeLfo::from_bytes(&[0; 68]).unwrap(); 5];
+    let volume = &mut records[1];
+    (volume.flags, volume.enabled) = (4, 1);
+    (volume.attack, volume.hold, volume.decay) = (100, 100, 100);
+    (volume.sustain, volume.release) = (64, 5_648);
+    song.channels[0].envelopes = records;
+    for _ in 0..5 {
+        song.channels[0].order.push(Placed {
+            pos: 150,
+            item: Item::Field(Id::EnvelopeLFO),
+        });
+    }
+    let out = render(&song, &dir);
+    // Half as loud for the note's length, at once.
+    assert!((0..24_000).all(|at| out.left[at] == 0.5 * plain.left[at]));
+    // Then the release takes it down over the ticks after the note off,
+    // and the voice ends at the end of the tick that gets it there.
+    assert!(out.left[24_100] > 0.0 && out.left[24_100] < 0.5);
+    let last = out.left.iter().rposition(|v| *v != 0.0).unwrap() + 1;
+    assert!(
+        (24_000 + 4 * 250..24_000 + 8 * 250).contains(&last),
+        "{last}"
+    );
+    assert_eq!(last % 250, 0, "{last}");
+    assert!(out.left[24_000..last].windows(2).all(|w| w[1] <= w[0]));
 }

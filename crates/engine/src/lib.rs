@@ -84,11 +84,13 @@
 //! channel's time stretch plays at FL's lengths, speeds and pitches, with a
 //! WSOLA in place of élastique (`docs/rec-channel.md`, "Time stretch"); an
 //! audio clip item's own stretch is not played and is counted in
-//! [`Rendered::unsupported_stretch`]. Nor are a channel's instrument
-//! envelopes and LFOs, Stretch Pro's formant shift, its tracking of mod X
-//! and Y on a sampler whose filter does not run, its echo delay, or a TS404
-//! channel: [`Rendered::unplayed_parts`] counts the channels that turn each
-//! on.
+//! [`Rendered::unsupported_stretch`]. Nor are Stretch Pro's formant shift
+//! or a TS404 channel: [`Rendered::unplayed_parts`] counts the channels
+//! that turn each on. A sampler's and an audio clip's instrument envelopes
+//! and LFOs move its voices' pan, volume, filter and pitch a tick at a
+//! time, and its volume envelope's release sounds past the note off;
+//! tracking of mod X and Y runs the channel's filter; and an echo delay
+//! plays each note again as notes of their own (`docs/rec-channel.md`).
 //!
 //! An effect slot plays its plugin when the [`plugins`] crate has it, which
 //! [`Rendered::hosted_slots`] counts. Any other slot passes its input
@@ -124,11 +126,13 @@ pub mod automation;
 mod channel_filter;
 mod clock;
 mod curves;
+mod echo;
 mod engine;
 mod eq;
 mod formula;
 mod generator;
 mod graph;
+mod instrument_env;
 mod levels;
 mod live;
 mod mix;
