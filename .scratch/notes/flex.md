@@ -6,6 +6,14 @@ exact XOR mask, FLAC via symphonia), `flex_preset.rs` (v1 preset reader to
 the end of the layers), `flex_waves.rs` (the 28 band-limited cycles, 24 of
 them read from the installed `engine_x64.dll`). Format, mask derivation and
 voice are in `docs/plugins/flex.md` sections 3 to 7, with addresses.
+The master chain's delay runs as `delay_3.rs`.
+
+Corpus render after (commit 4b4e112): 223 of 227 generator channels with a
+note hosted, 4 silent (Fruity Voltage Controller, PoiZone, Sawer,
+SimSynth); FLEX is off the silent list. 12 FLEX channels play; the render
+test `System/Render tests/FLEX.flp` names the pack "Synthesizer Science",
+which FL 26.1.7 does not install, and stays silent. The template "Basic with
+limiter" names a v2 pack (Core 808s). No FLEX project peaks above 1.
 
 ## Tools
 
