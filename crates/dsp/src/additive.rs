@@ -494,6 +494,14 @@ impl ShapeTable {
 
     /// The curve at `x * scale + offset`, between the two points either
     /// side, and the first or the last point outside it.
+    ///
+    /// The whole number `i` is held against the last point as a float,
+    /// which is exact for any curve under 2^24 points, and a float that
+    /// gets past that check is a small whole number or a NaN (which reads
+    /// point 0, as a cast to `usize` does), so it goes to an index by way
+    /// of `i32`, one instruction where `usize` takes a dozen. Plugins read
+    /// a curve per partial, so it is inlined into them.
+    #[inline(always)]
     pub fn clamped(&self, x: f32, scale: f32, offset: f32) -> f32 {
         let at = x * scale + offset;
         let i = crate::round::half_away(at - 0.5);
@@ -501,10 +509,10 @@ impl ShapeTable {
             return self.points[0];
         }
         let last = self.len() - 1;
-        let i = i as usize;
-        if i >= last {
+        if i >= last as f32 {
             return self.points[last];
         }
+        let i = i as i32 as usize;
         let frac = at - i as f32;
         self.points[i] * (1.0 - frac) + self.points[i + 1] * frac
     }
@@ -523,6 +531,52 @@ impl ShapeTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`ShapeTable::clamped`] as it was, with the index by way of `usize`.
+    fn clamped_by_usize(table: &ShapeTable, x: f32, scale: f32, offset: f32) -> f32 {
+        let at = x * scale + offset;
+        let i = crate::round::half_away(at - 0.5);
+        if i < 0.0 {
+            return table.points[0];
+        }
+        let last = table.len() - 1;
+        let i = i as usize;
+        if i >= last {
+            return table.points[last];
+        }
+        let frac = at - i as f32;
+        table.points[i] * (1.0 - frac) + table.points[i + 1] * frac
+    }
+
+    /// Every `f32` there is as the place, on curves of 2, 3 and 2160
+    /// points: `cargo test --release -p dsp -- --ignored every_place`.
+    #[test]
+    #[ignore]
+    fn a_clamped_read_is_the_same_as_by_usize_at_every_place() {
+        let tables =
+            [2, 3, 2160].map(|len| ShapeTable::new(len, 0.5, 1.0, 1.0, |i| (i as f64).sin()));
+        std::thread::scope(|s| {
+            for part in 0..16u32 {
+                let tables = &tables;
+                s.spawn(move || {
+                    let start = part << 28;
+                    for bits in start..=start | 0x0fff_ffff {
+                        let x = f32::from_bits(bits);
+                        for table in tables {
+                            let (got, want) = (
+                                table.clamped(x, 1.0, 0.0),
+                                clamped_by_usize(table, x, 1.0, 0.0),
+                            );
+                            assert!(
+                                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                                "{bits:#x}"
+                            );
+                        }
+                    }
+                });
+            }
+        });
+    }
 
     #[test]
     fn a_partial_is_a_sine_at_its_phase() {
