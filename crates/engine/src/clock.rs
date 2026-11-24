@@ -76,6 +76,16 @@ impl Clock {
         ((cell * BLOCK) as f64 + (tick - start) * per_tick).round() as usize
     }
 
+    /// The output samples a tick lasts at `tick`: the tempo there.
+    pub fn per_tick(&self, tick: u64) -> f64 {
+        let tick = tick as f64;
+        let started = self.cells.partition_point(|(start, _)| *start <= tick);
+        match started.checked_sub(1) {
+            Some(cell) => self.cells[cell].1,
+            None => self.samples_per_tick,
+        }
+    }
+
     /// The tick nearest to an output sample.
     pub fn tick(&self, sample: usize) -> u64 {
         self.tick_at(sample).round() as u64
