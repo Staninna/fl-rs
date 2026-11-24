@@ -34,6 +34,7 @@ pub mod delay_3;
 pub mod delay_bank;
 pub mod directwave;
 mod directwave_fx;
+pub mod distructor;
 pub mod drumaxx;
 pub mod drumpad;
 mod drumpad_voice;
@@ -64,11 +65,13 @@ pub mod frequency_splitter;
 pub mod fruit_kick;
 pub mod fruity_slicer;
 pub mod fruity_slicer_2;
+pub mod fruity_vocoder;
 mod generator;
 pub mod gms;
 mod gms_fx;
 pub mod granulizer;
 pub mod gross_beat;
+pub mod hardcore;
 pub mod harmless;
 pub mod harmor;
 mod harmor_art;
@@ -424,6 +427,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Effect>> {
         Some(Box::new(delay_2::Delay2::default()))
     } else if is(delay_3::NAME) {
         Some(Box::new(delay_3::Delay3::default()))
+    } else if is(distructor::NAME) {
+        Some(Box::new(distructor::Distructor::default()))
+    } else if is(hardcore::NAME) {
+        Some(Box::new(hardcore::Hardcore::default()))
+    } else if is(fruity_vocoder::NAME) {
+        Some(Box::new(fruity_vocoder::FruityVocoder::default()))
     } else if is(delay_bank::NAME) {
         Some(Box::new(delay_bank::DelayBank::default()))
     } else if is(edison::NAME) {
@@ -885,6 +894,9 @@ mod tests {
             "fruity wrapper",
             // Counted in their own tests.
             "control surface",
+            "distructor",
+            "fruity vocoder",
+            "hardcore",
             "fruity formula controller",
             "fruity x-y controller",
             // Counted in `zgameeditor::tests`.

@@ -448,6 +448,13 @@ fn wavpack_blocks(bytes: &[u8]) -> &[u8] {
     &bytes[..at]
 }
 
+/// The two sides of an impulse in a WavPack or WAV file, a mono one made
+/// two, for another plugin that convolves with FL's files (Distructor's
+/// speaker module).
+pub(crate) fn decode_impulse(bytes: &[u8]) -> Option<(Vec<f32>, Vec<f32>)> {
+    decode(bytes).map(|impulse| (impulse.left, impulse.right))
+}
+
 /// Decode a WavPack file or a WAV file of plain samples. `None` for
 /// anything else: a hybrid WavPack file, or a WAV file with a codec in it.
 fn decode(bytes: &[u8]) -> Option<Impulse> {
